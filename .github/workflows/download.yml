@@ -43,7 +43,7 @@ on:
         default: "none"
         type: string
       sponsorblock:
-        description: "Extended options JSON or boolean"
+        description: "Extended options JSON"
         required: false
         default: "false"
         type: string
@@ -76,13 +76,17 @@ jobs:
           sudo chmod a+rx /usr/local/bin/yt-dlp
           sudo /usr/local/bin/yt-dlp --update-to nightly || true
 
-      - name: Execute Smart Fallback Engine v4 and Publish
+      - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
         env:
           GH_TOKEN: ${{ github.token }}
           COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
         run: |
           python3 - << 'EOF'
-          import os, sys, re, json, time, base64, shutil, zipfile, subprocess, urllib.parse
+          import os, sys, re, json, time, base64, shutil, zipfile, subprocess, urllib.parse, smtplib
+          from email.message import EmailMessage
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -109,6 +113,8 @@ jobs:
           geo_country = "IL"
           split_chapters = False
           normalize_audio = False
+          speed_factor = "1"
+          email_to = ""
 
           if raw_sb.startswith("{"):
               try:
@@ -117,6 +123,8 @@ jobs:
                   geo_country = str(ext_opts.get("geo", "IL")).strip() or "IL"
                   split_chapters = bool(ext_opts.get("chapters", False))
                   normalize_audio = bool(ext_opts.get("norm", False))
+                  speed_factor = str(ext_opts.get("speed", "1")).strip() or "1"
+                  email_to = str(ext_opts.get("email", "")).strip()
               except Exception:
                   pass
           else:
@@ -175,8 +183,15 @@ jobs:
                   extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
               if split_chapters:
                   extra_args += ["--split-chapters", "-o", "chapter:/tmp/out/%(title).100B - %(section_number)02d %(section_title).80B [%(id)s].%(ext)s"]
+
+              af_filters = []
               if normalize_audio:
-                  extra_args += ["--ppa", "FFmpeg:-af loudnorm=I=-16:TP=-1.5:LRA=11"]
+                  af_filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+              if speed_factor in ("1.25", "1.5", "1.75", "2.0", "2"):
+                  af_filters.append("atempo=" + speed_factor)
+              if af_filters:
+                  extra_args += ["--ppa", "FFmpeg:-af " + ",".join(af_filters)]
+
               if subtitles == "embed":
                   extra_args += ["--write-subs", "--write-auto-subs", "--sub-langs", "he,iw,en.*", "--embed-subs"]
               elif subtitles == "files":
@@ -242,15 +257,58 @@ jobs:
               repo = os.environ.get("GITHUB_REPOSITORY", "")
               sha = os.environ.get("GITHUB_SHA", "")
               tag = "dl-" + req_id
+
+              # 1. Create Direct API Git Blobs (100% served via api.github.com without external redirects)
+              blob_shas = []
+              raw_bytes = zip_path.read_bytes()
+              if len(raw_bytes) <= 85 * 1024 * 1024:
+                  chunk_size = 14 * 1024 * 1024
+                  for offset in range(0, len(raw_bytes), chunk_size):
+                      chunk = raw_bytes[offset:offset + chunk_size]
+                      b64_payload = json.dumps({"content": base64.b64encode(chunk).decode("ascii"), "encoding": "base64"})
+                      p_blob = subprocess.run(
+                          ["gh", "api", "repos/" + repo + "/git/blobs", "-q", ".sha", "--input", "-"],
+                          input=b64_payload, text=True, capture_output=True, check=False
+                      )
+                      b_sha = p_blob.stdout.strip()
+                      if p_blob.returncode == 0 and b_sha:
+                          blob_shas.append(b_sha)
+
+              notes_payload = json.dumps({"v": 5, "size": len(raw_bytes), "blobs": blob_shas})
+
               for attempt in range(1, 4):
                   r = subprocess.run([
                       "gh", "release", "create", tag, str(zip_path),
                       "--repo", repo, "--target", sha, "--title", tag,
-                      "--notes", "Automated Media Package v4", "--prerelease"
+                      "--notes", notes_payload, "--prerelease"
                   ], check=False)
                   if r.returncode == 0:
                       break
                   time.sleep(2 * attempt)
+
+              # 2. Optional Email Delivery (sends file directly to user's email inbox, auto-splitting >19MB)
+              smtp_user = os.environ.get("SMTP_USER", "").strip()
+              smtp_pass = os.environ.get("SMTP_PASS", "").strip()
+              recipient = email_to or os.environ.get("SMTP_TO", "").strip() or smtp_user
+              if smtp_user and smtp_pass and recipient and "@" in recipient:
+                  try:
+                      max_part = 19 * 1024 * 1024
+                      parts = [raw_bytes[i:i + max_part] for i in range(0, len(raw_bytes), max_part)]
+                      total_parts = len(parts)
+                      with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+                          server.login(smtp_user, smtp_pass)
+                          for idx, part_bytes in enumerate(parts, 1):
+                              msg = EmailMessage()
+                              msg["Subject"] = f"YouTube Cloud File ({idx}/{total_parts}) - {req_id[:8]}"
+                              msg["From"] = smtp_user
+                              msg["To"] = recipient
+                              msg.set_content(f"הקובץ המבוקש מצורף להודעה זו (חלק {idx} מתוך {total_parts}).")
+                              fname = f"dl-{req_id}.zip" if total_parts == 1 else f"dl-{req_id}.part{idx:02d}.zip"
+                              msg.add_attachment(part_bytes, maintype="application", subtype="zip", filename=fname)
+                              server.send_message(msg)
+                      print("Email delivery completed successfully to " + recipient, flush=True)
+                  except Exception as e:
+                      print("::warning::Email delivery failed: " + str(e), flush=True)
           finally:
               cookie_file.unlink(missing_ok=True)
               urls_file.unlink(missing_ok=True)
