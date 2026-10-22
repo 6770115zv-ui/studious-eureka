@@ -1,0 +1,54 @@
+name: cleanup
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: "Optional specific release tag to delete (e.g. dl-xxxx)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clean targeted or all releases and workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          if [ -n "$TARGET_TAG" ]; then
+            echo "Deleting specific release tag: $TARGET_TAG"
+            gh release delete "$TARGET_TAG" --repo "$REPO" --cleanup-tag --yes || true
+            exit 0
+          fi
+
+          # 1. מחיקת כל ה-Releases והתגיות במאגר
+          gh release list --repo "$REPO" --limit 100 --json tagName -q '.[].tagName' | while read -r tag; do
+            if [ -n "$tag" ]; then
+              gh release delete "$tag" --repo "$REPO" --cleanup-tag --yes || true
+            fi
+          done
+
+          # 2. מחיקת כל הריצות הקיימות במאגר (למעט הריצה הנוכחית)
+          for page in 1 2 3 4 5; do
+            RUN_IDS=$(gh api "repos/$REPO/actions/runs?per_page=100" -q ".workflow_runs[] | select(.id != $CURRENT_RUN_ID) | .id")
+            if [ -z "$RUN_IDS" ]; then
+              break
+            fi
+            echo "$RUN_IDS" | while read -r run_id; do
+              if [ -n "$run_id" ]; then
+                gh api -X DELETE "repos/$REPO/actions/runs/$run_id" || true
+              fi
+            done
+          done

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <title>YouTube Cloud Ultra v4.0 — מרכז הורדות ענן</title>
+  <link rel="stylesheet" href="shared/theme.css"/>
+</head>
+<body>
+  <main class="wrap">
+    <header class="hd">
+      <div class="hd__logo">⬇</div>
+      <div style="flex:1;">
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v4.0</h1>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
+          <span class="dot" id="conn-dot"></span>
+          <span class="small muted" id="conn-text">בודק חיבור...</span>
+        </div>
+      </div>
+      <button class="btn" id="cleanCloudBtn" type="button" title="מחק מיד את כל ה-Releases והריצות ב-GitHub">🧹 ניקוי ענן</button>
+      <button class="btn" id="settingsBtn" type="button">⚙ הגדרות</button>
+    </header>
+
+    <section class="card">
+      <label class="small muted" style="font-weight:600;">קישור למדיה, אוסף או רשימת קישורים (מופרדים ברווח/שורה):</label>
+      <input id="urlInput" class="input" dir="ltr" placeholder="https://www.youtube.com/watch?v=..."/>
+
+      <div id="videoPreview" class="preview-box" style="display:none;">
+        <img id="previewThumb" src="" alt="Thumbnail"/>
+        <div style="flex:1;overflow:hidden;">
+          <div id="previewTitle" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+          <div id="previewAuthor" class="small muted"></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label class="small muted">איכות ופורמט:</label>
+          <select id="formatSelect" class="input"></select>
+        </div>
+        <div>
+          <label class="small muted">כתוביות (עברית / אנגלית):</label>
+          <select id="subsSelect" class="input">
+            <option value="none">ללא כתוביות</option>
+            <option value="embed">הטמע כתוביות בתוך הווידאו</option>
+            <option value="files">הורד כקובץ SRT נפרד</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label class="small muted">חיתוך: זמן התחלה (אופציונלי)</label>
+          <input id="clipStart" class="input" dir="ltr" placeholder="00:01:15"/>
+        </div>
+        <div>
+          <label class="small muted">חיתוך: זמן סיום (אופציונלי)</label>
+          <input id="clipEnd" class="input" dir="ltr" placeholder="00:03:45"/>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label class="small muted">אזור עקיפת חסימה גיאוגרפית (Geo-Bypass):</label>
+          <select id="geoSelect" class="input">
+            <option value="IL">ישראל + גיבוי עולמי אוטומטי (מומלץ)</option>
+            <option value="US">ארצות הברית (US)</option>
+            <option value="GB">בריטניה / אירופה (GB)</option>
+            <option value="DE">גרמניה (DE)</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;align-content:end;padding-bottom:2px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
+            <input type="checkbox" id="collectionToggle" class="switch"/>
+            <span>אוסף שלם (ZIP)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
+            <input type="checkbox" id="sponsorToggle" class="switch"/>
+            <span>SponsorBlock</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
+            <input type="checkbox" id="chaptersToggle" class="switch"/>
+            <span>פיצול פרקים</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
+            <input type="checkbox" id="normToggle" class="switch"/>
+            <span>נרמול שמע</span>
+          </label>
+        </div>
+      </div>
+
+      <button class="btn btn--primary btn--block" id="downloadBtn" type="button">🚀 התחל הורדה בענן GitHub</button>
+      <p id="hint" class="small muted" style="margin:0;text-align:center;"></p>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+        <div>
+          <h2 style="margin:0;font-size:15px;">🎯 מנוע המלצות קשיח (לפי היסטוריית ההורדות שלך)</h2>
+          <p class="small muted" style="margin:2px 0 0;">מוצא במקביל דרך GitHub תוצאות פופולריות עם התאמה קשיחה לנושא שבחרת ואפשרות הורדה קבוצתית</p>
+        </div>
+      </div>
+
+      <div id="topicChips" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+
+      <div class="grid-2">
+        <div>
+          <label class="small muted">נושא קשיח לחיפוש (למשל: הדרכת פייתון או חומרת מחשבים):</label>
+          <input id="recQueryInput" class="input" placeholder="הקלד נושא מדויק או לחץ על תגית מההיסטוריה למעלה..."/>
+        </div>
+        <div>
+          <label class="small muted">סינון פופולריות מינימלי (צפיות):</label>
+          <select id="recMinViewsSelect" class="input">
+            <option value="50000">מעל 50,000 צפיות</option>
+            <option value="100000">מעל 100,000 צפיות</option>
+            <option value="500000" selected>מעל 500,000 צפיות (פופולרי מאוד)</option>
+            <option value="1000000">מעל 1,000,000 צפיות (מגה-פופולרי בלבד)</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 חפש המלצות פופולריות בענן</button>
+        <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
+        <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
+      </div>
+      <div id="recStatusText" class="small muted"></div>
+      <div id="recList" style="display:flex;flex-direction:column;gap:10px;"></div>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (מעקב שלבים חי)</h2>
+        <button class="btn small" id="clearJobsBtn" type="button">נקה שהושלמו</button>
+      </div>
+      <div id="jobList" style="display:flex;flex-direction:column;gap:10px;"></div>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+        <h2 style="margin:0;font-size:15px;">📜 ארכיון והיסטוריית הורדות</h2>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input id="histSearchInput" class="input small" placeholder="סנן היסטוריה..." style="width:180px;padding:6px 10px;"/>
+          <button class="btn btn--danger small" id="clearHistBtn" type="button">מחק היסטוריה</button>
+        </div>
+      </div>
+      <div id="historyList" style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto;"></div>
+    </section>
+  </main>
+  <script src="shared/common.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

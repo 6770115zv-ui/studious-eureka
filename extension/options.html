@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <title>YouTube Cloud Ultra — הגדרות מערכת</title>
+  <link rel="stylesheet" href="shared/theme.css"/>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h2 style="margin:0;font-size:16px;">בדיקת חיבור ועדכון אוטומטי</h2>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span class="dot" id="conn-dot"></span>
+        <span id="conn-text" style="flex:1;">טרם נבדק</span>
+        <button class="btn" id="recheck" type="button">בדוק חיבור ל-GitHub</button>
+        <button class="btn" id="selfUpdateBtn" type="button">🔄 עדכן תוסף מ-GitHub</button>
+      </div>
+    </section>
+    <section class="card">
+      <h2 style="margin:0;font-size:16px;">הגדרות מאגר GitHub והצפנת עוגיות</h2>
+      <div class="grid-2">
+        <div>
+          <label class="small muted">שם משתמש (owner)</label>
+          <input id="owner" class="input" dir="ltr" placeholder="your-github-username"/>
+        </div>
+        <div>
+          <label class="small muted">שם מאגר (repo)</label>
+          <input id="repo" class="input" dir="ltr" placeholder="yt-cloud-repo"/>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div>
+          <label class="small muted">קובץ Workflow</label>
+          <input id="workflow" class="input" dir="ltr" placeholder="download.yml"/>
+        </div>
+        <div>
+          <label class="small muted">ענף (ref)</label>
+          <input id="ref" class="input" dir="ltr" placeholder="main"/>
+        </div>
+      </div>
+      <label class="small muted">טוקן GitHub (Fine-grained או Classic עם הרשאות Actions + Contents)</label>
+      <input id="token" class="input" type="password" dir="ltr" placeholder="github_pat_..."/>
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <label class="small muted">מפתח הצפנה COOKIE_KEY (64 תווי hex עבור AES-256-GCM)</label>
+        <button class="btn small" id="genKeyBtn" type="button">🎲 צור מפתח אקראי חדש</button>
+      </div>
+      <input id="cookieKey" class="input" dir="ltr" placeholder="64 hex characters..."/>
+      <div class="grid-2">
+        <div>
+          <label class="small muted">Update Owner (אופציונלי)</label>
+          <input id="updateOwner" class="input" dir="ltr"/>
+        </div>
+        <div>
+          <label class="small muted">Update Repo (אופציונלי)</label>
+          <input id="updateRepo" class="input" dir="ltr"/>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:8px;">
+        <button class="btn btn--primary" id="save" type="button">💾 שמור הגדרות</button>
+        <button class="btn btn--danger" id="reset" type="button">אפס לברירת מחדל</button>
+      </div>
+      <p id="msg" class="small"></p>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

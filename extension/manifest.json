@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Cloud Ultra",
+  "version": "3.0.0",
+  "description": "מערכת הורדת מדיה מתקדמת דרך GitHub Actions (4K, MP3/FLAC/OPUS, Geo-Bypass, חיתוך זמנים, כתוביות ו-SponsorBlock)",
+  "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
+  "action": { "default_title": "YouTube Cloud Ultra" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["shared/common.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "permissions": ["storage", "cookies", "downloads", "notifications", "offscreen", "alarms", "nativeMessaging"],
+  "host_permissions": [
+    "https://*.youtube.com/*", "https://*.google.com/*", "https://api.github.com/*",
+    "https://github.com/*", "https://*.githubusercontent.com/*", "https://*.blob.core.windows.net/*"
+  ]
+}

@@ -1,0 +1,263 @@
+name: download
+run-name: dl-${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: "Unique request ID"
+        required: true
+        type: string
+      url:
+        description: "Target URL"
+        required: true
+        type: string
+      quality:
+        description: "Quality preset"
+        required: false
+        default: "best"
+        type: string
+      mode:
+        description: "Download mode (video, collection, list)"
+        required: false
+        default: "video"
+        type: string
+      urls:
+        description: "JSON list of URLs for list mode"
+        required: false
+        default: ""
+        type: string
+      clip_start:
+        description: "Optional clip start time"
+        required: false
+        default: ""
+        type: string
+      clip_end:
+        description: "Optional clip end time"
+        required: false
+        default: ""
+        type: string
+      subtitles:
+        description: "Subtitle mode (none, embed, files)"
+        required: false
+        default: "none"
+        type: string
+      sponsorblock:
+        description: "Extended options JSON or boolean"
+        required: false
+        default: "false"
+        type: string
+      cookies_enc:
+        description: "AES-256-GCM encrypted cookies"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install yt-dlp + ffmpeg + curl_cffi + atomicparsley
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends ffmpeg zip python3-cryptography python3-pip atomicparsley
+          python3 -m pip install --break-system-packages -q -U "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider
+          sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+          sudo /usr/local/bin/yt-dlp --update-to nightly || true
+
+      - name: Execute Smart Fallback Engine v4 and Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+        run: |
+          python3 - << 'EOF'
+          import os, sys, re, json, time, base64, shutil, zipfile, subprocess, urllib.parse
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+          ev_path = os.environ.get("GITHUB_EVENT_PATH", "")
+          ev = json.load(open(ev_path, "r", encoding="utf-8")) if ev_path and os.path.exists(ev_path) else {}
+          inp = ev.get("inputs") or {}
+
+          req_id = str(inp.get("request_id", "")).strip()
+          if not re.match(r"^[a-zA-Z0-9_-]+\Z", req_id):
+              raise SystemExit("::error::Invalid request ID")
+
+          target_url = str(inp.get("url", "")).strip()
+          quality = str(inp.get("quality", "best")).strip() or "best"
+          mode = str(inp.get("mode", "video")).strip() or "video"
+          urls_json = str(inp.get("urls", "")).strip()
+          clip_start = str(inp.get("clip_start", "")).strip()
+          clip_end = str(inp.get("clip_end", "")).strip()
+          subtitles = str(inp.get("subtitles", "none")).strip()
+          raw_sb = str(inp.get("sponsorblock", "false")).strip()
+          cookies_enc = str(inp.get("cookies_enc", "")).strip()
+          hex_key = os.environ.get("COOKIE_KEY", "").strip()
+
+          sponsorblock = False
+          geo_country = "IL"
+          split_chapters = False
+          normalize_audio = False
+
+          if raw_sb.startswith("{"):
+              try:
+                  ext_opts = json.loads(raw_sb)
+                  sponsorblock = bool(ext_opts.get("sb", False))
+                  geo_country = str(ext_opts.get("geo", "IL")).strip() or "IL"
+                  split_chapters = bool(ext_opts.get("chapters", False))
+                  normalize_audio = bool(ext_opts.get("norm", False))
+              except Exception:
+                  pass
+          else:
+              sponsorblock = (raw_sb.lower() == "true")
+
+          out_dir = Path("/tmp/out")
+          pkg_dir = Path("/tmp/pkg")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          pkg_dir.mkdir(parents=True, exist_ok=True)
+          cookie_file = Path("/tmp/cookies.txt")
+          urls_file = Path("/tmp/urls.txt")
+
+          def clean_url(u):
+              try:
+                  p = urllib.parse.urlsplit(u)
+                  blocked_keys = {"feature", "ab_channel", "pp", "si"}
+                  q = [(k, v) for k, v in urllib.parse.parse_qsl(p.query) if k not in blocked_keys]
+                  return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, urllib.parse.urlencode(q), p.fragment))
+              except Exception:
+                  return u
+
+          if mode == "video" and target_url:
+              target_url = clean_url(target_url)
+
+          try:
+              if cookies_enc:
+                  if len(hex_key) != 64:
+                      raise SystemExit("::error::COOKIE_KEY missing or invalid in repository secrets")
+                  raw = base64.b64decode(cookies_enc)
+                  plain = AESGCM(bytes.fromhex(hex_key)).decrypt(raw[:12], raw[12:], None)
+                  cookie_file.write_bytes(plain)
+
+              fmt_map = {
+                  "audio": ["-x", "--audio-format", "mp3", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"],
+                  "audio_flac": ["-x", "--audio-format", "flac", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"],
+                  "audio_wav": ["-x", "--audio-format", "wav", "--audio-quality", "0"],
+                  "audio_m4a": ["-x", "--audio-format", "m4a", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"],
+                  "audio_opus": ["-x", "--audio-format", "opus", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"],
+                  "2160": ["-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best", "--merge-output-format", "mp4", "--embed-metadata"],
+                  "1440": ["-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best", "--merge-output-format", "mp4", "--embed-metadata"],
+                  "1080": ["-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best", "--merge-output-format", "mp4", "--embed-metadata"],
+                  "720": ["-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best", "--merge-output-format", "mp4", "--embed-metadata"],
+                  "480": ["-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/best", "--merge-output-format", "mp4", "--embed-metadata"],
+                  "360": ["-f", "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best[height<=360]/best", "--merge-output-format", "mp4", "--embed-metadata"],
+              }
+              fmt_args = fmt_map.get(quality, ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best", "--merge-output-format", "mp4", "--embed-metadata"])
+
+              extra_args = ["--geo-bypass"]
+              if clip_start or clip_end:
+                  s_t = clip_start or "00:00:00"
+                  e_t = clip_end or "inf"
+                  extra_args += ["--download-sections", "*" + s_t + "-" + e_t, "--force-keyframes-at-cuts"]
+              if sponsorblock:
+                  extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
+              if split_chapters:
+                  extra_args += ["--split-chapters", "-o", "chapter:/tmp/out/%(title).100B - %(section_number)02d %(section_title).80B [%(id)s].%(ext)s"]
+              if normalize_audio:
+                  extra_args += ["--ppa", "FFmpeg:-af loudnorm=I=-16:TP=-1.5:LRA=11"]
+              if subtitles == "embed":
+                  extra_args += ["--write-subs", "--write-auto-subs", "--sub-langs", "he,iw,en.*", "--embed-subs"]
+              elif subtitles == "files":
+                  extra_args += ["--write-subs", "--write-auto-subs", "--sub-langs", "he,iw,en.*", "--convert-subs", "srt"]
+
+              def has_valid_files():
+                  for p in out_dir.rglob("*"):
+                      if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0:
+                          return True
+                  return False
+
+              def clear_out():
+                  for item in out_dir.iterdir():
+                      if item.is_dir():
+                          shutil.rmtree(item, ignore_errors=True)
+                      else:
+                          item.unlink(missing_ok=True)
+
+              def run_attempt(label, client_args, custom_fmt=None):
+                  if has_valid_files():
+                      return True
+                  clear_out()
+                  print("=== " + label + " ===", flush=True)
+                  base_cmd = ["yt-dlp"] + client_args + (custom_fmt or fmt_args) + extra_args + [
+                      "--ffmpeg-location", "/usr/bin/ffmpeg",
+                      "--concurrent-fragments", "8",
+                      "--retries", "10",
+                      "--fragment-retries", "10"
+                  ]
+                  if mode == "list" and urls_json:
+                      u_list = [clean_url(x) for x in json.loads(urls_json) if x]
+                      urls_file.write_text("\n".join(u_list), encoding="utf-8")
+                      cmd = base_cmd + ["--ignore-errors", "--no-playlist", "-a", str(urls_file), "-o", "/tmp/out/%(title).150B [%(id)s].%(ext)s"]
+                  elif mode == "collection":
+                      cmd = base_cmd + ["--ignore-errors", "--yes-playlist", "--playlist-end", "200", "-o", "/tmp/out/%(playlist_title,channel)s/%(title).150B [%(id)s].%(ext)s", target_url]
+                  else:
+                      cmd = base_cmd + ["--no-playlist", "-o", "/tmp/out/%(title).150B [%(id)s].%(ext)s", target_url]
+                  subprocess.run(cmd, check=False)
+                  return has_valid_files()
+
+              has_ck = cookie_file.exists()
+              run_attempt("Attempt 1: Geo-Bypass (" + geo_country + ") + android_vr,ios,tv", ["--xff", geo_country, "--extractor-args", "youtube:player_client=android_vr,ios,tv"])
+              if has_ck:
+                  run_attempt("Attempt 2: Cookies + Geo-Bypass (" + geo_country + ") + web,mweb,tv", ["--cookies", str(cookie_file), "--xff", geo_country, "--extractor-args", "youtube:player_client=web,mweb,tv"])
+              run_attempt("Attempt 3: Geo-Bypass (IL) + mweb,ios,android_vr", ["--xff", "IL", "--extractor-args", "youtube:player_client=mweb,ios,android_vr"])
+              run_attempt("Attempt 4: Geo-Bypass (GB/EU) + android_vr,ios,mweb", ["--xff", "GB", "--extractor-args", "youtube:player_client=android_vr,ios,mweb"])
+              run_attempt("Attempt 5: Direct US + android_vr,ios,tv_embedded", ["--extractor-args", "youtube:player_client=android_vr,ios,tv_embedded"])
+              run_attempt("Attempt 6: Impersonate Chrome + Geo-Bypass (" + geo_country + ")", ["--xff", geo_country, "--impersonate", "chrome", "--extractor-args", "youtube:player_client=mweb,ios,android_vr"])
+              if has_ck:
+                  run_attempt("Attempt 7: Cookies + web_creator,ios,mweb", ["--cookies", str(cookie_file), "--xff", geo_country, "--extractor-args", "youtube:player_client=web_creator,ios,mweb"])
+              if not quality.startswith("audio"):
+                  run_attempt("Attempt 8: Universal format fallback", ["--xff", geo_country], ["-f", "bv*+ba/b", "--merge-output-format", "mp4", "--embed-metadata"])
+
+              if not has_valid_files():
+                  raise SystemExit("::error::לא ירדו קבצים מהקישור")
+
+              zip_path = pkg_dir / ("dl-" + req_id + ".zip")
+              with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+                  for fpath in out_dir.rglob("*"):
+                      if fpath.is_file() and not fpath.name.endswith((".part", ".ytdl")):
+                          zf.write(fpath, fpath.relative_to(out_dir))
+
+              repo = os.environ.get("GITHUB_REPOSITORY", "")
+              sha = os.environ.get("GITHUB_SHA", "")
+              tag = "dl-" + req_id
+              for attempt in range(1, 4):
+                  r = subprocess.run([
+                      "gh", "release", "create", tag, str(zip_path),
+                      "--repo", repo, "--target", sha, "--title", tag,
+                      "--notes", "Automated Media Package v4", "--prerelease"
+                  ], check=False)
+                  if r.returncode == 0:
+                      break
+                  time.sleep(2 * attempt)
+          finally:
+              cookie_file.unlink(missing_ok=True)
+              urls_file.unlink(missing_ok=True)
+          EOF
+
+      - name: Upload Backup Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-${{ inputs.request_id }}
+          path: /tmp/pkg/*.zip
+          if-no-files-found: ignore
+          retention-days: 1
