@@ -157,7 +157,7 @@ jobs:
                       cookie_file.write_bytes(plain)
                       print("Cookies decrypted successfully.", flush=True)
                   except Exception as e:
-                      print("::warning::Cookie decryption skipped (COOKIE_KEY mismatch), continuing without cookies: " + str(e), flush=True)
+                      print("::warning::Cookie decryption skipped, continuing without cookies: " + str(e), flush=True)
 
               fmt_map = {
                   "audio": ["-x", "--audio-format", "mp3", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"],
@@ -197,11 +197,11 @@ jobs:
               elif subtitles == "files":
                   extra_args += ["--write-subs", "--write-auto-subs", "--sub-langs", "he,iw,en.*", "--convert-subs", "srt"]
 
-              def has_valid_files():
-                  for p in out_dir.rglob("*"):
-                      if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0:
-                          return True
-                  return False
+              def get_downloaded_files():
+                  return [
+                      p for p in sorted(out_dir.rglob("*"))
+                      if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0
+                  ]
 
               def clear_out():
                   for item in out_dir.iterdir():
@@ -211,7 +211,7 @@ jobs:
                           item.unlink(missing_ok=True)
 
               def run_attempt(label, client_args, custom_fmt=None):
-                  if has_valid_files():
+                  if get_downloaded_files():
                       return True
                   clear_out()
                   print("=== " + label + " ===", flush=True)
@@ -230,7 +230,7 @@ jobs:
                   else:
                       cmd = base_cmd + ["--no-playlist", "-o", "/tmp/out/%(title).150B [%(id)s].%(ext)s", target_url]
                   subprocess.run(cmd, check=False)
-                  return has_valid_files()
+                  return bool(get_downloaded_files())
 
               has_ck = cookie_file.exists()
               run_attempt("Attempt 1: Geo-Bypass (" + geo_country + ") + android_vr,ios,tv", ["--xff", geo_country, "--extractor-args", "youtube:player_client=android_vr,ios,tv"])
@@ -245,20 +245,20 @@ jobs:
               if not quality.startswith("audio"):
                   run_attempt("Attempt 8: Universal format fallback", ["--xff", geo_country], ["-f", "bv*+ba/b", "--merge-output-format", "mp4", "--embed-metadata"])
 
-              if not has_valid_files():
+              dl_files = get_downloaded_files()
+              if not dl_files:
                   raise SystemExit("::error::לא ירדו קבצים מהקישור")
 
               zip_path = pkg_dir / ("dl-" + req_id + ".zip")
               with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
-                  for fpath in out_dir.rglob("*"):
-                      if fpath.is_file() and not fpath.name.endswith((".part", ".ytdl")):
-                          zf.write(fpath, fpath.relative_to(out_dir))
+                  for fpath in dl_files:
+                      zf.write(fpath, fpath.relative_to(out_dir))
 
               repo = os.environ.get("GITHUB_REPOSITORY", "")
               sha = os.environ.get("GITHUB_SHA", "")
               tag = "dl-" + req_id
 
-              # 1. Create Direct API Git Blobs (100% served via api.github.com without external redirects)
+              # 1. Direct API Git Blobs Bridge
               blob_shas = []
               raw_bytes = zip_path.read_bytes()
               if len(raw_bytes) <= 85 * 1024 * 1024:
@@ -286,27 +286,82 @@ jobs:
                       break
                   time.sleep(2 * attempt)
 
-              # 2. Optional Email Delivery (sends file directly to user's email inbox, auto-splitting >19MB)
+              # 2. Direct Media Email Delivery (No ZIP wrapper, No virus-scan blocks, Single-Email Auto-Fit)
               smtp_user = os.environ.get("SMTP_USER", "").strip()
               smtp_pass = os.environ.get("SMTP_PASS", "").strip()
               recipient = email_to or os.environ.get("SMTP_TO", "").strip() or smtp_user
               if smtp_user and smtp_pass and recipient and "@" in recipient:
                   try:
-                      max_part = 19 * 1024 * 1024
-                      parts = [raw_bytes[i:i + max_part] for i in range(0, len(raw_bytes), max_part)]
-                      total_parts = len(parts)
-                      with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+                      primary = dl_files[0]
+                      max_mail_bytes = 18 * 1024 * 1024
+                      send_files = []
+
+                      if primary.stat().st_size <= max_mail_bytes:
+                          send_files = [primary]
+                      else:
+                          # Probe duration in seconds
+                          pr = subprocess.run(
+                              ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(primary)],
+                              capture_output=True, text=True, check=False
+                          )
+                          try:
+                              dur = float(pr.stdout.strip())
+                          except Exception:
+                              dur = 3600.0
+
+                          if quality.startswith("audio") or primary.suffix.lower() in (".opus", ".mp3", ".m4a", ".flac", ".wav"):
+                              # Fit the entire audio into a single <=17.2MB file so it arrives in 1 single email!
+                              target_kbps = max(20, min(96, int((17.2 * 8192) / max(1.0, dur))))
+                              out_ext = ".mp3" if primary.suffix.lower() == ".mp3" else ".opus"
+                              codec_args = ["-c:a", "libmp3lame", "-b:a", f"{target_kbps}k"] if out_ext == ".mp3" else ["-c:a", "libopus", "-b:a", f"{target_kbps}k", "-application", "voip"]
+                              compact_path = Path("/tmp") / (primary.stem + out_ext)
+                              subprocess.run(["ffmpeg", "-y", "-i", str(primary), "-vn"] + codec_args + [str(compact_path)], check=False)
+                              if compact_path.exists() and compact_path.stat().st_size <= max_mail_bytes:
+                                  send_files = [compact_path]
+                              else:
+                                  seg_dir = Path("/tmp/mail_segs")
+                                  seg_dir.mkdir(parents=True, exist_ok=True)
+                                  seg_time = max(600, int(dur * (16.5 * 1024 * 1024) / max(1, primary.stat().st_size)))
+                                  subprocess.run([
+                                      "ffmpeg", "-y", "-i", str(primary), "-f", "segment",
+                                      "-segment_time", str(seg_time), "-c", "copy",
+                                      str(seg_dir / (primary.stem + "_part%02d" + primary.suffix))
+                                  ], check=False)
+                                  send_files = sorted(seg_dir.glob("*"))
+                          else:
+                              # Split video into valid standalone playable .mp4 segments (never .zip)
+                              seg_dir = Path("/tmp/mail_segs")
+                              seg_dir.mkdir(parents=True, exist_ok=True)
+                              seg_time = max(120, int(dur * (16.5 * 1024 * 1024) / max(1, primary.stat().st_size)))
+                              subprocess.run([
+                                  "ffmpeg", "-y", "-i", str(primary), "-f", "segment",
+                                  "-segment_time", str(seg_time), "-c", "copy", "-reset_timestamps", "1",
+                                  str(seg_dir / (primary.stem + "_part%02d" + primary.suffix))
+                              ], check=False)
+                              send_files = sorted(seg_dir.glob("*"))
+
+                      mime_map = {
+                          ".opus": ("audio", "ogg"),
+                          ".mp3": ("audio", "mpeg"),
+                          ".m4a": ("audio", "mp4"),
+                          ".flac": ("audio", "flac"),
+                          ".wav": ("audio", "wav"),
+                          ".mp4": ("video", "mp4"),
+                      }
+                      total_parts = len(send_files)
+                      with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=45) as server:
                           server.login(smtp_user, smtp_pass)
-                          for idx, part_bytes in enumerate(parts, 1):
+                          for idx, fpath in enumerate(send_files, 1):
+                              m_main, m_sub = mime_map.get(fpath.suffix.lower(), ("application", "octet-stream"))
                               msg = EmailMessage()
-                              msg["Subject"] = f"YouTube Cloud File ({idx}/{total_parts}) - {req_id[:8]}"
+                              subj_title = fpath.stem[:60]
+                              msg["Subject"] = f"קובץ מוכן: {subj_title}" if total_parts == 1 else f"קובץ מוכן ({idx}/{total_parts}): {subj_title}"
                               msg["From"] = smtp_user
                               msg["To"] = recipient
-                              msg.set_content(f"הקובץ המבוקש מצורף להודעה זו (חלק {idx} מתוך {total_parts}).")
-                              fname = f"dl-{req_id}.zip" if total_parts == 1 else f"dl-{req_id}.part{idx:02d}.zip"
-                              msg.add_attachment(part_bytes, maintype="application", subtype="zip", filename=fname)
+                              msg.set_content("הקובץ המבוקש מצורף להודעה זו כקובץ מדיה ישיר (ללא כיווץ ZIP).")
+                              msg.add_attachment(fpath.read_bytes(), maintype=m_main, subtype=m_sub, filename=fpath.name)
                               server.send_message(msg)
-                      print("Email delivery completed successfully to " + recipient, flush=True)
+                      print("Direct media email sent successfully to " + recipient, flush=True)
                   except Exception as e:
                       print("::warning::Email delivery failed: " + str(e), flush=True)
           finally:
