@@ -142,12 +142,14 @@ jobs:
               target_url = clean_url(target_url)
 
           try:
-              if cookies_enc:
-                  if len(hex_key) != 64:
-                      raise SystemExit("::error::COOKIE_KEY missing or invalid in repository secrets")
-                  raw = base64.b64decode(cookies_enc)
-                  plain = AESGCM(bytes.fromhex(hex_key)).decrypt(raw[:12], raw[12:], None)
-                  cookie_file.write_bytes(plain)
+              if cookies_enc and len(hex_key) == 64:
+                  try:
+                      raw = base64.b64decode(cookies_enc)
+                      plain = AESGCM(bytes.fromhex(hex_key)).decrypt(raw[:12], raw[12:], None)
+                      cookie_file.write_bytes(plain)
+                      print("Cookies decrypted successfully.", flush=True)
+                  except Exception as e:
+                      print("::warning::Cookie decryption skipped (COOKIE_KEY mismatch), continuing without cookies: " + str(e), flush=True)
 
               fmt_map = {
                   "audio": ["-x", "--audio-format", "mp3", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"],
