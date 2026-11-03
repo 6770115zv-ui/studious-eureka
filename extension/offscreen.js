@@ -20,14 +20,22 @@
   }
 
   async function fetchWithRetry(apiUrl, token, fallbackUrl) {
+    const isArtifactUrl = apiUrl && apiUrl.includes("/actions/artifacts/");
     const candidates = [
-      {
+      // במאגר ציבורי בנטפרי: קישור הורדה ישיר ללא כותרת Authorization עובד חלק עם הפניות ל-objects.githubusercontent.com
+      fallbackUrl ? { url: fallbackUrl, headers: {} } : null,
+      apiUrl ? {
         url: apiUrl,
-        headers: token ? { Authorization: "Bearer " + token, Accept: "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28" } : { Accept: "application/octet-stream" }
-      },
-      { url: fallbackUrl, headers: token ? { Authorization: "Bearer " + token } : {} },
-      { url: fallbackUrl, headers: {} }
-    ].filter((c) => Boolean(c.url));
+        headers: token
+          ? {
+              Authorization: "Bearer " + token,
+              Accept: isArtifactUrl ? "application/vnd.github+json" : "application/octet-stream",
+              "X-GitHub-Api-Version": "2022-11-28"
+            }
+          : { Accept: "application/octet-stream" }
+      } : null,
+      fallbackUrl && token ? { url: fallbackUrl, headers: { Authorization: "Bearer " + token } } : null
+    ].filter((c) => Boolean(c && c.url));
 
     let lastErr = "Failed to fetch";
     for (let attempt = 1; attempt <= 4; attempt++) {
@@ -46,30 +54,30 @@
   }
 
   async function unzipArtifact(msg) {
-      try {
-        let buf = await readFromCache(msg.cacheKey);
-        if (!buf) buf = await fetchWithRetry(msg.url, msg.token, msg.fallbackUrl);
-        const isPkZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
-        if (msg.rawZip || !isPkZip) {
-          const fname = msg.zipName || "download.mp4";
-          const ext = (fname.toLowerCase().split(".").pop() || "mp4");
-          const blob = new Blob([buf], { type: MIME[ext] || "application/octet-stream" });
-          return { ok: true, files: [{ name: fname, size: buf.length, blobUrl: URL.createObjectURL(blob) }] };
-        }
-        const entries = fflate.unzipAsync ? await fflate.unzipAsync(buf) : fflate.unzipSync(buf);
-        const files = [];
-        for (const name of Object.keys(entries)) {
-          const data = entries[name];
-          delete entries[name];
-          if (!data || !data.length || name.endsWith("/")) continue;
-          const cleanName = name.split("/").pop() || name;
-          const ext = (cleanName.toLowerCase().split(".").pop() || "");
-          const blob = new Blob([data], { type: MIME[ext] || "application/octet-stream" });
-          files.push({ name: cleanName, size: data.length, blobUrl: URL.createObjectURL(blob) });
-        }
-        return files.length ? { ok: true, files } : { ok: false, error: "ארכיון ה-ZIP ריק" };
-      } catch (e) { return { ok: false, error: e.message }; }
-    }
+    try {
+      let buf = await readFromCache(msg.cacheKey);
+      if (!buf) buf = await fetchWithRetry(msg.url, msg.token, msg.fallbackUrl);
+      const isPkZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
+      if (msg.rawZip || !isPkZip) {
+        const fname = msg.zipName || "download.mp4";
+        const ext = (fname.toLowerCase().split(".").pop() || "mp4");
+        const blob = new Blob([buf], { type: MIME[ext] || "application/octet-stream" });
+        return { ok: true, files: [{ name: fname, size: buf.length, blobUrl: URL.createObjectURL(blob) }] };
+      }
+      const entries = fflate.unzipAsync ? await fflate.unzipAsync(buf) : fflate.unzipSync(buf);
+      const files = [];
+      for (const name of Object.keys(entries)) {
+        const data = entries[name];
+        delete entries[name];
+        if (!data || !data.length || name.endsWith("/")) continue;
+        const cleanName = name.split("/").pop() || name;
+        const ext = (cleanName.toLowerCase().split(".").pop() || "");
+        const blob = new Blob([data], { type: MIME[ext] || "application/octet-stream" });
+        files.push({ name: cleanName, size: data.length, blobUrl: URL.createObjectURL(blob) });
+      }
+      return files.length ? { ok: true, files } : { ok: false, error: "ארכיון ה-ZIP ריק" };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
 
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     if (!msg || msg.target !== "offscreen") return undefined;
