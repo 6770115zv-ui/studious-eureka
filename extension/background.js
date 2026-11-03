@@ -15,6 +15,7 @@ const HIST_KEY = "ytproxy_history";
 const RECS_KEY = "ytproxy_recs";
 const UPDATE_HOST = "com.rafi.ytproxy.updater";
 const ZIP_CACHE_NAME = "ytcloud-assets-v3";
+const KEEPALIVE_ALARM = "ytcloud_keepalive";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jobs = new Map();
@@ -69,9 +70,22 @@ function updateActionBadge() {
   if (activeCount > 0) {
     chrome.action.setBadgeBackgroundColor({ color: "#0284c7" }).catch(() => {});
     chrome.action.setBadgeText({ text: String(activeCount) }).catch(() => {});
+    if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   } else {
     chrome.action.setBadgeText({ text: "" }).catch(() => {});
+    if (chrome.alarms) chrome.alarms.clear(KEEPALIVE_ALARM).catch(() => {});
   }
+}
+
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm.name === KEEPALIVE_ALARM) {
+      await restoreJobs();
+      for (const [id, job] of jobs) {
+        if (!TERMINAL.has(job.status)) void driveJob(id);
+      }
+    }
+  });
 }
 
 function notifyUser(title, message) {
@@ -90,14 +104,16 @@ async function ghFetch(url, cfg, init = {}, retries = 4) {
   let lastErr = null;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
+      const headers = {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        ...(init.headers || {})
+      };
+      if (cfg && cfg.token) headers.Authorization = "Bearer " + cfg.token;
       const res = await fetch(url, {
         ...init,
-        headers: {
-          Authorization: "Bearer " + cfg.token,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-          ...(init.headers || {})
-        }
+        headers,
+        cache: "no-store"
       });
       if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < retries) {
         await sleep(1500 * attempt);
@@ -153,7 +169,7 @@ async function exportYoutubeCookies() {
 
 async function encryptCookies(text, hexKey) {
   const raw = hexToBytes(hexKey);
-  if (raw.length !== 32) throw new Error("COOKIE_KEY חייב להיות 64 תווי hex");
+  if (raw.length !== 32) return "";
   const key = await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text)));
@@ -189,7 +205,7 @@ function patchJob(id, patch) {
 
 async function findRunByTitle(cfg, targetTitle, signal, dispatchedAt) {
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?event=workflow_dispatch&per_page=30";
-  const since = (dispatchedAt || Date.now()) - 20000;
+  const since = (dispatchedAt || Date.now()) - 25000;
   for (let i = 0; i < 120; i++) {
     if (signal && signal.cancelled) throw new Error("בוטל");
     const res = await ghFetch(url, cfg);
@@ -220,12 +236,12 @@ async function fetchLiveStepInfo(cfg, runId) {
       const nameMap = {
         "Set up Deno": "מכין סביבת ריצה בענן (Deno)...",
         "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "מתקין כלי הורדה וקידוד (yt-dlp + FFmpeg)...",
-        "Execute Smart Fallback Engine v4 and Publish": "מוריד, מעבד ואורז מדיה בענן (Smart Engine v4)...",
+        "Execute Smart Fallback Engine v4 and Publish": "מוריד באיכות מרבית, ממזג ואורז מדיה בענן...",
         "Upload Backup Artifact": "שומר גיבוי תוצר ב-GitHub..."
       };
       return {
         label: nameMap[active.name] || ("מבצע שלב: " + active.name),
-        pct: Math.min(70, 22 + Math.round((completedCount / totalCount) * 48))
+        pct: Math.min(72, 22 + Math.round((completedCount / totalCount) * 50))
       };
     }
   } catch {}
@@ -244,7 +260,7 @@ async function waitForRun(cfg, runId, onTick, signal) {
       stepInfo = await fetchLiveStepInfo(cfg, runId);
     }
     if (onTick) onTick(run, i, stepInfo);
-    await sleep(3800);
+    await sleep(3500);
   }
   throw new Error("זמן ההמתנה הסתיים");
 }
@@ -278,14 +294,21 @@ async function ensureOffscreen() {
 
 async function fetchAssetToCache(apiUrl, fallbackUrl, token, jobId) {
   const cacheKey = "https://ytcloud.local/asset-" + jobId + "-" + Date.now() + ".zip";
+  const isArtifactUrl = apiUrl && apiUrl.includes("/actions/artifacts/");
   const candidates = [
-    {
+    fallbackUrl ? { url: fallbackUrl, headers: {} } : null,
+    apiUrl ? {
       url: apiUrl,
-      headers: token ? { Authorization: "Bearer " + token, Accept: "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28" } : { Accept: "application/octet-stream" }
-    },
-    { url: fallbackUrl, headers: token ? { Authorization: "Bearer " + token } : {} },
-    { url: fallbackUrl, headers: {} }
-  ].filter((c) => Boolean(c.url));
+      headers: token
+        ? {
+            Authorization: "Bearer " + token,
+            Accept: isArtifactUrl ? "application/vnd.github+json" : "application/octet-stream",
+            "X-GitHub-Api-Version": "2022-11-28"
+          }
+        : { Accept: "application/octet-stream" }
+    } : null,
+    fallbackUrl && token ? { url: fallbackUrl, headers: { Authorization: "Bearer " + token } } : null
+  ].filter((c) => Boolean(c && c.url));
 
   for (let attempt = 1; attempt <= 4; attempt++) {
     for (const cand of candidates) {
@@ -372,6 +395,7 @@ async function driveJob(jobId) {
   const signal = { get cancelled() { const j = jobs.get(jobId); return !j || j.status === "cancelled"; } };
 
   try {
+    await ensureOffscreen();
     const cfg = await getConfig();
     const tag = "dl-" + job.requestId;
     if (!job.runId) {
@@ -381,7 +405,7 @@ async function driveJob(jobId) {
     }
     patchJob(jobId, { status: "running", detail: "מתחבר לשרת GitHub Actions...", percent: 24 });
     const conclusion = await waitForRun(cfg, jobs.get(jobId).runId, (run, tickIdx, stepInfo) => {
-      const fallbackPct = Math.min(68, 24 + Math.floor(tickIdx * 2));
+      const fallbackPct = Math.min(70, 24 + Math.floor(tickIdx * 2));
       patchJob(jobId, {
         detail: stepInfo ? stepInfo.label : (run.status === "queued" ? "ממתין בתור ב-GitHub..." : "מעבד ומוריד מדיה ב-GitHub Actions..."),
         percent: stepInfo ? stepInfo.pct : fallbackPct
@@ -389,13 +413,13 @@ async function driveJob(jobId) {
     }, signal);
 
     if (conclusion !== "success") throw new Error("הריצה הסתיימה עם סטטוס: " + conclusion);
-    patchJob(jobId, { status: "fetching", detail: "מושך קובץ מ-GitHub API (כולל גיבוי אוטומטי)...", percent: 76 });
+    patchJob(jobId, { status: "fetching", detail: "מושך קובץ מ-GitHub ושומר במחשב...", percent: 78 });
 
     let files = null;
     for (let a = 0; a < 8 && !files; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
       if (assets && assets.length) {
-        const isBundle = job.mode === "collection" || job.mode === "list" || job.splitChapters;
+        const isBundle = job.mode === "collection";
         const inner = [];
         for (const x of assets) {
           const isZip = x.name.toLowerCase().endsWith(".zip");
@@ -413,11 +437,11 @@ async function driveJob(jobId) {
       const found = list.find((x) => x.name === tag);
       if (!found) throw new Error("לא נמצא תוצר להורדה ב-Release או ב-Artifacts");
       const artUrl = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/artifacts/" + found.id + "/zip";
-      const isBundle = job.mode === "collection" || job.mode === "list" || job.splitChapters;
-      files = await unpackZipUrl({ apiUrl: artUrl, url: artUrl, name: tag + ".zip" }, jobId, cfg.token, isBundle);
+      const isBundle = job.mode === "collection";
+      files = await unpackZipUrl({ apiUrl: artUrl, url: "", name: tag + ".zip" }, jobId, cfg.token, isBundle);
     }
 
-    patchJob(jobId, { status: "saving", detail: "שומר קובץ במחשב...", percent: 92 });
+    patchJob(jobId, { status: "saving", detail: "שומר קובץ בתיקיית ההורדות במחשב...", percent: 92 });
     const saved = [];
     for (const f of files) {
       const name = sanitizeFilename(f.name);
@@ -432,7 +456,7 @@ async function driveJob(jobId) {
     });
 
     if (cfg.autoCleanRelease === "true") await deleteReleaseAndTagByName(cfg, tag);
-    patchJob(jobId, { status: "completed", detail: "הושלם ונשמר במחשב!", files: saved, percent: 100 });
+    patchJob(jobId, { status: "completed", detail: "הושלם ונשמר בתיקיית ההורדות במחשב!", files: saved, percent: 100 });
     notifyUser("הורדה הושלמה בהצלחה", saved[0] || job.title || "הקובץ נשמר בתיקיית ההורדות");
   } catch (err) {
     patchJob(jobId, { status: "failed", detail: err.message, error: err.message });
@@ -443,15 +467,16 @@ async function driveJob(jobId) {
 
 async function startDownload(payload) {
   const cfg = await getConfig();
-  if (!cfg.owner || !cfg.repo || !cfg.token || !cfg.cookieKey) {
-    return { ok: false, error: "חסרות הגדרות חיבור (owner/repo/token/cookieKey)" };
+  if (!cfg.owner || !cfg.repo || !cfg.token) {
+    return { ok: false, error: "חסרות הגדרות חיבור (owner/repo/token) בדף ההגדרות" };
   }
   const requestId = crypto.randomUUID();
   let cookiesEnc = "";
-  const cookies = await exportYoutubeCookies();
-  if (cookies) {
-    try { cookiesEnc = await encryptCookies(cookies, cfg.cookieKey); }
-    catch (e) { return { ok: false, error: e.message }; }
+  if (cfg.cookieKey && cfg.cookieKey.length === 64) {
+    const cookies = await exportYoutubeCookies();
+    if (cookies) {
+      try { cookiesEnc = await encryptCookies(cookies, cfg.cookieKey); } catch {}
+    }
   }
   const mode = payload.mode || "video";
   let urlsJson = "";
@@ -522,13 +547,13 @@ async function setRecsState(state) {
 
 async function fetchJsonAssetWithRetry(asset, cfg) {
   const candidates = [
-    {
+    asset.url ? { url: asset.url, headers: {} } : null,
+    asset.apiUrl ? {
       url: asset.apiUrl,
       headers: cfg.token ? { Authorization: "Bearer " + cfg.token, Accept: "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28" } : { Accept: "application/octet-stream" }
-    },
-    { url: asset.url, headers: cfg.token ? { Authorization: "Bearer " + cfg.token } : {} },
-    { url: asset.url, headers: {} }
-  ].filter((c) => Boolean(c.url));
+    } : null,
+    asset.url && cfg.token ? { url: asset.url, headers: { Authorization: "Bearer " + cfg.token } } : null
+  ].filter((c) => Boolean(c && c.url));
 
   for (let attempt = 1; attempt <= 4; attempt++) {
     for (const cand of candidates) {
@@ -545,10 +570,11 @@ async function fetchJsonAssetWithRetry(asset, cfg) {
 async function driveRecommendations(requestId, query, minViews, dispatchedAt) {
   const cfg = await getConfig();
   const tag = "rec-" + requestId;
+  if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   try {
     await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש ב-GitHub Actions...", items: [] });
     const runId = await findRunByTitle(cfg, tag, null, dispatchedAt);
-    await setRecsState({ status: "running", query, minViews, detail: "סורק ומסנן תוצאות פופולריות במקביל בענן...", items: [] });
+    await setRecsState({ status: "running", query, minViews, detail: "סורק ומדרג תוצאות היסטוריות פופולריות בענן...", items: [] });
     const conclusion = await waitForRun(cfg, runId, null, null);
     if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
 
@@ -568,12 +594,14 @@ async function driveRecommendations(requestId, query, minViews, dispatchedAt) {
       status: "completed",
       query,
       minViews,
-      detail: "נמצאו " + data.items.length + " תוצאות פופולריות בנושא \"" + query + "\"",
+      detail: "נמצאו " + data.items.length + " תוצאות היסטוריות פופולריות בנושא \"" + query + "\"",
       items: data.items,
       updatedAt: Date.now()
     });
   } catch (err) {
     await setRecsState({ status: "failed", query, minViews, detail: err.message, error: err.message, items: [] });
+  } finally {
+    updateActionBadge();
   }
 }
 
@@ -605,7 +633,7 @@ async function startRecommendations(payload) {
     })
   });
   if (res.status !== 204) {
-    return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ") - ודא שהעלית את הקובץ recommend.yml למאגר" };
+    return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ") - ודא שהקובץ recommend.yml קיים במאגר" };
   }
   void driveRecommendations(requestId, query, minViews, dispatchedAt);
   return { ok: true, requestId };
@@ -626,7 +654,7 @@ async function handle(msg) {
   switch (msg.type) {
     case "GET_PREFS": {
       const cfg = await getConfig();
-      return { configured: Boolean(cfg.owner && cfg.repo && cfg.token && cfg.cookieKey), owner: cfg.owner, repo: cfg.repo };
+      return { configured: Boolean(cfg.owner && cfg.repo && cfg.token), owner: cfg.owner, repo: cfg.repo };
     }
     case "GET_CONFIG": return getConfig();
     case "SET_CONFIG": return setConfig(msg.patch);
