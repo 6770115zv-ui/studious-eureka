@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Install yt-dlp
         run: |
-          python3 -m pip install --upgrade --break-system-packages "yt-dlp[default,curl-cffi]"
+          python3 -m pip install --upgrade --break-system-packages "yt-dlp[default,curl-cffi]" requests
 
       - name: Search Historical Popular Videos
         env:
@@ -42,7 +42,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           python3 - << 'EOF'
-          import json, os, re, urllib.parse, subprocess
+          import base64, json, os, re, urllib.parse, subprocess, requests
           from concurrent.futures import ThreadPoolExecutor
 
           query = os.environ.get("QUERY", "").strip()
@@ -53,11 +53,9 @@ jobs:
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
 
           tokens = [t.lower() for t in re.split(r"[\s\-_,.;:|]+", query) if len(t) >= 2]
-
           encoded_q = urllib.parse.quote_plus(query)
-          # sp=CAMSAhAB ממיין ביוטיוב לפי שיא צפיות מכל הזמנים (View Count All-Time)
           view_sorted_url = f"https://www.youtube.com/results?search_query={encoded_q}&sp=CAMSAhAB"
-          # חיפוש נוסף ממוין לפי צפיות עם מילת המפתח
+
           urls_to_scan = [
               (view_sorted_url, "1:90"),
               (f"ytsearch80:{query}", None)
@@ -65,14 +63,7 @@ jobs:
 
           def fetch_list(target):
               url, pl_items = target
-              cmd = [
-                  "yt-dlp",
-                  "--flat-playlist",
-                  "--dump-json",
-                  "--ignore-errors",
-                  "--no-warnings",
-                  "--extractor-args", "youtube:lang=he"
-              ]
+              cmd = ["yt-dlp", "--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]
               if pl_items:
                   cmd += ["--playlist-items", pl_items]
               cmd.append(url)
@@ -104,8 +95,6 @@ jobs:
 
               channel_name = (e.get("channel") or e.get("uploader") or "").strip()
               haystack = f"{title} {channel_name}".lower()
-
-              # התאמה לנושא החיפוש
               matched_tokens = sum(1 for t in tokens if t in haystack) if tokens else 1
               if tokens and matched_tokens == 0:
                   continue
@@ -119,18 +108,15 @@ jobs:
                   "views": views,
                   "duration": int(e.get("duration") or 0),
                   "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
-                  "match_score": matched_tokens,
-                  "order_idx": idx
+                  "match_score": matched_tokens
               })
 
-          # השלמת מספר צפיות מדויק לסרטונים שבהם יוטיוב לא החזיר view_count ברשימה השטוחה
           need_meta = [c for c in candidates if c["views"] == 0][:40]
           def enrich(c):
               cmd = ["yt-dlp", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
               r = subprocess.run(cmd, capture_output=True, text=True)
               try:
-                  first_line = r.stdout.splitlines()[0]
-                  d = json.loads(first_line)
+                  d = json.loads(r.stdout.splitlines()[0])
                   c["views"] = int(d.get("view_count") or 0)
                   c["duration"] = int(d.get("duration") or c["duration"] or 0)
                   c["channel"] = d.get("channel") or d.get("uploader") or c["channel"]
@@ -141,9 +127,7 @@ jobs:
               with ThreadPoolExecutor(max_workers=8) as ex:
                   list(ex.map(enrich, need_meta))
 
-          # מיון קשיח: קודם התאמה מלאה לכל מילות החיפוש + כמות צפיות היסטורית מהגבוה לנמוך
           candidates.sort(key=lambda x: (x["match_score"] == len(tokens), x["views"]), reverse=True)
-
           filtered = [c for c in candidates if c["views"] >= min_views]
           if len(filtered) < 10:
               filtered = sorted(candidates, key=lambda x: x["views"], reverse=True)[:30]
@@ -152,11 +136,26 @@ jobs:
 
           for c in filtered:
               c.pop("match_score", None)
-              c.pop("order_idx", None)
 
-          with open("recommendations.json", "w", encoding="utf-8") as f:
-              json.dump({"query": query, "items": filtered}, f, ensure_ascii=False)
+          payload_bytes = json.dumps({"query": query, "items": filtered}, ensure_ascii=False).encode("utf-8")
+          with open("recommendations.json", "wb") as f:
+              f.write(payload_bytes)
+
+          gh_repo = os.environ["GH_REPO"]
+          gh_token = os.environ["GH_TOKEN"]
+          blob_shas = []
+          r = requests.post(
+              f"https://api.github.com/repos/{gh_repo}/git/blobs",
+              headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
+              json={"content": base64.b64encode(payload_bytes).decode("ascii"), "encoding": "base64"},
+              timeout=60
+          )
+          if r.status_code == 201:
+              blob_shas.append(r.json()["sha"])
+
+          with open("rec_notes.txt", "w", encoding="utf-8") as nf:
+              nf.write(json.dumps({"blobs": blob_shas}))
           EOF
 
           TAG="rec-${REQ_ID}"
-          gh release create "$TAG" recommendations.json --repo "$GH_REPO" --title "$TAG" --notes "Recommendations result"
+          gh release create "$TAG" recommendations.json --repo "$GH_REPO" --title "$TAG" --notes-file rec_notes.txt
