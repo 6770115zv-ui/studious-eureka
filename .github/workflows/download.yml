@@ -42,7 +42,7 @@ on:
         default: ""
         type: string
 
-run-name: dl-${{ inputs.request_id }}
+run-name: dl-\${{ inputs.request_id }}
 
 permissions:
   contents: write
@@ -66,22 +66,23 @@ jobs:
 
       - name: Execute Smart Fallback Engine v4 and Publish
         env:
-          REQ_ID: ${{ inputs.request_id }}
-          TARGET_URL: ${{ inputs.url }}
-          QUALITY: ${{ inputs.quality }}
-          MODE: ${{ inputs.mode }}
-          URLS_JSON: ${{ inputs.urls }}
-          CLIP_START: ${{ inputs.clip_start }}
-          CLIP_END: ${{ inputs.clip_end }}
-          SUBS: ${{ inputs.subtitles }}
-          EXT_OPTS: ${{ inputs.sponsorblock }}
-          COOKIES_ENC: ${{ inputs.cookies_enc }}
-          COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
-          GH_TOKEN: ${{ github.token }}
+          REQ_ID: \${{ inputs.request_id }}
+          TARGET_URL: \${{ inputs.url }}
+          QUALITY: \${{ inputs.quality }}
+          MODE: \${{ inputs.mode }}
+          URLS_JSON: \${{ inputs.urls }}
+          CLIP_START: \${{ inputs.clip_start }}
+          CLIP_END: \${{ inputs.clip_end }}
+          SUBS: \${{ inputs.subtitles }}
+          EXT_OPTS: \${{ inputs.sponsorblock }}
+          COOKIES_ENC: \${{ inputs.cookies_enc }}
+          COOKIE_KEY: \${{ secrets.COOKIE_KEY }}
+          GH_TOKEN: \${{ github.token }}
+          GH_REPO: \${{ github.repository }}
         run: |
           mkdir -p out work
           python3 - << 'EOF'
-          import base64, json, os, subprocess, sys, glob, shutil
+          import base64, json, os, subprocess, sys, glob, zipfile
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           cookies_path = None
@@ -92,11 +93,12 @@ jobs:
                   raw = base64.b64decode(enc)
                   aes = AESGCM(bytes.fromhex(key_hex))
                   dec = aes.decrypt(raw[:12], raw[12:], None).decode("utf-8", errors="ignore")
-                  cookies_path = "work/cookies.txt"
-                  with open(cookies_path, "w", encoding="utf-8") as f:
-                      f.write(dec)
+                  if "# Netscape" in dec or "youtube.com" in dec:
+                      cookies_path = "work/cookies.txt"
+                      with open(cookies_path, "w", encoding="utf-8") as f:
+                          f.write(dec)
               except Exception as e:
-                  print("Cookie decrypt note:", e)
+                  print("Cookie decrypt skipped:", e)
 
           q = os.environ.get("QUALITY", "best").strip()
           mode = os.environ.get("MODE", "video").strip()
@@ -128,7 +130,7 @@ jobs:
           elif q in ("2160", "1440", "1080", "720", "480", "360"):
               fmt_args = [
                   "-f", f"bestvideo[height<={q}]+bestaudio/best[height<={q}]/bestvideo+bestaudio/best",
-                  "-S", f"res:{q},fps,vcodec:h264,acodec:m4a",
+                  "-S", f"res:{q},fps,br",
                   "--merge-output-format", "mp4"
               ]
           else:
@@ -138,7 +140,13 @@ jobs:
                   "--merge-output-format", "mp4"
               ]
 
-          extra = ["--no-mtime", "--geo-bypass", "--geo-bypass-country", geo, "-o", "out/%(title).150B [%(id)s].%(ext)s"]
+          extra = [
+              "--no-mtime",
+              "--geo-bypass",
+              "--geo-bypass-country", geo,
+              "--trim-filenames", "140",
+              "-o", "out/%(title)s [%(id)s].%(ext)s"
+          ]
           if mode != "collection":
               extra.append("--no-playlist")
           if subs == "embed":
@@ -159,58 +167,70 @@ jobs:
           urls = []
           if mode == "list":
               try:
-                  urls = [u for u in json.loads(os.environ.get("URLS_JSON", "[]")) if u]
+                  urls = [u.strip() for u in json.loads(os.environ.get("URLS_JSON", "[]")) if u and u.strip()]
               except Exception:
                   pass
           if not urls:
-              urls = [os.environ.get("TARGET_URL", "").strip()]
+              u_single = os.environ.get("TARGET_URL", "").strip()
+              if u_single:
+                  urls = [u_single]
 
           strategies = [
               [],
               ["--extractor-args", "youtube:player_client=ios,web"],
-              ["--extractor-args", "youtube:player_client=android,web"],
-              ["--extractor-args", "youtube:player_client=tv,web_embedded"]
+              ["--extractor-args", "youtube:player_client=tv,web_embedded"],
+              ["--extractor-args", "youtube:player_client=android_vr"]
           ]
 
+          def valid_out_files():
+              return {
+                  f for f in glob.glob("out/*")
+                  if os.path.isfile(f) and not f.endswith((".part", ".ytdl", ".temp"))
+              }
+
           for u in urls:
+              before = valid_out_files()
               success = False
-              for strat in strategies:
-                  cmd = ["yt-dlp", "--ignore-errors", "--retries", "5", "--fragment-retries", "5"] + fmt_args + extra + strat
-                  if cookies_path and os.path.exists(cookies_path):
-                      cmd += ["--cookies", cookies_path]
-                  cmd.append(u)
-                  print("Running:", " ".join(cmd))
-                  subprocess.run(cmd, check=False)
-                  files = [f for f in glob.glob("out/*") if not f.endswith(".part") and not f.endswith(".ytdl")]
-                  if files:
-                      success = True
-                      break
-              if not success and cookies_path:
+
+              # ניסיון עם עוגיות (אם קיימות)
+              if cookies_path and os.path.exists(cookies_path):
                   for strat in strategies:
-                      cmd = ["yt-dlp", "--ignore-errors"] + fmt_args + extra + strat + [u]
+                      cmd = ["yt-dlp", "--ignore-errors", "--retries", "5", "--fragment-retries", "5", "--cookies", cookies_path] + fmt_args + extra + strat + [u]
                       subprocess.run(cmd, check=False)
-                      files = [f for f in glob.glob("out/*") if not f.endswith(".part") and not f.endswith(".ytdl")]
-                      if files:
+                      if len(valid_out_files() - before) > 0:
+                          success = True
                           break
+
+              # גיבוי ללא עוגיות אם העוגיות פגו או לא הוגדרו
+              if not success:
+                  for strat in strategies:
+                      cmd = ["yt-dlp", "--ignore-errors", "--retries", "5", "--fragment-retries", "5"] + fmt_args + extra + strat + [u]
+                      subprocess.run(cmd, check=False)
+                      if len(valid_out_files() - before) > 0:
+                          success = True
+                          break
+
+          final_files = sorted(valid_out_files())
+          if not final_files:
+              print("No files were downloaded.")
+              sys.exit(1)
+
+          req_id = os.environ["REQ_ID"]
+          zip_filename = f"dl-{req_id}.zip"
+          with zipfile.ZipFile(zip_filename, "w", compression=zipfile.ZIP_STORED) as zf:
+              for fpath in final_files:
+                  zf.write(fpath, arcname=os.path.basename(fpath))
+          print("Created archive:", zip_filename, "with", len(final_files), "files.")
           EOF
 
-          shopt -s nullglob
-          FILES=(out/*)
-          if [ ${#FILES[@]} -eq 0 ]; then
-            echo "No files downloaded!"
-            exit 1
-          fi
-
-          TAG="dl-${REQ_ID}"
-          ZIP_NAME="${TAG}.zip"
-          (cd out && zip -0 -r "../${ZIP_NAME}" .)
-
-          gh release create "$TAG" "$ZIP_NAME" --title "$TAG" --notes "Automated cloud media delivery"
+          TAG="dl-\${REQ_ID}"
+          ZIP_NAME="\${TAG}.zip"
+          gh release create "$TAG" "$ZIP_NAME" --repo "$GH_REPO" --title "$TAG" --notes "Automated cloud media delivery"
 
       - name: Upload Backup Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dl-${{ inputs.request_id }}
+          name: dl-\${{ inputs.request_id }}
           path: out/*
           retention-days: 1
