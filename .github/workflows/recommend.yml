@@ -1,31 +1,27 @@
-name: recommend
-run-name: rec-${{ inputs.request_id }}
+name: Recommend Popular Media
 
 on:
   workflow_dispatch:
     inputs:
       request_id:
-        description: "Unique request ID"
         required: true
         type: string
       query:
-        description: "Strict topic search query"
         required: true
         type: string
       min_views:
-        description: "Minimum view count filter"
         required: false
         default: "500000"
         type: string
       exclude_ids:
-        description: "Comma-separated video IDs to exclude"
         required: false
         default: ""
         type: string
 
+run-name: rec-${{ inputs.request_id }}
+
 permissions:
   contents: write
-  actions: read
 
 jobs:
   recommend:
@@ -34,144 +30,114 @@ jobs:
     steps:
       - name: Install yt-dlp
         run: |
-          sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-          sudo /usr/local/bin/yt-dlp --update-to nightly || true
+          python3 -m pip install --upgrade --break-system-packages "yt-dlp[default,curl-cffi]"
 
-      - name: Fetch and Filter Strict Ultra-Popular Recommendations (Parallel v4)
+      - name: Search Historical Popular Videos
         env:
+          REQ_ID: ${{ inputs.request_id }}
+          QUERY: ${{ inputs.query }}
+          MIN_VIEWS: ${{ inputs.min_views }}
+          EXCLUDE_IDS: ${{ inputs.exclude_ids }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 - << 'PYEOF'
-          import os, json, subprocess, urllib.request, base64, re, time
+          python3 - << 'EOF'
+          import json, os, re, urllib.parse, subprocess
           from concurrent.futures import ThreadPoolExecutor
 
-          ev_path = os.environ.get("GITHUB_EVENT_PATH", "")
-          ev = json.load(open(ev_path, "r", encoding="utf-8")) if ev_path and os.path.exists(ev_path) else {}
-          inp = ev.get("inputs") or {}
-
-          query = str(inp.get("query", "")).strip()
-          req_id = str(inp.get("request_id", "0")).strip()
+          query = os.environ.get("QUERY", "").strip()
           try:
-              min_views = int(str(inp.get("min_views", "500000")).strip() or "500000")
+              min_views = int(os.environ.get("MIN_VIEWS", "500000"))
           except Exception:
               min_views = 500000
-          exclude = set(x.strip() for x in str(inp.get("exclude_ids", "")).split(",") if x.strip())
+          exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
 
-          stopwords = {
-              "the", "and", "for", "with", "from", "that", "this", "how", "what", "why", "who",
-              "video", "official", "full", "new", "best", "top", "part", "episode",
-              "איך", "של", "על", "עם", "או", "גם", "כל", "זה", "אל", "את", "לא", "כי", "אם", "סרטון", "מלא", "חדש"
-          }
-          raw_tokens = [
-              t.lower()
-              for t in re.split(r"[^\w\u0590-\u05ff]+", query)
-              if len(t) >= 2 and t.lower() not in stopwords
+          # טוקנים לבדיקת התאמה קשיחה לנושא המבוקש
+          tokens = [t.lower() for t in re.split(r"\s+", query) if len(t) >= 2]
+
+          # 1) חיפוש ממוין לפי כמות צפיות מכל הזמנים ביוטיוב (sp=CAMSAhAB = Sort by View Count)
+          encoded_q = urllib.parse.quote_plus(query)
+          view_sorted_url = f"https://www.youtube.com/results?search_query={encoded_q}&sp=CAMSAhAB"
+
+          urls_to_scan = [
+              (view_sorted_url, "1:80"),
+              (f"ytsearch80:{query}", None)
           ]
 
-          cmd = [
-              "/usr/local/bin/yt-dlp",
-              "ytsearch80:" + query,
-              "--dump-json",
-              "--flat-playlist",
-              "--skip-download",
-              "--no-warnings",
-              "--geo-bypass",
-              "--extractor-args", "youtube:player_client=android_vr,ios,mweb"
-          ]
-          proc = subprocess.run(cmd, capture_output=True, text=True)
+          def fetch_list(target):
+              url, pl_items = target
+              cmd = ["yt-dlp", "--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]
+              if pl_items:
+                  cmd += ["--playlist-items", pl_items]
+              cmd.append(url)
+              res = subprocess.run(cmd, capture_output=True, text=True)
+              items = []
+              for line in res.stdout.splitlines():
+                  try:
+                      items.append(json.loads(line))
+                  except Exception:
+                      pass
+              return items
 
-          candidates = []
+          raw_entries = []
+          with ThreadPoolExecutor(max_workers=2) as ex:
+              for batch in ex.map(fetch_list, urls_to_scan):
+                  raw_entries.extend(batch)
+
           seen = set(exclude)
-
-          for line in proc.stdout.splitlines():
-              line = line.strip()
-              if not line:
+          candidates = []
+          for e in raw_entries:
+              vid = e.get("id")
+              title = (e.get("title") or "").strip()
+              if not vid or len(vid) != 11 or vid in seen or not title:
                   continue
-              try:
-                  item = json.loads(line)
-              except Exception:
-                  continue
-
-              vid = item.get("id")
-              title = (item.get("title") or "").strip()
-              if not vid or not title or vid in seen:
-                  continue
-
-              views = item.get("view_count") or 0
-              duration = item.get("duration") or 0
-
-              if duration and duration < 120:
-                  continue
-              if views < min_views:
-                  continue
-
-              title_lower = title.lower()
-              if raw_tokens:
-                  matched = sum(1 for tok in raw_tokens if tok in title_lower)
-                  required = len(raw_tokens) if len(raw_tokens) <= 2 else max(2, int(len(raw_tokens) * 0.75))
-                  if matched < required:
-                      continue
-                  exact_all = (matched == len(raw_tokens))
-              else:
-                  exact_all = True
-
               seen.add(vid)
+
+              haystack = f"{title} {e.get('channel') or e.get('uploader') or ''}".lower()
+              # וידוא התאמה לנושא החיפוש
+              if tokens:
+                  matched = sum(1 for t in tokens if t in haystack)
+                  if matched < max(1, (len(tokens) + 1) // 2):
+                      continue
+
+              views = int(e.get("view_count") or 0)
               candidates.append({
                   "id": vid,
                   "title": title,
-                  "url": "https://www.youtube.com/watch?v=" + vid,
-                  "channel": item.get("channel") or item.get("uploader") or "YouTube",
+                  "url": f"https://www.youtube.com/watch?v={vid}",
+                  "channel": e.get("channel") or e.get("uploader") or "",
                   "views": views,
-                  "duration": duration,
-                  "exact_all": exact_all
+                  "duration": int(e.get("duration") or 0),
+                  "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          candidates.sort(key=lambda x: (1 if x["exact_all"] else 0, x["views"]), reverse=True)
-          top_list = candidates[:14]
+          # אם לחלק מהתוצאות חסר view_count ב-flat-playlist, נשלים להן מטא-דאטה במקביל
+          need_meta = [c for c in candidates if c["views"] == 0][:35]
+          def enrich(c):
+              cmd = ["yt-dlp", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
+              r = subprocess.run(cmd, capture_output=True, text=True)
+              try:
+                  d = json.loads(r.stdout.splitlines()[0])
+                  c["views"] = int(d.get("view_count") or 0)
+                  c["duration"] = int(d.get("duration") or c["duration"] or 0)
+                  c["channel"] = d.get("channel") or d.get("uploader") or c["channel"]
+              except Exception:
+                  pass
 
-          def fetch_thumb(c):
-              vid = c["id"]
-              thumb_b64 = ""
-              for q_name in ("mqdefault.jpg", "hqdefault.jpg"):
-                  t_url = "https://i.ytimg.com/vi/" + vid + "/" + q_name
-                  try:
-                      req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0"})
-                      with urllib.request.urlopen(req, timeout=4) as resp:
-                          raw_img = resp.read()
-                          if len(raw_img) > 500:
-                              thumb_b64 = "data:image/jpeg;base64," + base64.b64encode(raw_img).decode("ascii")
-                              break
-                  except Exception:
-                      pass
-              c["thumbnail"] = thumb_b64
-              return c
+          if need_meta:
+              with ThreadPoolExecutor(max_workers=8) as ex:
+                  list(ex.map(enrich, need_meta))
 
-          with ThreadPoolExecutor(max_workers=8) as pool:
-              top_list = list(pool.map(fetch_thumb, top_list))
+          # סינון לפי מינימום צפיות ומיון קשיח מהנצפה ביותר בהיסטוריה ומטה
+          filtered = [c for c in candidates if c["views"] >= min_views]
+          if len(filtered) < 8:
+              filtered = sorted(candidates, key=lambda x: x["views"], reverse=True)[:25]
+          else:
+              filtered.sort(key=lambda x: x["views"], reverse=True)
+              filtered = filtered[:30]
 
-          os.makedirs("/tmp/rec_out", exist_ok=True)
-          out_path = "/tmp/rec_out/recs-" + req_id + ".json"
-          out_data = {
-              "ok": True,
-              "query": query,
-              "min_views": min_views,
-              "count": len(top_list),
-              "items": top_list
-          }
-          with open(out_path, "w", encoding="utf-8") as f:
-              json.dump(out_data, f, ensure_ascii=False, indent=2)
+          with open("recommendations.json", "w", encoding="utf-8") as f:
+              json.dump({"query": query, "items": filtered}, f, ensure_ascii=False)
+          EOF
 
-          repo = os.environ.get("GITHUB_REPOSITORY", "")
-          sha = os.environ.get("GITHUB_SHA", "")
-          tag = "rec-" + req_id
-          for attempt in range(1, 4):
-              r = subprocess.run([
-                  "gh", "release", "create", tag, out_path,
-                  "--repo", repo, "--target", sha, "--title", tag,
-                  "--notes", "Strict Topic Popular Recommendations v4", "--prerelease"
-              ], check=False)
-              if r.returncode == 0:
-                  break
-              time.sleep(2 * attempt)
-          PYEOF
+          TAG="rec-${REQ_ID}"
+          gh release create "$TAG" recommendations.json --title "$TAG" --notes "Recommendations result"
