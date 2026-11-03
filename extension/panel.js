@@ -14,6 +14,10 @@
   const selectedRecUrls = new Set();
   let lastHistory = [];
 
+  el("emailToggle").addEventListener("change", () => {
+    el("emailInputWrap").style.display = el("emailToggle").checked ? "block" : "none";
+  });
+
   el("urlInput").addEventListener("input", () => {
     clearTimeout(previewDebounce);
     const val = el("urlInput").value.trim();
@@ -27,10 +31,7 @@
       const meta = await self.fetchYoutubeOembed(firstUrl);
       if (meta) {
         currentPreview = meta;
-        const thumbEl = el("previewThumb");
-        thumbEl.onerror = () => { thumbEl.style.display = "none"; };
-        thumbEl.onload = () => { thumbEl.style.display = "block"; };
-        thumbEl.src = meta.thumbnail;
+        el("previewThumb").src = meta.thumbnail;
         el("previewTitle").textContent = meta.title;
         el("previewAuthor").textContent = meta.author ? ("ערוץ: " + meta.author) : "";
         el("videoPreview").style.display = "flex";
@@ -69,9 +70,12 @@
       clipStart: el("clipStart").value.trim(),
       clipEnd: el("clipEnd").value.trim(),
       geoCountry: el("geoSelect").value,
+      speedFactor: el("speedSelect").value,
       sponsorblock: el("sponsorToggle").checked,
       splitChapters: el("chaptersToggle").checked,
-      normalizeAudio: el("normToggle").checked
+      normalizeAudio: el("normToggle").checked,
+      sendEmail: el("emailToggle").checked,
+      emailTo: el("emailToInput").value.trim()
     };
   }
 
@@ -95,7 +99,7 @@
       el("urlInput").value = "";
       el("videoPreview").style.display = "none";
       currentPreview = null;
-      el("hint").textContent = "נשלח ל-GitHub Actions! הקובץ יירד אוטומטית למחשב בסיום.";
+      el("hint").textContent = "נשלח ל-GitHub Actions! ההורדה תישמר אוטומטית בסיום.";
       void refresh();
     } else {
       el("hint").textContent = (res && res.error) || "שגיאה בשליחה";
@@ -130,7 +134,7 @@
   }
 
   function formatDuration(sec) {
-    const s = Number(sec || 0);
+    const s = Math.max(0, Math.floor(Number(sec || 0)));
     if (!s) return "";
     const m = Math.floor(s / 60);
     const r = s % 60;
@@ -227,7 +231,6 @@
         const img = document.createElement("img");
         img.src = item.thumbnail;
         img.style.cssText = "width:106px;height:60px;object-fit:cover;border-radius:8px;flex-shrink:0;";
-        img.onerror = () => { img.style.display = "none"; };
         row.append(img);
       }
       const meta = document.createElement("div");
@@ -322,7 +325,7 @@
       return;
     }
     selectedRecUrls.clear();
-    el("recStatusText").textContent = "משגר חיפוש היסטורי ל-GitHub Actions...";
+    el("recStatusText").textContent = "משגר חיפוש קשיח ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
       payload: {
@@ -345,6 +348,11 @@
     }
     for (const id of ids) {
       const j = jobsObj[id];
+      const elapsedSec = j.startedAt ? Math.max(0, Math.floor((Date.now() - j.startedAt) / 1000)) : 0;
+      const elapsedLabel = (j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled" && elapsedSec > 0)
+        ? (" • ⏱ " + formatDuration(elapsedSec))
+        : "";
+
       const card = document.createElement("div");
       card.style.cssText = "background:var(--surface-2);padding:12px;border-radius:12px;border:1px solid var(--border);display:flex;flex-direction:column;gap:8px;";
       
@@ -355,13 +363,14 @@
       title.textContent = (j.files && j.files[0]) || j.title || j.url;
       const badge = document.createElement("span");
       badge.className = "small muted";
-      badge.textContent = j.quality + " • " + (j.percent || 0) + "%";
+      badge.textContent = j.quality + " • " + (j.percent || 0) + "%" + elapsedLabel;
       topRow.append(title, badge);
 
       const progTrack = document.createElement("div");
       progTrack.className = "progress-track";
       const progBar = document.createElement("div");
       progBar.className = "progress-bar";
+      if (j.status === "failed") progBar.style.background = "var(--fail)";
       progBar.style.width = (j.percent || 5) + "%";
       progTrack.append(progBar);
 
@@ -409,6 +418,9 @@
     const prefs = await chrome.runtime.sendMessage({ type: "GET_PREFS" });
     el("conn-dot").className = "dot " + (prefs && prefs.configured ? "is-ok" : "is-fail");
     el("conn-text").textContent = prefs && prefs.configured ? ("מחובר אל " + prefs.owner + "/" + prefs.repo) : "לא מוגדר — לחץ על הגדרות";
+    if (prefs && prefs.emailTo && !el("emailToInput").value) {
+      el("emailToInput").value = prefs.emailTo;
+    }
     const res = await chrome.runtime.sendMessage({ type: "LIST_JOBS" });
     if (res && res.jobs) renderJobs(res.jobs);
     const recRes = await chrome.runtime.sendMessage({ type: "GET_RECOMMENDATIONS" });
@@ -423,6 +435,6 @@
     if (m && m.type === "JOBS_CHANGED") renderJobs(m.jobs);
     if (m && m.type === "RECS_CHANGED") void refresh();
   });
-  setInterval(refresh, 3000);
+  setInterval(refresh, 2500);
   void refresh();
 })();
