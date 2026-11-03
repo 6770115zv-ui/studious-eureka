@@ -44,7 +44,7 @@ jobs:
           COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
         run: |
           python3 - << 'EOF'
-          import os, sys, re, json, time, base64, shutil, zipfile, subprocess, urllib.parse, glob
+          import os, sys, re, json, time, base64, shutil, zipfile, subprocess
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -56,24 +56,18 @@ jobs:
           target_url = str(inp.get("url", "")).strip()
           quality = str(inp.get("quality", "best")).strip() or "best"
           mode = str(inp.get("mode", "video")).strip() or "video"
-          urls_json = str(inp.get("urls", "")).strip()
           clip_start = str(inp.get("clip_start", "")).strip()
           clip_end = str(inp.get("clip_end", "")).strip()
-          subtitles = str(inp.get("subtitles", "none")).strip()
           raw_sb = str(inp.get("sponsorblock", "{}")).strip()
           cookies_enc = str(inp.get("cookies_enc", "")).strip()
           hex_key = os.environ.get("COOKIE_KEY", "").strip()
 
-          try:
-              opts = json.loads(raw_sb) if raw_sb.startswith("{") else {}
-          except:
-              opts = {}
+          try: opts = json.loads(raw_sb) if raw_sb.startswith("{") else {}
+          except: opts = {}
 
           geo = opts.get("geo") or "IL"
           sb = bool(opts.get("sb"))
           chapters = bool(opts.get("chapters"))
-          norm = bool(opts.get("norm"))
-          speed = str(opts.get("speed") or "1").strip()
 
           out_dir = Path("/tmp/out")
           pkg_dir = Path("/tmp/pkg")
@@ -81,30 +75,24 @@ jobs:
           pkg_dir.mkdir(parents=True, exist_ok=True)
           cookie_file = Path("/tmp/cookies.txt")
 
+          has_ck = False
           if cookies_enc and len(hex_key) == 64:
               try:
                   raw = base64.b64decode(cookies_enc)
                   plain = AESGCM(bytes.fromhex(hex_key)).decrypt(raw[:12], raw[12:], None)
                   cookie_file.write_bytes(plain)
+                  has_ck = True
                   print("Cookies decrypted successfully.", flush=True)
               except Exception as e:
                   print("Cookie decrypt notice:", e)
 
-          # הגדרת איכות מקסימלית אמיתית (חיבור ערוץ וידאו מקסימלי + אודיו מקסימלי)
+          # הגדרת איכות מקסימלית (חיבור ערוץ וידאו + ערוץ אודיו)
           if quality.startswith("audio"):
               fmt_args = ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"]
           elif quality in ("2160", "1440", "1080", "720"):
-              fmt_args = [
-                  "-f", f"bv*[height<={quality}]+ba/b[height<={quality}]/bv*+ba/b",
-                  "-S", f"res:{quality},fps,br",
-                  "--merge-output-format", "mp4"
-              ]
+              fmt_args = ["-f", f"bv*[height<={quality}]+ba/b[height<={quality}]/bv*+ba/b", "-S", f"res:{quality},fps,br", "--merge-output-format", "mp4"]
           else:
-              fmt_args = [
-                  "-f", "bv*+ba/b",
-                  "-S", "res,fps,br",
-                  "--merge-output-format", "mp4"
-              ]
+              fmt_args = ["-f", "bv*+ba/b", "-S", "res,fps,br", "--merge-output-format", "mp4"]
 
           extra_args = ["--geo-bypass", "--no-mtime"]
           if mode != "collection": extra_args.append("--no-playlist")
@@ -115,33 +103,36 @@ jobs:
           if sb: extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
           if chapters: extra_args += ["--split-chapters"]
 
-          # רשימת קליינטים שמספקים 1080p ו-4K ללא חסימת PO-Token
-          hd_strategies = [
-              ["--extractor-args", "youtube:player_client=ios,tv"],
-              ["--extractor-args", "youtube:player_client=android_vr,ios"],
-              ["--extractor-args", "youtube:player_client=tv_embedded,ios"],
-              ["--extractor-args", "youtube:player_client=web,ios"]
-          ]
+          # שלבי הרצה מותאמים: מפרידים בין אלו שדורשים עוגיות לאלו שאינם תומכים בעוגיות
+          attempts = []
+          if has_ck:
+              # קליינטים שתומכים בעוגיות ומזייפים דפדפן כרום אמיתי
+              attempts.append(("Cookies + Web (Chrome Impersonation)", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web,web_creator"]))
+              attempts.append(("Cookies + mweb (Mobile Web)", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb"]))
+          
+          # קליינטים ללא עוגיות (כדי ש-yt-dlp לא ידלג עליהם!)
+          attempts.append(("Standalone iOS (No Cookies)", ["--extractor-args", "youtube:player_client=ios"]))
+          attempts.append(("Standalone TV (No Cookies)", ["--extractor-args", "youtube:player_client=tv"]))
+          attempts.append(("Standalone Android (No Cookies)", ["--extractor-args", "youtube:player_client=android"]))
+          attempts.append(("Fallback best (No Cookies)", []))
 
           def get_dl():
               return [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
 
-          has_ck = cookie_file.exists()
-          for strat in hd_strategies:
+          for label, args in attempts:
               if get_dl(): break
               for item in out_dir.iterdir():
                   if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
                   else: item.unlink(missing_ok=True)
-              
-              ck_args = ["--cookies", str(cookie_file)] if has_ck else []
-              cmd = ["/usr/local/bin/yt-dlp"] + ck_args + fmt_args + extra_args + strat + [
+
+              cmd = ["/usr/local/bin/yt-dlp"] + args + fmt_args + extra_args + [
                   "--ffmpeg-location", "/usr/bin/ffmpeg",
-                  "--retries", "5",
-                  "--fragment-retries", "5",
+                  "--retries", "4",
+                  "--fragment-retries", "4",
                   "-o", "/tmp/out/%(title).150B [%(id)s].%(ext)s",
                   target_url
               ]
-              print("Trying HD Strategy: " + " ".join(strat), flush=True)
+              print(f"=== Trying: {label} ===", flush=True)
               subprocess.run(cmd, check=False)
 
           files = get_dl()
@@ -150,8 +141,7 @@ jobs:
 
           zip_path = pkg_dir / ("dl-" + req_id + ".zip")
           with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
-              for f in files:
-                  zf.write(f, f.relative_to(out_dir))
+              for f in files: zf.write(f, f.relative_to(out_dir))
 
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           sha = os.environ.get("GITHUB_SHA", "")
@@ -165,12 +155,12 @@ jobs:
                   chunk = raw_bytes[offset:offset + chunk_size]
                   b64_payload = json.dumps({"content": base64.b64encode(chunk).decode("ascii"), "encoding": "base64"})
                   p = subprocess.run(["gh", "api", f"repos/{repo}/git/blobs", "-q", ".sha", "--input", "-"], input=b64_payload, text=True, capture_output=True, check=False)
-                  if p.returncode == 0 and p.stdout.strip():
-                      blob_shas.append(p.stdout.strip())
+                  if p.returncode == 0 and p.stdout.strip(): blob_shas.append(p.stdout.strip())
 
           notes = json.dumps({"v": 5, "size": len(raw_bytes), "blobs": blob_shas})
           subprocess.run(["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--target", sha, "--title", tag, "--notes", notes, "--prerelease"], check=False)
           EOF
+
       - name: Upload Backup Artifact
         uses: actions/upload-artifact@v4
         with:
