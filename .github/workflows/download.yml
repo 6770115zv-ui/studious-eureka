@@ -38,7 +38,7 @@ jobs:
           sudo chmod a+rx /usr/local/bin/yt-dlp
           sudo /usr/local/bin/yt-dlp --update-to nightly || true
 
-      - name: Execute Full HD Engine
+      - name: Execute Strict Full HD Engine
         env:
           GH_TOKEN: ${{ github.token }}
           COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
@@ -86,13 +86,22 @@ jobs:
               except Exception as e:
                   print("Cookie decrypt notice:", e)
 
-          # הגדרת איכות מקסימלית (חיבור ערוץ וידאו + ערוץ אודיו)
+          # חיוב איכות HD מלאה - איסור מוחלט על פורמט 18 (360p)
           if quality.startswith("audio"):
               fmt_args = ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"]
           elif quality in ("2160", "1440", "1080", "720"):
-              fmt_args = ["-f", f"bv*[height<={quality}]+ba/b[height<={quality}]/bv*+ba/b", "-S", f"res:{quality},fps,br", "--merge-output-format", "mp4"]
+              fmt_args = [
+                  "-f", f"bv*[height<={quality}]+ba",
+                  "-S", f"res:{quality},fps,br",
+                  "--merge-output-format", "mp4"
+              ]
           else:
-              fmt_args = ["-f", "bv*+ba/b", "-S", "res,fps,br", "--merge-output-format", "mp4"]
+              # ברירת מחדל: וידאו מקסימלי + אודיו מקסימלי (ללא נפילה ל-360p)
+              fmt_args = [
+                  "-f", "bv*[height>=720]+ba/bv*+ba",
+                  "-S", "res:1080,fps,br",
+                  "--merge-output-format", "mp4"
+              ]
 
           extra_args = ["--geo-bypass", "--no-mtime"]
           if mode != "collection": extra_args.append("--no-playlist")
@@ -103,18 +112,14 @@ jobs:
           if sb: extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
           if chapters: extra_args += ["--split-chapters"]
 
-          # שלבי הרצה מותאמים: מפרידים בין אלו שדורשים עוגיות לאלו שאינם תומכים בעוגיות
-          attempts = []
+          # רשימת ניסיונות: קודם כל קליינטים שמספקים HD ללא חסימת SABR/PO-Token
+          attempts = [
+              ("iOS Client (Pure 1080p HD)", ["--extractor-args", "youtube:player_client=ios"]),
+              ("TV Client (HD Stream)", ["--extractor-args", "youtube:player_client=tv"]),
+              ("Android Client (HD Adaptive)", ["--extractor-args", "youtube:player_client=android"]),
+          ]
           if has_ck:
-              # קליינטים שתומכים בעוגיות ומזייפים דפדפן כרום אמיתי
-              attempts.append(("Cookies + Web (Chrome Impersonation)", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web,web_creator"]))
-              attempts.append(("Cookies + mweb (Mobile Web)", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb"]))
-          
-          # קליינטים ללא עוגיות (כדי ש-yt-dlp לא ידלג עליהם!)
-          attempts.append(("Standalone iOS (No Cookies)", ["--extractor-args", "youtube:player_client=ios"]))
-          attempts.append(("Standalone TV (No Cookies)", ["--extractor-args", "youtube:player_client=tv"]))
-          attempts.append(("Standalone Android (No Cookies)", ["--extractor-args", "youtube:player_client=android"]))
-          attempts.append(("Fallback best (No Cookies)", []))
+              attempts.append(("Chrome Impersonated + Cookies", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web"]))
 
           def get_dl():
               return [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
@@ -137,7 +142,7 @@ jobs:
 
           files = get_dl()
           if not files:
-              raise SystemExit("::error::הורדת HD נכשלה")
+              raise SystemExit("::error::הורדת HD מלא נכשלה בכל הקליינטים")
 
           zip_path = pkg_dir / ("dl-" + req_id + ".zip")
           with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
