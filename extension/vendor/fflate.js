@@ -40,8 +40,7 @@
     const buf = data instanceof Uint8Array ? data : new Uint8Array(data);
     const out = {};
     for (const item of parseZipEntries(buf)) {
-      if (item.method === 0) out[item.name] = new Uint8Array(item.raw);
-      else out[item.name] = new Uint8Array(item.raw);
+      out[item.name] = new Uint8Array(item.raw);
     }
     return out;
   }
