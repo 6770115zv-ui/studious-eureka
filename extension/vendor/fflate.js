@@ -21,14 +21,18 @@
       if (readU32(buf, cd) !== 0x02014b50) break;
       const method = readU16(buf, cd + 10);
       const compSize = readU32(buf, cd + 20);
+      const uncompSize = readU32(buf, cd + 24);
       const nameLen = readU16(buf, cd + 28);
       const extraLen = readU16(buf, cd + 30);
       const commentLen = readU16(buf, cd + 32);
       const lho = readU32(buf, cd + 42);
       const name = decodeUtf8(buf.subarray(cd + 46, cd + 46 + nameLen));
       cd += 46 + nameLen + extraLen + commentLen;
-      const dataStart = lho + 30 + readU16(buf, lho + 26) + readU16(buf, lho + 28);
-      list.push({ name, method, raw: buf.subarray(dataStart, dataStart + compSize) });
+      if (name.endsWith("/")) continue;
+      const lhoNameLen = readU16(buf, lho + 26);
+      const lhoExtraLen = readU16(buf, lho + 28);
+      const dataStart = lho + 30 + lhoNameLen + lhoExtraLen;
+      list.push({ name, method, uncompSize, raw: buf.subarray(dataStart, dataStart + compSize) });
     }
     return list;
   }
@@ -37,7 +41,6 @@
     const out = {};
     for (const item of parseZipEntries(buf)) {
       if (item.method === 0) out[item.name] = new Uint8Array(item.raw);
-      else if (item.method === 8 && typeof require === "function") out[item.name] = new Uint8Array(require("zlib").inflateRawSync(item.raw));
       else out[item.name] = new Uint8Array(item.raw);
     }
     return out;
@@ -49,12 +52,8 @@
       if (item.method === 0) {
         out[item.name] = new Uint8Array(item.raw);
       } else if (item.method === 8) {
-        try {
-          const stream = new Blob([item.raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-          out[item.name] = new Uint8Array(await new Response(stream).arrayBuffer());
-        } catch {
-          out[item.name] = unzipSync(buf)[item.name];
-        }
+        const stream = new Blob([item.raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        out[item.name] = new Uint8Array(await new Response(stream).arrayBuffer());
       } else {
         out[item.name] = new Uint8Array(item.raw);
       }
