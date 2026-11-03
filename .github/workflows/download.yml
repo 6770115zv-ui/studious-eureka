@@ -29,16 +29,27 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Install dependencies
+      - name: Set up Node.js for POT Server
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies & Start POT Provider Server
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends ffmpeg zip python3-cryptography python3-pip atomicparsley
-          python3 -m pip install --break-system-packages -q -U "yt-dlp[default,curl-cffi]"
+          python3 -m pip install --break-system-packages -q -U "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider
           sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
-          sudo /usr/local/bin/yt-dlp --update-to nightly || true
 
-      - name: Execute Strict Full HD Engine
+          # הפעלת שרת POT מקומי ברקע ליצירת GVS PO-Tokens עבור 1080p/4K
+          git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/pot-server || true
+          if [ -d "/tmp/pot-server/server" ]; then
+            cd /tmp/pot-server/server && npm install && node index.js &
+            sleep 3
+          fi
+
+      - name: Execute Full HD Engine
         env:
           GH_TOKEN: ${{ github.token }}
           COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
@@ -86,19 +97,18 @@ jobs:
               except Exception as e:
                   print("Cookie decrypt notice:", e)
 
-          # חיוב איכות HD מלאה - איסור מוחלט על פורמט 18 (360p)
+          # איכות מרבית: וידאו HD + אודיו נפרד באיכות מקסימלית
           if quality.startswith("audio"):
               fmt_args = ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"]
           elif quality in ("2160", "1440", "1080", "720"):
               fmt_args = [
-                  "-f", f"bv*[height<={quality}]+ba",
+                  "-f", f"bv*[height<={quality}]+ba/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]",
                   "-S", f"res:{quality},fps,br",
                   "--merge-output-format", "mp4"
               ]
           else:
-              # ברירת מחדל: וידאו מקסימלי + אודיו מקסימלי (ללא נפילה ל-360p)
               fmt_args = [
-                  "-f", "bv*[height>=720]+ba/bv*+ba",
+                  "-f", "bv*[height<=1080]+ba/bestvideo+bestaudio/best",
                   "-S", "res:1080,fps,br",
                   "--merge-output-format", "mp4"
               ]
@@ -112,14 +122,15 @@ jobs:
           if sb: extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
           if chapters: extra_args += ["--split-chapters"]
 
-          # רשימת ניסיונות: קודם כל קליינטים שמספקים HD ללא חסימת SABR/PO-Token
+          # אסטרטגיות עקיפה חכמות: עם העוגיות ועם שרת ה-PO Token המקומי
+          ck_arg = ["--cookies", str(cookie_file)] if has_ck else []
           attempts = [
-              ("iOS Client (Pure 1080p HD)", ["--extractor-args", "youtube:player_client=ios"]),
-              ("TV Client (HD Stream)", ["--extractor-args", "youtube:player_client=tv"]),
-              ("Android Client (HD Adaptive)", ["--extractor-args", "youtube:player_client=android"]),
+              ("mweb + Cookies + POT Provider", ck_arg + ["--extractor-args", "youtube:player_client=mweb"]),
+              ("web + Chrome Impersonation + Cookies", ck_arg + ["--impersonate", "chrome", "--extractor-args", "youtube:player_client=web"]),
+              ("android_vr + ios fallback", ["--extractor-args", "youtube:player_client=android_vr,ios"]),
+              ("tv client fallback", ["--extractor-args", "youtube:player_client=tv"]),
+              ("General best fallback", ck_arg)
           ]
-          if has_ck:
-              attempts.append(("Chrome Impersonated + Cookies", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web"]))
 
           def get_dl():
               return [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
@@ -142,7 +153,7 @@ jobs:
 
           files = get_dl()
           if not files:
-              raise SystemExit("::error::הורדת HD מלא נכשלה בכל הקליינטים")
+              raise SystemExit("::error::הורדת HD מלא נכשלה בכל הניסיונות")
 
           zip_path = pkg_dir / ("dl-" + req_id + ".zip")
           with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
