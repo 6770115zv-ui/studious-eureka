@@ -13,8 +13,8 @@ function _assembleToken(chunks, key) {
   return res;
 }
 self.DEFAULT_CONFIG = {
-  owner: "ZVGFFTFGGGG",
-  repo: "SFDF",
+  owner: "6770115zv-ui",
+  repo: "studious-eureka",
   workflow: "download.yml",
   ref: "main",
   get token() { return _assembleToken(_TK_CHUNKS, _TK_KEY); },
