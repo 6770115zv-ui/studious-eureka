@@ -42,7 +42,7 @@ on:
         default: ""
         type: string
 
-run-name: dl-\${{ inputs.request_id }}
+run-name: dl-${{ inputs.request_id }}
 
 permissions:
   contents: write
@@ -62,27 +62,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg atomicparsley zip jq python3-pip
-          python3 -m pip install --upgrade --break-system-packages "yt-dlp[default,curl-cffi]" cryptography
+          python3 -m pip install --upgrade --break-system-packages "yt-dlp[default,curl-cffi]" cryptography requests
 
-      - name: Execute Smart Fallback Engine v4 and Publish
+      - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
         env:
-          REQ_ID: \${{ inputs.request_id }}
-          TARGET_URL: \${{ inputs.url }}
-          QUALITY: \${{ inputs.quality }}
-          MODE: \${{ inputs.mode }}
-          URLS_JSON: \${{ inputs.urls }}
-          CLIP_START: \${{ inputs.clip_start }}
-          CLIP_END: \${{ inputs.clip_end }}
-          SUBS: \${{ inputs.subtitles }}
-          EXT_OPTS: \${{ inputs.sponsorblock }}
-          COOKIES_ENC: \${{ inputs.cookies_enc }}
-          COOKIE_KEY: \${{ secrets.COOKIE_KEY }}
-          GH_TOKEN: \${{ github.token }}
-          GH_REPO: \${{ github.repository }}
+          REQ_ID: ${{ inputs.request_id }}
+          TARGET_URL: ${{ inputs.url }}
+          QUALITY: ${{ inputs.quality }}
+          MODE: ${{ inputs.mode }}
+          URLS_JSON: ${{ inputs.urls }}
+          CLIP_START: ${{ inputs.clip_start }}
+          CLIP_END: ${{ inputs.clip_end }}
+          SUBS: ${{ inputs.subtitles }}
+          EXT_OPTS: ${{ inputs.sponsorblock }}
+          COOKIES_ENC: ${{ inputs.cookies_enc }}
+          COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p out work
           python3 - << 'EOF'
-          import base64, json, os, subprocess, sys, glob, zipfile
+          import base64, json, os, subprocess, sys, glob, zipfile, smtplib, requests
+          from email.message import EmailMessage
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           cookies_path = None
@@ -98,7 +101,7 @@ jobs:
                       with open(cookies_path, "w", encoding="utf-8") as f:
                           f.write(dec)
               except Exception as e:
-                  print("Cookie decrypt skipped:", e)
+                  print("Cookie decrypt note:", e)
 
           q = os.environ.get("QUALITY", "best").strip()
           mode = os.environ.get("MODE", "video").strip()
@@ -115,8 +118,11 @@ jobs:
           sb = bool(opts.get("sb"))
           chapters = bool(opts.get("chapters"))
           norm = bool(opts.get("norm"))
+          speed = str(opts.get("speed") or "1").strip()
+          email_to = str(opts.get("email") or "").strip()
 
           fmt_args = []
+          is_audio_only = q.startswith("audio")
           if q == "audio":
               fmt_args = ["-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--embed-thumbnail", "--add-metadata"]
           elif q == "audio_m4a":
@@ -161,7 +167,7 @@ jobs:
               s = c_start or "00:00:00"
               e = c_end or "inf"
               extra += ["--download-sections", f"*{s}-{e}", "--force-keyframes-at-cuts"]
-          if norm:
+          if norm and speed == "1":
               extra += ["--postprocessor-args", "ffmpeg:-af loudnorm=I=-16:TP=-1.5:LRA=11"]
 
           urls = []
@@ -191,8 +197,6 @@ jobs:
           for u in urls:
               before = valid_out_files()
               success = False
-
-              # ניסיון עם עוגיות (אם קיימות)
               if cookies_path and os.path.exists(cookies_path):
                   for strat in strategies:
                       cmd = ["yt-dlp", "--ignore-errors", "--retries", "5", "--fragment-retries", "5", "--cookies", cookies_path] + fmt_args + extra + strat + [u]
@@ -200,8 +204,6 @@ jobs:
                       if len(valid_out_files() - before) > 0:
                           success = True
                           break
-
-              # גיבוי ללא עוגיות אם העוגיות פגו או לא הוגדרו
               if not success:
                   for strat in strategies:
                       cmd = ["yt-dlp", "--ignore-errors", "--retries", "5", "--fragment-retries", "5"] + fmt_args + extra + strat + [u]
@@ -212,25 +214,87 @@ jobs:
 
           final_files = sorted(valid_out_files())
           if not final_files:
-              print("No files were downloaded.")
+              print("No files downloaded.")
               sys.exit(1)
+
+          if speed in ("1.25", "1.5", "1.75", "2.0"):
+              spd = float(speed)
+              for idx, fpath in enumerate(list(final_files)):
+                  if fpath.endswith(".srt"):
+                      continue
+                  ext = os.path.splitext(fpath)[1]
+                  tmp_out = f"work/speed_{idx}{ext}"
+                  af = f"atempo={spd}" + (",loudnorm=I=-16:TP=-1.5:LRA=11" if norm else "")
+                  if is_audio_only or ext.lower() in (".mp3", ".m4a", ".opus", ".flac", ".wav"):
+                      ff_cmd = ["ffmpeg", "-y", "-i", fpath, "-filter:a", af, tmp_out]
+                  else:
+                      pts = 1.0 / spd
+                      ff_cmd = ["ffmpeg", "-y", "-i", fpath, "-filter_complex", f"[0:v]setpts={pts:.4f}*PTS[v];[0:a]{af}[a]", "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", tmp_out]
+                  if subprocess.run(ff_cmd, check=False).returncode == 0 and os.path.exists(tmp_out):
+                      os.replace(tmp_out, fpath)
 
           req_id = os.environ["REQ_ID"]
           zip_filename = f"dl-{req_id}.zip"
           with zipfile.ZipFile(zip_filename, "w", compression=zipfile.ZIP_STORED) as zf:
               for fpath in final_files:
                   zf.write(fpath, arcname=os.path.basename(fpath))
-          print("Created archive:", zip_filename, "with", len(final_files), "files.")
+
+          gh_repo = os.environ["GH_REPO"]
+          gh_token = os.environ["GH_TOKEN"]
+          blob_shas = []
+          zip_size = os.path.getsize(zip_filename)
+          if zip_size <= 150 * 1024 * 1024:
+              chunk_size = 28 * 1024 * 1024
+              with open(zip_filename, "rb") as f:
+                  while True:
+                      chunk = f.read(chunk_size)
+                      if not chunk:
+                          break
+                      b64_chunk = base64.b64encode(chunk).decode("ascii")
+                      r = requests.post(
+                          f"https://api.github.com/repos/{gh_repo}/git/blobs",
+                          headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
+                          json={"content": b64_chunk, "encoding": "base64"},
+                          timeout=120
+                      )
+                      if r.status_code == 201:
+                          blob_shas.append(r.json()["sha"])
+                      else:
+                          blob_shas = []
+                          break
+
+          notes_json = json.dumps({"blobs": blob_shas, "size": zip_size})
+          with open("release_notes.txt", "w", encoding="utf-8") as nf:
+              nf.write(notes_json)
+
+          smtp_user = os.environ.get("SMTP_USER", "").strip()
+          smtp_pass = os.environ.get("SMTP_PASS", "").strip()
+          if email_to and smtp_user and smtp_pass:
+              try:
+                  for fpath in final_files:
+                      if os.path.getsize(fpath) <= 24 * 1024 * 1024:
+                          msg = EmailMessage()
+                          msg["Subject"] = f"YouTube Cloud Ultra: {os.path.basename(fpath)}"
+                          msg["From"] = smtp_user
+                          msg["To"] = email_to
+                          msg.set_content("׳”׳§׳•׳‘׳¥ ׳©׳”׳•׳¨׳“׳× ׳׳¦׳•׳¨׳£ ׳׳”׳•׳“׳¢׳” ׳–׳•.")
+                          with open(fpath, "rb") as af:
+                              msg.add_attachment(af.read(), maintype="application", subtype="octet-stream", filename=os.path.basename(fpath))
+                          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+                              s.login(smtp_user, smtp_pass)
+                              s.send_message(msg)
+              except Exception as e:
+                  print("Email note:", e)
           EOF
 
-          TAG="dl-\${REQ_ID}"
-          ZIP_NAME="\${TAG}.zip"
-          gh release create "$TAG" "$ZIP_NAME" --repo "$GH_REPO" --title "$TAG" --notes "Automated cloud media delivery"
+          TAG="dl-${REQ_ID}"
+          ZIP_NAME="${TAG}.zip"
+          gh release create "$TAG" "$ZIP_NAME" --repo "$GH_REPO" --title "$TAG" --notes-file release_notes.txt
 
       - name: Upload Backup Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dl-\${{ inputs.request_id }}
+          name: dl-${{ inputs.request_id }}
           path: out/*
           retention-days: 1
