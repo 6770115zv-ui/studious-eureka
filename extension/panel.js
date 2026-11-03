@@ -27,7 +27,10 @@
       const meta = await self.fetchYoutubeOembed(firstUrl);
       if (meta) {
         currentPreview = meta;
-        el("previewThumb").src = meta.thumbnail;
+        const thumbEl = el("previewThumb");
+        thumbEl.onerror = () => { thumbEl.style.display = "none"; };
+        thumbEl.onload = () => { thumbEl.style.display = "block"; };
+        thumbEl.src = meta.thumbnail;
         el("previewTitle").textContent = meta.title;
         el("previewAuthor").textContent = meta.author ? ("ערוץ: " + meta.author) : "";
         el("videoPreview").style.display = "flex";
@@ -86,13 +89,13 @@
       ? { ...baseOpts, urls, mode: "list" }
       : { ...baseOpts, url: urls[0], mode: el("collectionToggle").checked ? "collection" : "video" };
 
-    el("hint").textContent = "מצפין עוגיות ושולח בקשה ל-GitHub Actions...";
+    el("hint").textContent = "שולח בקשה ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({ type: "START_DOWNLOAD", payload });
     if (res && res.ok) {
       el("urlInput").value = "";
       el("videoPreview").style.display = "none";
       currentPreview = null;
-      el("hint").textContent = "נשלח ל-GitHub Actions! ההורדה תישמר אוטומטית בסיום.";
+      el("hint").textContent = "נשלח ל-GitHub Actions! הקובץ יירד אוטומטית למחשב בסיום.";
       void refresh();
     } else {
       el("hint").textContent = (res && res.error) || "שגיאה בשליחה";
@@ -224,6 +227,7 @@
         const img = document.createElement("img");
         img.src = item.thumbnail;
         img.style.cssText = "width:106px;height:60px;object-fit:cover;border-radius:8px;flex-shrink:0;";
+        img.onerror = () => { img.style.display = "none"; };
         row.append(img);
       }
       const meta = document.createElement("div");
@@ -318,7 +322,7 @@
       return;
     }
     selectedRecUrls.clear();
-    el("recStatusText").textContent = "משגר חיפוש קשיח ל-GitHub Actions...";
+    el("recStatusText").textContent = "משגר חיפוש היסטורי ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
       payload: {
