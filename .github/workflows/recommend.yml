@@ -39,6 +39,7 @@ jobs:
           MIN_VIEWS: ${{ inputs.min_views }}
           EXCLUDE_IDS: ${{ inputs.exclude_ids }}
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           python3 - << 'EOF'
           import json, os, re, urllib.parse, subprocess
@@ -51,27 +52,36 @@ jobs:
               min_views = 500000
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
 
-          # טוקנים לבדיקת התאמה קשיחה לנושא המבוקש
-          tokens = [t.lower() for t in re.split(r"\s+", query) if len(t) >= 2]
+          tokens = [t.lower() for t in re.split(r"[\s\-_,.;:|]+", query) if len(t) >= 2]
 
-          # 1) חיפוש ממוין לפי כמות צפיות מכל הזמנים ביוטיוב (sp=CAMSAhAB = Sort by View Count)
           encoded_q = urllib.parse.quote_plus(query)
+          # sp=CAMSAhAB ממיין ביוטיוב לפי שיא צפיות מכל הזמנים (View Count All-Time)
           view_sorted_url = f"https://www.youtube.com/results?search_query={encoded_q}&sp=CAMSAhAB"
-
+          # חיפוש נוסף ממוין לפי צפיות עם מילת המפתח
           urls_to_scan = [
-              (view_sorted_url, "1:80"),
+              (view_sorted_url, "1:90"),
               (f"ytsearch80:{query}", None)
           ]
 
           def fetch_list(target):
               url, pl_items = target
-              cmd = ["yt-dlp", "--flat-playlist", "--dump-json", "--ignore-errors", "--no-warnings"]
+              cmd = [
+                  "yt-dlp",
+                  "--flat-playlist",
+                  "--dump-json",
+                  "--ignore-errors",
+                  "--no-warnings",
+                  "--extractor-args", "youtube:lang=he"
+              ]
               if pl_items:
                   cmd += ["--playlist-items", pl_items]
               cmd.append(url)
               res = subprocess.run(cmd, capture_output=True, text=True)
               items = []
               for line in res.stdout.splitlines():
+                  line = line.strip()
+                  if not line:
+                      continue
                   try:
                       items.append(json.loads(line))
                   except Exception:
@@ -85,38 +95,42 @@ jobs:
 
           seen = set(exclude)
           candidates = []
-          for e in raw_entries:
+          for idx, e in enumerate(raw_entries):
               vid = e.get("id")
               title = (e.get("title") or "").strip()
               if not vid or len(vid) != 11 or vid in seen or not title:
                   continue
               seen.add(vid)
 
-              haystack = f"{title} {e.get('channel') or e.get('uploader') or ''}".lower()
-              # וידוא התאמה לנושא החיפוש
-              if tokens:
-                  matched = sum(1 for t in tokens if t in haystack)
-                  if matched < max(1, (len(tokens) + 1) // 2):
-                      continue
+              channel_name = (e.get("channel") or e.get("uploader") or "").strip()
+              haystack = f"{title} {channel_name}".lower()
+
+              # התאמה לנושא החיפוש
+              matched_tokens = sum(1 for t in tokens if t in haystack) if tokens else 1
+              if tokens and matched_tokens == 0:
+                  continue
 
               views = int(e.get("view_count") or 0)
               candidates.append({
                   "id": vid,
                   "title": title,
                   "url": f"https://www.youtube.com/watch?v={vid}",
-                  "channel": e.get("channel") or e.get("uploader") or "",
+                  "channel": channel_name,
                   "views": views,
                   "duration": int(e.get("duration") or 0),
-                  "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+                  "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+                  "match_score": matched_tokens,
+                  "order_idx": idx
               })
 
-          # אם לחלק מהתוצאות חסר view_count ב-flat-playlist, נשלים להן מטא-דאטה במקביל
-          need_meta = [c for c in candidates if c["views"] == 0][:35]
+          # השלמת מספר צפיות מדויק לסרטונים שבהם יוטיוב לא החזיר view_count ברשימה השטוחה
+          need_meta = [c for c in candidates if c["views"] == 0][:40]
           def enrich(c):
               cmd = ["yt-dlp", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
               r = subprocess.run(cmd, capture_output=True, text=True)
               try:
-                  d = json.loads(r.stdout.splitlines()[0])
+                  first_line = r.stdout.splitlines()[0]
+                  d = json.loads(first_line)
                   c["views"] = int(d.get("view_count") or 0)
                   c["duration"] = int(d.get("duration") or c["duration"] or 0)
                   c["channel"] = d.get("channel") or d.get("uploader") or c["channel"]
@@ -127,17 +141,22 @@ jobs:
               with ThreadPoolExecutor(max_workers=8) as ex:
                   list(ex.map(enrich, need_meta))
 
-          # סינון לפי מינימום צפיות ומיון קשיח מהנצפה ביותר בהיסטוריה ומטה
+          # מיון קשיח: קודם התאמה מלאה לכל מילות החיפוש + כמות צפיות היסטורית מהגבוה לנמוך
+          candidates.sort(key=lambda x: (x["match_score"] == len(tokens), x["views"]), reverse=True)
+
           filtered = [c for c in candidates if c["views"] >= min_views]
-          if len(filtered) < 8:
-              filtered = sorted(candidates, key=lambda x: x["views"], reverse=True)[:25]
+          if len(filtered) < 10:
+              filtered = sorted(candidates, key=lambda x: x["views"], reverse=True)[:30]
           else:
-              filtered.sort(key=lambda x: x["views"], reverse=True)
-              filtered = filtered[:30]
+              filtered = sorted(filtered, key=lambda x: x["views"], reverse=True)[:30]
+
+          for c in filtered:
+              c.pop("match_score", None)
+              c.pop("order_idx", None)
 
           with open("recommendations.json", "w", encoding="utf-8") as f:
               json.dump({"query": query, "items": filtered}, f, ensure_ascii=False)
           EOF
 
           TAG="rec-${REQ_ID}"
-          gh release create "$TAG" recommendations.json --title "$TAG" --notes "Recommendations result"
+          gh release create "$TAG" recommendations.json --repo "$GH_REPO" --title "$TAG" --notes "Recommendations result"
