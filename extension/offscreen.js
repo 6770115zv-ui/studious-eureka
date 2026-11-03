@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  const ZIP_CACHE_NAME = "ytcloud-assets-v3";
+  const ZIP_CACHE_NAME = "ytcloud-assets-v5";
   const MIME = {
     mp4: "video/mp4", webm: "video/webm", mkv: "video/x-matroska", mp3: "audio/mpeg",
     m4a: "audio/mp4", flac: "audio/flac", wav: "audio/wav", opus: "audio/opus", srt: "text/plain", zip: "application/zip"
@@ -22,7 +22,6 @@
   async function fetchWithRetry(apiUrl, token, fallbackUrl) {
     const isArtifactUrl = apiUrl && apiUrl.includes("/actions/artifacts/");
     const candidates = [
-      // במאגר ציבורי בנטפרי: קישור הורדה ישיר ללא כותרת Authorization עובד חלק עם הפניות ל-objects.githubusercontent.com
       fallbackUrl ? { url: fallbackUrl, headers: {} } : null,
       apiUrl ? {
         url: apiUrl,
@@ -48,7 +47,7 @@
           } else { lastErr = "HTTP " + res.status; }
         } catch (e) { lastErr = e.message || "Failed to fetch"; }
       }
-      if (attempt < 4) await sleep(2000 * attempt);
+      if (attempt < 4) await sleep(1500 * attempt);
     }
     throw new Error(lastErr);
   }
@@ -75,7 +74,7 @@
         const blob = new Blob([data], { type: MIME[ext] || "application/octet-stream" });
         files.push({ name: cleanName, size: data.length, blobUrl: URL.createObjectURL(blob) });
       }
-      return files.length ? { ok: true, files } : { ok: false, error: "ארכיון ה-ZIP ריק" };
+      return files.length ? { ok: true, files } : { ok: false, error: "׳׳¨׳›׳™׳•׳ ׳”-ZIP ׳¨׳™׳§" };
     } catch (e) { return { ok: false, error: e.message }; }
   }
 
