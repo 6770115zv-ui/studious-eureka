@@ -35,7 +35,7 @@ on:
         type: string
       sponsorblock:
         required: false
-        default: "{}"
+        default: ""
         type: string
       cookies_enc:
         required: false
@@ -53,18 +53,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Set up Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Install yt-dlp + ffmpeg + curl_cffi + atomicparsley
+      - name: Install yt-dlp + ffmpeg + tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg atomicparsley zip jq python3-pip
           python3 -m pip install --upgrade --break-system-packages "yt-dlp[default,curl-cffi]" cryptography requests
 
-      - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
+      - name: Execute Smart Engine v5
         env:
           REQ_ID: ${{ inputs.request_id }}
           TARGET_URL: ${{ inputs.url }}
@@ -101,7 +96,7 @@ jobs:
                       with open(cookies_path, "w", encoding="utf-8") as f:
                           f.write(dec)
               except Exception as e:
-                  print("Cookie decrypt note:", e)
+                  print("Cookie note:", e)
 
           q = os.environ.get("QUALITY", "best").strip()
           mode = os.environ.get("MODE", "video").strip()
@@ -110,7 +105,8 @@ jobs:
           c_end = os.environ.get("CLIP_END", "").strip()
 
           try:
-              opts = json.loads(os.environ.get("EXT_OPTS", "{}") or "{}")
+              raw_opts = os.environ.get("EXT_OPTS", "")
+              opts = json.loads(raw_opts) if raw_opts.startswith("{") else {}
           except Exception:
               opts = {}
 
@@ -277,7 +273,7 @@ jobs:
                           msg["Subject"] = f"YouTube Cloud Ultra: {os.path.basename(fpath)}"
                           msg["From"] = smtp_user
                           msg["To"] = email_to
-                          msg.set_content("׳”׳§׳•׳‘׳¥ ׳©׳”׳•׳¨׳“׳× ׳׳¦׳•׳¨׳£ ׳׳”׳•׳“׳¢׳” ׳–׳•.")
+                          msg.set_content("הקובץ שהורדת מצורף להודעה זו.")
                           with open(fpath, "rb") as af:
                               msg.add_attachment(af.read(), maintype="application", subtype="octet-stream", filename=os.path.basename(fpath))
                           with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
