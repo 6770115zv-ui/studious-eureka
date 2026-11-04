@@ -74,7 +74,7 @@
         const blob = new Blob([data], { type: MIME[ext] || "application/octet-stream" });
         files.push({ name: cleanName, size: data.length, blobUrl: URL.createObjectURL(blob) });
       }
-      return files.length ? { ok: true, files } : { ok: false, error: "׳׳¨׳›׳™׳•׳ ׳”-ZIP ׳¨׳™׳§" };
+      return files.length ? { ok: true, files } : { ok: false, error: "ארכיון ה-ZIP ריק" };
     } catch (e) { return { ok: false, error: e.message }; }
   }
 
