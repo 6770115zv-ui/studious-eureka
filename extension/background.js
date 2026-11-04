@@ -3,7 +3,7 @@ importScripts("shared/common.js");
 
 const BUILTIN_CONFIG = {
   owner: "6770115zv-ui", repo: "studious-eureka", workflow: "download.yml", ref: "main",
-  token: "", cookieKey: "", autoCleanRelease: "true", updateOwner: "6770115zv-ui", updateRepo: "studious-eureka",
+  token: "", cookieKey: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3", autoCleanRelease: "true", updateOwner: "6770115zv-ui", updateRepo: "studious-eureka",
   emailTo: ""
 };
 try { importScripts("config.js"); } catch {}
@@ -25,7 +25,15 @@ const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
 async function getConfig() {
   const stored = (await chrome.storage.local.get(CFG_KEY))[CFG_KEY] || {};
-  const cfg = { ...DEFAULTS, ...stored };
+  const cfg = { ...DEFAULTS };
+  for (const [k, v] of Object.entries(stored)) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") {
+      cfg[k] = String(v).trim();
+    }
+  }
+  if (self.DEFAULT_CONFIG && self.DEFAULT_CONFIG.token && !cfg.token) {
+    cfg.token = self.DEFAULT_CONFIG.token;
+  }
   for (const k of Object.keys(BUILTIN_CONFIG)) cfg[k] = String(cfg[k] ?? "").trim();
   if (!cfg.workflow) cfg.workflow = "download.yml";
   if (!cfg.ref) cfg.ref = "main";
@@ -122,7 +130,7 @@ async function ghFetch(url, cfg, init = {}, retries = 4) {
       if (attempt < retries) await sleep(1500 * attempt);
     }
   }
-  throw lastErr || new Error("׳©׳’׳™׳׳× ׳¨׳©׳× ׳‘׳×׳§׳©׳•׳¨׳× ׳׳•׳ GitHub API");
+  throw lastErr || new Error("שגיאת רשת בתקשורת מול GitHub API");
 }
 
 function hexToBytes(hex) {
@@ -215,7 +223,7 @@ async function findRunByTitle(cfg, targetTitle, signal, dispatchedAt) {
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?event=workflow_dispatch&per_page=30";
   const since = (dispatchedAt || Date.now()) - 25000;
   for (let i = 0; i < 120; i++) {
-    if (signal && signal.cancelled) throw new Error("׳‘׳•׳˜׳");
+    if (signal && signal.cancelled) throw new Error("בוטל");
     const res = await ghFetch(url, cfg);
     if (res.ok) {
       const runs = ((await res.json()).workflow_runs) || [];
@@ -227,7 +235,7 @@ async function findRunByTitle(cfg, targetTitle, signal, dispatchedAt) {
     }
     await sleep(2000);
   }
-  throw new Error("׳׳ ׳ ׳׳¦׳׳” ׳¨׳™׳¦׳” ׳‘-GitHub");
+  throw new Error("לא נמצאה ריצה ב-GitHub");
 }
 
 async function fetchLiveStepInfo(cfg, runId, tickIdx) {
@@ -242,15 +250,15 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
     const totalCount = Math.max(1, ghJob.steps.length);
     if (active) {
       const nameMap = {
-        "Set up Deno": "׳׳›׳™׳ ׳¡׳‘׳™׳‘׳× ׳¨׳™׳¦׳” ׳‘׳¢׳ ׳ (Deno)...",
-        "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "׳׳×׳§׳™׳ ׳›׳׳™ ׳”׳•׳¨׳“׳” ׳•׳§׳™׳“׳•׳“ (yt-dlp + FFmpeg)...",
-        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "׳׳•׳¨׳™׳“ ׳‘׳׳™׳›׳•׳× ׳׳¨׳‘׳™׳×, ׳׳¢׳‘׳“ ׳•׳׳•׳¨׳– ׳׳“׳™׳” ׳‘׳¢׳ ׳ (Smart Engine v5)...",
-        "Upload Backup Artifact": "׳©׳•׳׳¨ ׳’׳™׳‘׳•׳™ ׳×׳•׳¦׳¨ ׳‘-GitHub..."
+        "Set up Deno": "מכין סביבת ריצה בענן (Deno)...",
+        "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "מתקין כלי הורדה וקידוד (yt-dlp Nightly + PO Token + FFmpeg)...",
+        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית, מעבד ואורז מדיה בענן (Smart Engine v5)...",
+        "Upload Backup Artifact": "שומר גיבוי תוצר ב-GitHub..."
       };
       const baseStepPct = 20 + Math.round((completedCount / totalCount) * 35);
       const smoothBoost = Math.min(16, Math.floor(tickIdx * 1.2));
       return {
-        label: nameMap[active.name] || ("׳׳‘׳¦׳¢ ׳©׳׳‘: " + active.name),
+        label: nameMap[active.name] || ("מבצע שלב: " + active.name),
         pct: Math.min(72, baseStepPct + smoothBoost)
       };
     }
@@ -261,7 +269,7 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
 async function waitForRun(cfg, runId, onTick, signal) {
   let cachedStepInfo = null;
   for (let i = 0; i < 600; i++) {
-    if (signal && signal.cancelled) throw new Error("׳‘׳•׳˜׳");
+    if (signal && signal.cancelled) throw new Error("בוטל");
     const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + runId, cfg);
     if (!res.ok) throw new Error("HTTP " + res.status);
     const run = await res.json();
@@ -278,7 +286,7 @@ async function waitForRun(cfg, runId, onTick, signal) {
     if (onTick) onTick(run, i, cachedStepInfo);
     await sleep(3500);
   }
-  throw new Error("׳–׳׳ ׳”׳”׳׳×׳ ׳” ׳”׳¡׳×׳™׳™׳");
+  throw new Error("זמן ההמתנה הסתיים");
 }
 
 async function findReleaseAssetsByTag(cfg, tag) {
@@ -322,7 +330,7 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
     let totalLen = 0;
     for (let i = 0; i < blobShas.length; i++) {
       const sha = blobShas[i];
-      patchJob(jobId, { detail: "׳׳•׳©׳ ׳™׳©׳™׳¨׳•׳× ׳“׳¨׳ api.github.com (׳—׳׳§ " + (i + 1) + "/" + blobShas.length + ")..." });
+      patchJob(jobId, { detail: "מושך ישירות דרך api.github.com (חלק " + (i + 1) + "/" + blobShas.length + ")..." });
       const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/git/blobs/" + sha, cfg);
       if (!res.ok) return null;
       const data = await res.json();
@@ -400,7 +408,7 @@ async function unpackZipUrl(assetOrUrl, jobId, cfg, rawZip = false) {
   const zipName = (typeof assetOrUrl === "object" && assetOrUrl.name) ? assetOrUrl.name : ("dl-" + jobId + ".zip");
   const cacheKey = await fetchAssetToCache(cfg, assetOrUrl, jobId);
 
-  let lastErr = "׳©׳’׳™׳׳” ׳‘׳׳©׳™׳›׳× ׳׳• ׳₪׳¨׳™׳¡׳× ׳”-ZIP";
+  let lastErr = "שגיאה במשיכת או פריסת ה-ZIP";
   for (let attempt = 1; attempt <= 3; attempt++) {
     const res = await chrome.runtime.sendMessage({
       target: "offscreen", type: "UNZIP_ARTIFACT", jobId, cacheKey, url: apiUrl, fallbackUrl, token: cfg.token, rawZip, zipName
@@ -434,7 +442,7 @@ function saveBlob(blobUrl, filename) {
     chrome.downloads.download({ url: blobUrl, filename, saveAs: false }, (downloadId) => {
       if (chrome.runtime.lastError || downloadId === undefined) {
         pendingNames.delete(blobUrl);
-        reject(new Error("׳©׳’׳™׳׳” ׳‘׳©׳׳™׳¨׳× ׳”׳§׳•׳‘׳¥ ׳‘׳׳—׳©׳‘"));
+        reject(new Error("שגיאה בשמירת הקובץ במחשב"));
         return;
       }
       const listener = (delta) => {
@@ -443,7 +451,7 @@ function saveBlob(blobUrl, filename) {
           chrome.downloads.onChanged.removeListener(listener);
           if (blobUrl.startsWith("blob:")) chrome.runtime.sendMessage({ target: "offscreen", type: "REVOKE", blobUrl }).catch(() => {});
           if (delta.state.current === "complete") resolve(filename);
-          else reject(new Error("׳©׳׳™׳¨׳× ׳”׳§׳•׳‘׳¥ ׳”׳•׳₪׳¡׳§׳”"));
+          else reject(new Error("שמירת הקובץ הופסקה"));
         }
       };
       chrome.downloads.onChanged.addListener(listener);
@@ -463,21 +471,21 @@ async function driveJob(jobId) {
     const cfg = await getConfig();
     const tag = "dl-" + job.requestId;
     if (!job.runId) {
-      patchJob(jobId, { status: "queued", detail: "׳׳׳×׳¨ ׳¨׳™׳¦׳” ׳‘-GitHub Actions...", percent: 12 });
+      patchJob(jobId, { status: "queued", detail: "מאתר ריצה ב-GitHub Actions...", percent: 12 });
       const runId = await findRunByTitle(cfg, tag, signal, job.dispatchedAt);
       patchJob(jobId, { runId });
     }
-    patchJob(jobId, { status: "running", detail: "׳׳×׳—׳‘׳¨ ׳׳©׳¨׳× GitHub Actions...", percent: 20 });
+    patchJob(jobId, { status: "running", detail: "מתחבר לשרת GitHub Actions...", percent: 20 });
     const conclusion = await waitForRun(cfg, jobs.get(jobId).runId, (run, tickIdx, stepInfo) => {
       const fallbackPct = Math.min(68, 20 + Math.floor(tickIdx * 1.5));
       patchJob(jobId, {
-        detail: stepInfo ? stepInfo.label : (run.status === "queued" ? "׳׳׳×׳™׳ ׳‘׳×׳•׳¨ ׳‘-GitHub..." : "׳׳¢׳‘׳“ ׳•׳׳•׳¨׳™׳“ ׳׳“׳™׳” ׳‘-GitHub Actions..."),
+        detail: stepInfo ? stepInfo.label : (run.status === "queued" ? "ממתין בתור ב-GitHub..." : "מעבד ומוריד מדיה ב-GitHub Actions..."),
         percent: stepInfo ? stepInfo.pct : fallbackPct
       });
     }, signal);
 
-    if (conclusion !== "success") throw new Error("׳”׳¨׳™׳¦׳” ׳”׳¡׳×׳™׳™׳׳” ׳¢׳ ׳¡׳˜׳˜׳•׳¡: " + conclusion);
-    patchJob(jobId, { status: "fetching", detail: "׳׳•׳©׳ ׳§׳•׳‘׳¥ ׳-GitHub API (׳›׳•׳׳ ׳’׳©׳¨ JSON ׳™׳©׳™׳¨)...", percent: 76 });
+    if (conclusion !== "success") throw new Error("הריצה הסתיימה עם סטטוס: " + conclusion);
+    patchJob(jobId, { status: "fetching", detail: "מושך קובץ מ-GitHub API (כולל גשר JSON ישיר)...", percent: 76 });
 
     let files = null;
     for (let a = 0; a < 8 && !files; a++) {
@@ -499,13 +507,13 @@ async function driveJob(jobId) {
       const artRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + jobs.get(jobId).runId + "/artifacts", cfg);
       const list = ((await artRes.json()).artifacts) || [];
       const found = list.find((x) => x.name === tag);
-      if (!found) throw new Error("׳׳ ׳ ׳׳¦׳ ׳×׳•׳¦׳¨ ׳׳”׳•׳¨׳“׳” ׳‘-Release ׳׳• ׳‘-Artifacts");
+      if (!found) throw new Error("לא נמצא תוצר להורדה ב-Release או ב-Artifacts");
       const artUrl = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/artifacts/" + found.id + "/zip";
       const isBundle = job.mode === "collection";
       files = await unpackZipUrl({ apiUrl: artUrl, url: "", name: tag + ".zip" }, jobId, cfg, isBundle);
     }
 
-    patchJob(jobId, { status: "saving", detail: "׳©׳•׳׳¨ ׳§׳•׳‘׳¥ ׳‘׳׳—׳©׳‘...", percent: 92 });
+    patchJob(jobId, { status: "saving", detail: "שומר קובץ במחשב...", percent: 92 });
     const saved = [];
     for (const f of files) {
       const name = sanitizeFilename(f.name);
@@ -520,9 +528,9 @@ async function driveJob(jobId) {
     });
 
     if (cfg.autoCleanRelease === "true") await deleteReleaseAndTagByName(cfg, tag);
-    const emailNote = job.sendEmail ? " (׳•׳ ׳©׳׳— ׳’׳ ׳׳׳™׳™׳)" : "";
-    patchJob(jobId, { status: "completed", detail: "׳”׳•׳©׳׳ ׳•׳ ׳©׳׳¨ ׳‘׳׳—׳©׳‘!" + emailNote, files: saved, percent: 100 });
-    notifyUser("׳”׳•׳¨׳“׳” ׳”׳•׳©׳׳׳” ׳‘׳”׳¦׳׳—׳”", (saved[0] || job.title || "׳”׳§׳•׳‘׳¥ ׳ ׳©׳׳¨") + emailNote);
+    const emailNote = job.sendEmail ? " (ונשלח גם למייל)" : "";
+    patchJob(jobId, { status: "completed", detail: "הושלם ונשמר במחשב!" + emailNote, files: saved, percent: 100 });
+    notifyUser("הורדה הושלמה בהצלחה", (saved[0] || job.title || "הקובץ נשמר") + emailNote);
   } catch (err) {
     patchJob(jobId, { status: "failed", detail: err.message, error: err.message });
   } finally {
@@ -533,7 +541,7 @@ async function driveJob(jobId) {
 async function startDownload(payload) {
   const cfg = await getConfig();
   if (!cfg.owner || !cfg.repo || !cfg.token) {
-    return { ok: false, error: "׳—׳¡׳¨׳•׳× ׳”׳’׳“׳¨׳•׳× ׳—׳™׳‘׳•׳¨ (owner/repo/token)" };
+    return { ok: false, error: "חסרות הגדרות חיבור (owner/repo/token)" };
   }
   const requestId = crypto.randomUUID();
   let cookiesEnc = "";
@@ -548,7 +556,7 @@ async function startDownload(payload) {
   let repUrl = payload.url;
   if (mode === "list") {
     const list = (payload.urls || []).filter(Boolean);
-    if (!list.length) return { ok: false, error: "׳¨׳©׳™׳׳× ׳§׳™׳©׳•׳¨׳™׳ ׳¨׳™׳§׳”" };
+    if (!list.length) return { ok: false, error: "רשימת קישורים ריקה" };
     urlsJson = JSON.stringify(list);
     repUrl = list[0];
   }
@@ -574,7 +582,7 @@ async function startDownload(payload) {
     sendEmail: Boolean(payload.sendEmail),
     emailTo: targetEmail,
     geoCountry: payload.geoCountry || "IL",
-    status: "preparing", detail: "׳©׳•׳׳— ׳₪׳§׳•׳“׳” ׳-GitHub Actions...", percent: 5,
+    status: "preparing", detail: "שולח פקודה ל-GitHub Actions...", percent: 5,
     startedAt: Date.now(), dispatchedAt: Date.now(), files: []
   });
   await persistJobs();
@@ -605,7 +613,7 @@ async function startDownload(payload) {
   });
   if (res.status !== 204) {
     patchJob(requestId, { status: "failed", detail: "HTTP " + res.status, error: "HTTP " + res.status });
-    return { ok: false, error: "׳©׳’׳™׳׳” ׳-GitHub (HTTP " + res.status + ")" };
+    return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ")" };
   }
   void driveJob(requestId);
   return { ok: true, jobId: requestId };
@@ -656,13 +664,13 @@ async function driveRecommendations(requestId, query, minViews, dispatchedAt) {
   const tag = "rec-" + requestId;
   if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   try {
-    await setRecsState({ status: "running", query, minViews, detail: "׳׳׳×׳¨ ׳¨׳™׳¦׳× ׳—׳™׳₪׳•׳© ׳‘-GitHub Actions...", items: [] });
+    await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש ב-GitHub Actions...", items: [] });
     const runId = await findRunByTitle(cfg, tag, null, dispatchedAt);
-    await setRecsState({ status: "running", query, minViews, detail: "׳¡׳•׳¨׳§ ׳•׳׳“׳¨׳’ ׳×׳•׳¦׳׳•׳× ׳”׳™׳¡׳˜׳•׳¨׳™׳•׳× ׳₪׳•׳₪׳•׳׳¨׳™׳•׳× ׳‘׳¢׳ ׳...", items: [] });
+    await setRecsState({ status: "running", query, minViews, detail: "סורק ומדרג תוצאות היסטוריות פופולריות בענן...", items: [] });
     const conclusion = await waitForRun(cfg, runId, null, null);
-    if (conclusion !== "success") throw new Error("׳”׳—׳™׳₪׳•׳© ׳”׳¡׳×׳™׳™׳ ׳¢׳ ׳¡׳˜׳˜׳•׳¡: " + conclusion);
+    if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
 
-    await setRecsState({ status: "fetching", query, minViews, detail: "׳׳•׳©׳ ׳×׳•׳¦׳׳•׳× ׳׳•׳׳׳¦׳•׳× ׳-GitHub...", items: [] });
+    await setRecsState({ status: "fetching", query, minViews, detail: "מושך תוצאות מומלצות מ-GitHub...", items: [] });
     let data = null;
     for (let a = 0; a < 8 && !data; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
@@ -673,12 +681,12 @@ async function driveRecommendations(requestId, query, minViews, dispatchedAt) {
       await sleep(2000);
     }
     await deleteReleaseAndTagByName(cfg, tag);
-    if (!data || !Array.isArray(data.items)) throw new Error("׳׳ ׳”׳×׳§׳‘׳׳• ׳×׳•׳¦׳׳•׳× ׳׳”׳¢׳ ׳");
+    if (!data || !Array.isArray(data.items)) throw new Error("לא התקבלו תוצאות מהענן");
     await setRecsState({
       status: "completed",
       query,
       minViews,
-      detail: "׳ ׳׳¦׳׳• " + data.items.length + " ׳×׳•׳¦׳׳•׳× ׳”׳™׳¡׳˜׳•׳¨׳™׳•׳× ׳₪׳•׳₪׳•׳׳¨׳™׳•׳× ׳‘׳ ׳•׳©׳ \"" + query + "\"",
+      detail: "נמצאו " + data.items.length + " תוצאות היסטוריות פופולריות בנושא \"" + query + "\"",
       items: data.items,
       updatedAt: Date.now()
     });
@@ -692,10 +700,10 @@ async function driveRecommendations(requestId, query, minViews, dispatchedAt) {
 async function startRecommendations(payload) {
   const cfg = await getConfig();
   if (!cfg.owner || !cfg.repo || !cfg.token) {
-    return { ok: false, error: "׳—׳¡׳¨׳•׳× ׳”׳’׳“׳¨׳•׳× ׳׳׳’׳¨ (owner/repo/token)" };
+    return { ok: false, error: "חסרות הגדרות מאגר (owner/repo/token)" };
   }
   const query = String(payload.query || "").trim();
-  if (!query) return { ok: false, error: "׳ ׳ ׳׳”׳–׳™׳ ׳׳• ׳׳‘׳—׳•׳¨ ׳ ׳•׳©׳ ׳׳—׳™׳₪׳•׳©" };
+  if (!query) return { ok: false, error: "נא להזין או לבחור נושא לחיפוש" };
   const minViews = String(payload.minViews || "500000").trim();
   const hist = await getHistory();
   const excludeIds = hist.map((h) => h.videoId).filter(Boolean).slice(0, 40).join(",");
@@ -717,7 +725,7 @@ async function startRecommendations(payload) {
     })
   });
   if (res.status !== 204) {
-    return { ok: false, error: "׳©׳’׳™׳׳” ׳-GitHub (HTTP " + res.status + ") - ׳•׳“׳ ׳©׳”׳¢׳׳™׳× ׳׳× ׳”׳§׳•׳‘׳¥ recommend.yml ׳׳׳׳’׳¨" };
+    return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ") - ודא שהעלית את הקובץ recommend.yml למאגר" };
   }
   void driveRecommendations(requestId, query, minViews, dispatchedAt);
   return { ok: true, requestId };
@@ -725,7 +733,7 @@ async function startRecommendations(payload) {
 
 async function runCloudCleanup() {
   const cfg = await getConfig();
-  if (!cfg.owner || !cfg.repo || !cfg.token) return { ok: false, error: "׳—׳¡׳¨׳•׳× ׳”׳’׳“׳¨׳•׳× ׳׳׳’׳¨" };
+  if (!cfg.owner || !cfg.repo || !cfg.token) return { ok: false, error: "חסרות הגדרות מאגר" };
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/workflows/cleanup.yml/dispatches";
   const res = await ghFetch(url, cfg, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ref: cfg.ref, inputs: {} })
@@ -762,7 +770,7 @@ async function handle(msg) {
     }
     case "RETRY_JOB": {
       const old = jobs.get(msg.jobId);
-      if (!old) return { ok: false, error: "׳”׳׳©׳™׳׳” ׳׳ ׳ ׳׳¦׳׳”" };
+      if (!old) return { ok: false, error: "המשימה לא נמצאה" };
       jobs.delete(msg.jobId);
       await persistJobs();
       return startDownload({
@@ -783,7 +791,7 @@ async function handle(msg) {
       for (const [id, job] of jobs) { plain[id] = job; if (!TERMINAL.has(job.status)) void driveJob(id); }
       return { ok: true, jobs: plain };
     }
-    case "CANCEL_JOB": patchJob(msg.jobId, { status: "cancelled", detail: "׳‘׳•׳˜׳ ׳¢׳ ׳™׳“׳™ ׳”׳׳©׳×׳׳©" }); return { ok: true };
+    case "CANCEL_JOB": patchJob(msg.jobId, { status: "cancelled", detail: "בוטל על ידי המשתמש" }); return { ok: true };
     case "OPEN_RUN": {
       const job = jobs.get(msg.jobId);
       const cfg = await getConfig();
@@ -795,7 +803,7 @@ async function handle(msg) {
       const cfg = await getConfig();
       try {
         const res = await chrome.runtime.sendNativeMessage(UPDATE_HOST, { updateOwner: cfg.updateOwner || cfg.owner, updateRepo: cfg.updateRepo || cfg.repo });
-        return res && res.ok ? { ok: true } : { ok: false, error: (res && res.error) || "׳ ׳›׳©׳ ׳‘׳¢׳“׳›׳•׳" };
+        return res && res.ok ? { ok: true } : { ok: false, error: (res && res.error) || "נכשל בעדכון" };
       } catch (e) { return { ok: false, error: e.message }; }
     }
     case "OPEN_DOWNLOADS": chrome.downloads.showDefaultFolder(); return { ok: true };
