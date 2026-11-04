@@ -37,7 +37,7 @@ jobs:
           if command -v docker >/dev/null 2>&1; then
             docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest || true
           fi
-          sleep 2
+          sleep 3
           python3 -m yt_dlp --version
 
       - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
@@ -99,7 +99,6 @@ jobs:
               except Exception as e:
                   print("Cookie decrypt notice:", e, flush=True)
 
-          # בניית רשימת הקישורים להורדה
           target_urls = [target_url]
           if mode == "list" and urls_raw:
               try:
@@ -115,26 +114,30 @@ jobs:
 
           def get_fmt_args(strict_hd: bool):
               if quality == "audio":
-                  return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
+                  return ["-f", "ba[protocol^=http]/ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
               if quality == "audio_m4a":
-                  return ["-f", "ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+                  return ["-f", "ba[ext=m4a][protocol^=http]/ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
               if quality == "audio_opus":
-                  return ["-f", "ba[acodec=opus]/ba/b", "-x", "--audio-format", "opus", "--audio-quality", "0", "--embed-metadata"]
+                  return ["-f", "ba[acodec=opus][protocol^=http]/ba/b", "-x", "--audio-format", "opus", "--audio-quality", "0", "--embed-metadata"]
               if quality == "audio_flac":
-                  return ["-f", "ba/b", "-x", "--audio-format", "flac", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+                  return ["-f", "ba[protocol^=http]/ba/b", "-x", "--audio-format", "flac", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
               if quality == "audio_wav":
-                  return ["-f", "ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
+                  return ["-f", "ba[protocol^=http]/ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
 
-              # איסור מוחלט על נפילה ל-360p (itag 18) בשלבי ה-HD
+              # העדפת זרמי HTTPS DASH ישירים (שמקבלים PO Token תקין) ומניעת נפילה ל-m3u8 (פורמט 266 החסום) או 360p
               if strict_hd and req_h >= 720:
-                  fmt = f"bv*[height<={req_h}][height>=720]+ba/bv*[height<={req_h}][height>=480]+ba/b[height<={req_h}][height>=720]"
+                  fmt = (
+                      f"bv*[protocol^=http][height<={req_h}][height>=720]+ba[protocol^=http]/"
+                      f"bv*[height<={req_h}][height>=720]+ba/"
+                      f"bv*[protocol^=http][height<={req_h}][height>=480]+ba[protocol^=http]"
+                  )
               else:
-                  fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
+                  fmt = f"bv*[protocol^=http][height<={req_h}]+ba[protocol^=http]/bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
 
               if req_h <= 1080:
-                  sort_str = f"res:{req_h},fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
+                  sort_str = f"proto:https,res:{req_h},fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
               else:
-                  sort_str = f"res:{req_h},fps,vcodec:vp9:av01:h264,acodec:m4a:opus,ext:mp4"
+                  sort_str = f"proto:https,res:{req_h},fps,vcodec:vp9:av01:h264,acodec:m4a:opus,ext:mp4"
 
               return ["-f", fmt, "-S", sort_str, "--merge-output-format", "mp4", "--remux-video", "mp4", "--embed-metadata"]
 
@@ -148,14 +151,14 @@ jobs:
               except Exception:
                   return 0
 
-          pot_cfg = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+          # ללא --xff וללא --geo-bypass בשלבים הראשיים כדי למנוע שגיאת 403 בגלל אי-התאמת IP מול googlevideo!
           extra_args = [
-              "--geo-bypass",
               "--no-mtime",
               "--no-warnings",
               "--no-check-certificates",
               "--js-runtimes", "deno",
               "--concurrent-fragments", "4",
+              "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
           ]
           if mode != "collection":
               extra_args.append("--no-playlist")
@@ -177,26 +180,23 @@ jobs:
           if chapters and not is_audio:
               extra_args += ["--split-chapters"]
 
-          # רשימת ניסיונות מדורגת (נכון לנובמבר 2026):
-          # 1. קליינטים ללא עוגיות (android_vr / tv / ios) שמספקים 1080p/4K ישיר בענן
-          # 2. קליינטים עם PO Token ועוגיות משתמש (אם קיימות)
-          # 3. גיבוי אוניברסלי אם הסרטון עצמו קיים רק באיכות נמוכה במקור
-          attempts = [
-              ("Android VR + TV Direct HD", ["--xff", geo, "--extractor-args", f"youtube:player_client=android_vr,tv,web_safari;po_token={pot_cfg}"], True),
-              ("iOS + MWeb Pure HD + PO-Token", ["--xff", geo, "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=ios,mweb,web;po_token={pot_cfg}"], True),
-              ("Global US Bypass HD (Android VR / iOS)", ["--xff", "US", "--extractor-args", f"youtube:player_client=android_vr,ios,tv;po_token={pot_cfg}"], True),
-          ]
+          attempts = []
           if has_ck:
-              attempts.insert(2, (
-                  "Authenticated TV/MWeb + Cookies + PO-Token",
-                  ["--cookies", str(cookie_file), "--xff", geo, "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=tv,mweb,web_safari,web;po_token={pot_cfg}"],
-                  True
-              ))
-          attempts.append((
-              "Universal Compatibility Fallback",
-              (["--cookies", str(cookie_file)] if has_ck else []) + ["--xff", geo, "--extractor-args", f"youtube:player_client=android_vr,tv,ios,mweb,web;po_token={pot_cfg}"],
-              False
-          ))
+              # כשיש עוגיות, מריצים קודם כל את הקליינטים המאומתים (כל קליינט בנפרד וללא זיוף XFF!)
+              attempts.extend([
+                  ("Authenticated MWeb Pure HD + PO-Token", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb;fetch_pot=always"], True),
+                  ("Authenticated Web + Chrome Impersonate + PO-Token", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web;fetch_pot=always"], True),
+                  ("Authenticated Web Creator / TV Embedded HD", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=web_creator,tv_embedded;fetch_pot=always"], True),
+                  ("Authenticated TV Client HD", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=tv;fetch_pot=always"], True),
+                  ("Authenticated Geo-Bypass Fallback (XFF)", ["--cookies", str(cookie_file), "--xff", geo, "--extractor-args", "youtube:player_client=mweb,tv;fetch_pot=always"], True),
+                  ("Authenticated Universal Compatibility", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb,web,tv;fetch_pot=always"], False),
+              ])
+          else:
+              attempts.extend([
+                  ("TV Embedded + Android VR (No-Cookies HD)", ["--extractor-args", "youtube:player_client=tv_embedded,android_vr;player_skip=webpage;fetch_pot=always"], True),
+                  ("MWeb + iOS + PO-Token (No-Cookies HD)", ["--impersonate", "chrome", "--extractor-args", "youtube:player_client=mweb,ios;fetch_pot=always"], True),
+                  ("Universal No-Cookies Fallback", ["--extractor-args", "youtube:player_client=tv_embedded,mweb,web;fetch_pot=always"], False),
+              ])
 
           def get_stage_files():
               return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
@@ -239,7 +239,6 @@ jobs:
           if not files:
               raise SystemExit("::error::הורדת המדיה נכשלה בכל הקליינטים")
 
-          # עיבוד משלים: מהירות השמעה או נרמול שמע
           if (speed_val not in ("1", "1.0", "")) or norm_audio:
               for fpath in list(files):
                   if fpath.suffix.lower() not in (".mp4", ".mkv", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
@@ -288,7 +287,6 @@ jobs:
           notes = json.dumps({"v": 5, "size": len(raw_bytes), "blobs": blob_shas})
           subprocess.run(["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--target", sha, "--title", tag, "--notes", notes, "--prerelease"], check=False)
 
-          # שליחה למייל במידה והוגדר
           smtp_user = os.environ.get("SMTP_USER", "").strip()
           smtp_pass = os.environ.get("SMTP_PASS", "").strip()
           if email_to and smtp_user and smtp_pass:
