@@ -124,7 +124,6 @@ jobs:
               if quality == "audio_wav":
                   return ["-f", "ba[protocol^=http]/ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
 
-              # העדפת זרמי HTTPS DASH ישירים (שמקבלים PO Token תקין) ומניעת נפילה ל-m3u8 (פורמט 266 החסום) או 360p
               if strict_hd and req_h >= 720:
                   fmt = (
                       f"bv*[protocol^=http][height<={req_h}][height>=720]+ba[protocol^=http]/"
@@ -151,13 +150,14 @@ jobs:
               except Exception:
                   return 0
 
-          # ללא --xff וללא --geo-bypass בשלבים הראשיים כדי למנוע שגיאת 403 בגלל אי-התאמת IP מול googlevideo!
           extra_args = [
               "--no-mtime",
               "--no-warnings",
               "--no-check-certificates",
               "--js-runtimes", "deno",
-              "--concurrent-fragments", "4",
+              "--concurrent-fragments", "8",
+              "--socket-timeout", "15",
+              "--throttled-rate", "100K",
               "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
           ]
           if mode != "collection":
@@ -182,10 +182,9 @@ jobs:
 
           attempts = []
           if has_ck:
-              # כשיש עוגיות, מריצים קודם כל את הקליינטים המאומתים (כל קליינט בנפרד וללא זיוף XFF!)
               attempts.extend([
-                  ("Authenticated MWeb Pure HD + PO-Token", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb;fetch_pot=always"], True),
                   ("Authenticated Web + Chrome Impersonate + PO-Token", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web;fetch_pot=always"], True),
+                  ("Authenticated MWeb Pure HD + PO-Token", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb;fetch_pot=always"], True),
                   ("Authenticated Web Creator / TV Embedded HD", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=web_creator,tv_embedded;fetch_pot=always"], True),
                   ("Authenticated TV Client HD", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=tv;fetch_pot=always"], True),
                   ("Authenticated Geo-Bypass Fallback (XFF)", ["--cookies", str(cookie_file), "--xff", geo, "--extractor-args", "youtube:player_client=mweb,tv;fetch_pot=always"], True),
@@ -212,8 +211,8 @@ jobs:
                       "python3", "-m", "yt_dlp",
                       "--ignore-config",
                       "--ffmpeg-location", "/usr/bin/ffmpeg",
-                      "--retries", "6",
-                      "--fragment-retries", "6",
+                      "--retries", "4",
+                      "--fragment-retries", "4",
                       "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
                   ] + args + get_fmt_args(strict_hd) + extra_args + [cur_url]
 
@@ -264,28 +263,38 @@ jobs:
                   if subprocess.run(ff_cmd, check=False).returncode == 0 and tmp_p.exists():
                       tmp_p.replace(fpath)
 
-          zip_path = pkg_dir / ("dl-" + req_id + ".zip")
-          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+          tag = "dl-" + req_id
+          zip_path = pkg_dir / (tag + ".zip")
+          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
               for f in files:
                   zf.write(f, f.relative_to(out_dir))
 
           repo = os.environ.get("GITHUB_REPOSITORY", "")
-          sha = os.environ.get("GITHUB_SHA", "")
-          tag = "dl-" + req_id
-
+          zip_size = zip_path.stat().st_size
           blob_shas = []
-          raw_bytes = zip_path.read_bytes()
-          if len(raw_bytes) <= 90 * 1024 * 1024:
-              chunk_size = 14 * 1024 * 1024
+
+          # גשר Blobs ישיר מופעל רק לקבצים עד 35MB כדי לא להעמיס זיכרון בקובצי HD גדולים
+          if zip_size <= 35 * 1024 * 1024:
+              raw_bytes = zip_path.read_bytes()
+              chunk_size = 12 * 1024 * 1024
               for offset in range(0, len(raw_bytes), chunk_size):
                   chunk = raw_bytes[offset:offset + chunk_size]
                   b64_payload = json.dumps({"content": base64.b64encode(chunk).decode("ascii"), "encoding": "base64"})
                   p = subprocess.run(["gh", "api", f"repos/{repo}/git/blobs", "-q", ".sha", "--input", "-"], input=b64_payload, text=True, capture_output=True, check=False)
                   if p.returncode == 0 and p.stdout.strip():
                       blob_shas.append(p.stdout.strip())
+              del raw_bytes
 
-          notes = json.dumps({"v": 5, "size": len(raw_bytes), "blobs": blob_shas})
-          subprocess.run(["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--target", sha, "--title", tag, "--notes", notes, "--prerelease"], check=False)
+          notes = json.dumps({"v": 6, "size": zip_size, "blobs": blob_shas})
+          rel_proc = subprocess.run(
+              ["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--title", tag, "--notes", notes],
+              capture_output=True, text=True, check=False
+          )
+          if rel_proc.returncode != 0:
+              print("gh release create notice:", rel_proc.stderr, flush=True)
+              subprocess.run(["gh", "release", "upload", tag, str(zip_path), "--repo", repo, "--clobber"], check=False)
+          else:
+              print(f"Release {tag} created and asset uploaded successfully ({zip_size} bytes).", flush=True)
 
           smtp_user = os.environ.get("SMTP_USER", "").strip()
           smtp_pass = os.environ.get("SMTP_PASS", "").strip()
@@ -311,6 +320,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dl-${{ inputs.request_id }}
-          path: /tmp/pkg/*.zip
+          path: /tmp/out/*
           if-no-files-found: ignore
           retention-days: 1
