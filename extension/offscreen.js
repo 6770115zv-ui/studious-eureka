@@ -22,7 +22,6 @@
   async function fetchWithRetry(apiUrl, token, fallbackUrl) {
     const isArtifactUrl = apiUrl && apiUrl.includes("/actions/artifacts/");
     const candidates = [
-      fallbackUrl ? { url: fallbackUrl, headers: {} } : null,
       apiUrl ? {
         url: apiUrl,
         headers: token
@@ -33,6 +32,7 @@
             }
           : { Accept: "application/octet-stream" }
       } : null,
+      fallbackUrl ? { url: fallbackUrl, headers: {} } : null,
       fallbackUrl && token ? { url: fallbackUrl, headers: { Authorization: "Bearer " + token } } : null
     ].filter((c) => Boolean(c && c.url));
 
@@ -61,9 +61,12 @@
         const fname = msg.zipName || "download.mp4";
         const ext = (fname.toLowerCase().split(".").pop() || "mp4");
         const blob = new Blob([buf], { type: MIME[ext] || "application/octet-stream" });
-        return { ok: true, files: [{ name: fname, size: buf.length, blobUrl: URL.createObjectURL(blob) }] };
+        const size = buf.length;
+        buf = null;
+        return { ok: true, files: [{ name: fname, size, blobUrl: URL.createObjectURL(blob) }] };
       }
       const entries = fflate.unzipAsync ? await fflate.unzipAsync(buf) : fflate.unzipSync(buf);
+      buf = null;
       const files = [];
       for (const name of Object.keys(entries)) {
         const data = entries[name];
