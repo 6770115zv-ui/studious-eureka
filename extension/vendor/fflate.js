@@ -37,7 +37,7 @@
     const buf = data instanceof Uint8Array ? data : new Uint8Array(data);
     const out = {};
     for (const item of parseZipEntries(buf)) {
-      out[item.name] = new Uint8Array(item.raw);
+      out[item.name] = item.raw;
     }
     return out;
   }
@@ -46,12 +46,13 @@
     const out = {};
     for (const item of parseZipEntries(buf)) {
       if (item.method === 0) {
-        out[item.name] = new Uint8Array(item.raw);
+        // ללא העתקת זיכרון כפולה כדי לתמוך בקובצי HD גדולים (500MB+)
+        out[item.name] = item.raw;
       } else if (item.method === 8) {
         const stream = new Blob([item.raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
         out[item.name] = new Uint8Array(await new Response(stream).arrayBuffer());
       } else {
-        out[item.name] = new Uint8Array(item.raw);
+        out[item.name] = item.raw;
       }
     }
     return out;
