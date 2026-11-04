@@ -219,9 +219,9 @@ function patchJob(id, patch) {
   return job;
 }
 
-async function findRunByTitle(cfg, targetTitle, signal, dispatchedAt) {
-  const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?event=workflow_dispatch&per_page=30";
-  const since = (dispatchedAt || Date.now()) - 25000;
+// זיהוי מדויק בלבד לפי targetTitle (dl-<request_id>) למניעת הצמדות לריצה קודמת!
+async function findRunByTitle(cfg, targetTitle, signal) {
+  const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?event=workflow_dispatch&per_page=35";
   for (let i = 0; i < 120; i++) {
     if (signal && signal.cancelled) throw new Error("בוטל");
     const res = await ghFetch(url, cfg);
@@ -229,13 +229,10 @@ async function findRunByTitle(cfg, targetTitle, signal, dispatchedAt) {
       const runs = ((await res.json()).workflow_runs) || [];
       const exact = runs.find((r) => r.display_title === targetTitle || r.name === targetTitle);
       if (exact) return exact.id;
-      const taken = new Set(Array.from(jobs.values()).map((j) => j.runId).filter(Boolean));
-      const cands = runs.filter((r) => !taken.has(r.id) && r.status !== "completed" && new Date(r.created_at).getTime() >= since);
-      if (cands.length === 1) return cands[0].id;
     }
     await sleep(2000);
   }
-  throw new Error("לא נמצאה ריצה ב-GitHub");
+  throw new Error("לא נמצאה ריצה תואמת ב-GitHub Actions");
 }
 
 async function fetchLiveStepInfo(cfg, runId, tickIdx) {
@@ -251,8 +248,8 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
     if (active) {
       const nameMap = {
         "Set up Deno": "מכין סביבת ריצה בענן (Deno)...",
-        "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "מתקין כלי הורדה וקידוד (yt-dlp Nightly + PO Token + FFmpeg)...",
-        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית, מעבד ואורז מדיה בענן (Smart Engine v5)...",
+        "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "מתקין כלי הורדה וקידוד (yt-dlp + FFmpeg)...",
+        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית, מעבד ואורז מדיה בענן...",
         "Upload Backup Artifact": "שומר גיבוי תוצר ב-GitHub..."
       };
       const baseStepPct = 20 + Math.round((completedCount / totalCount) * 35);
@@ -268,7 +265,7 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
 
 async function waitForRun(cfg, runId, onTick, signal) {
   let cachedStepInfo = null;
-  for (let i = 0; i < 600; i++) {
+  for (let i = 0; i < 900; i++) {
     if (signal && signal.cancelled) throw new Error("בוטל");
     const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + runId, cfg);
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -290,9 +287,18 @@ async function waitForRun(cfg, runId, onTick, signal) {
 }
 
 async function findReleaseAssetsByTag(cfg, tag) {
+  let rel = null;
   const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases/tags/" + tag, cfg);
-  if (!res.ok) return null;
-  const rel = await res.json();
+  if (res.ok) {
+    rel = await res.json();
+  } else {
+    const listRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases?per_page=20", cfg);
+    if (listRes.ok) {
+      const all = await listRes.json();
+      if (Array.isArray(all)) rel = all.find((r) => r.tag_name === tag || r.name === tag) || null;
+    }
+  }
+  if (!rel) return null;
   let blobShas = [];
   if (rel.body && String(rel.body).trim().startsWith("{")) {
     try {
@@ -301,7 +307,7 @@ async function findReleaseAssetsByTag(cfg, tag) {
     } catch {}
   }
   const assets = (rel.assets || []).filter((a) => a.url || a.browser_download_url).map((a) => ({
-    id: a.id, name: a.name, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas
+    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas
   }));
   return assets.length ? assets : null;
 }
@@ -354,68 +360,28 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
   }
 }
 
-async function fetchAssetToCache(cfg, assetObj, jobId) {
-  const apiUrl = typeof assetObj === "string" ? assetObj : (assetObj.apiUrl || assetObj.url);
-  const fallbackUrl = typeof assetObj === "string" ? "" : (assetObj.url || "");
-  const blobShas = (typeof assetObj === "object" && assetObj.blobShas) ? assetObj.blobShas : [];
-  const token = cfg.token;
-
-  if (blobShas && blobShas.length) {
-    const directKey = await fetchDirectBlobsToCache(cfg, blobShas, jobId);
-    if (directKey) return directKey;
-  }
-
-  const cacheKey = "https://ytcloud.local/asset-" + jobId + "-" + Date.now() + ".zip";
-  const isArtifactUrl = apiUrl && apiUrl.includes("/actions/artifacts/");
-  const candidates = [
-    fallbackUrl ? { url: fallbackUrl, headers: {} } : null,
-    apiUrl ? {
-      url: apiUrl,
-      headers: token
-        ? {
-            Authorization: "Bearer " + token,
-            Accept: isArtifactUrl ? "application/vnd.github+json" : "application/octet-stream",
-            "X-GitHub-Api-Version": "2022-11-28"
-          }
-        : { Accept: "application/octet-stream" }
-    } : null,
-    fallbackUrl && token ? { url: fallbackUrl, headers: { Authorization: "Bearer " + token } } : null
-  ].filter((c) => Boolean(c && c.url));
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    for (const cand of candidates) {
-      try {
-        const res = await fetch(cand.url, { headers: cand.headers, redirect: "follow", credentials: "omit", cache: "no-store" });
-        if (res.ok) {
-          const buf = await res.arrayBuffer();
-          if (buf && buf.byteLength > 0) {
-            const cache = await caches.open(ZIP_CACHE_NAME);
-            await cache.put(cacheKey, new Response(buf, { headers: { "Content-Type": "application/zip" } }));
-            return cacheKey;
-          }
-        }
-      } catch {}
-    }
-    if (attempt < 3) await sleep(1500 * attempt);
-  }
-  return null;
-}
-
 async function unpackZipUrl(assetOrUrl, jobId, cfg, rawZip = false) {
   await ensureOffscreen();
   const apiUrl = typeof assetOrUrl === "string" ? assetOrUrl : (assetOrUrl.apiUrl || assetOrUrl.url);
   const fallbackUrl = typeof assetOrUrl === "string" ? "" : (assetOrUrl.url || "");
   const zipName = (typeof assetOrUrl === "object" && assetOrUrl.name) ? assetOrUrl.name : ("dl-" + jobId + ".zip");
-  const cacheKey = await fetchAssetToCache(cfg, assetOrUrl, jobId);
+  const blobShas = (typeof assetOrUrl === "object" && assetOrUrl.blobShas) ? assetOrUrl.blobShas : [];
+
+  // עבור קבצים קטנים עם blobShas נשתמש בגשר Cache; עבור קובצי HD גדולים ניתן ל-offscreen להוריד ישירות ללא הגבלת זיכרון של Service Worker
+  let cacheKey = null;
+  if (blobShas && blobShas.length) {
+    cacheKey = await fetchDirectBlobsToCache(cfg, blobShas, jobId);
+  }
 
   let lastErr = "שגיאה במשיכת או פריסת ה-ZIP";
   for (let attempt = 1; attempt <= 3; attempt++) {
+    patchJob(jobId, { detail: "מוריד ופורס קובץ מדיה למחשב (ניסיון " + attempt + "/3)..." });
     const res = await chrome.runtime.sendMessage({
       target: "offscreen", type: "UNZIP_ARTIFACT", jobId, cacheKey, url: apiUrl, fallbackUrl, token: cfg.token, rawZip, zipName
     }).catch((e) => ({ ok: false, error: e.message }));
     if (res && res.ok && res.files && res.files.length) return res.files;
     lastErr = (res && res.error) || lastErr;
-    if (attempt < 3) await sleep(1500 * attempt);
+    if (attempt < 3) await sleep(2000 * attempt);
   }
   throw new Error(lastErr);
 }
@@ -472,7 +438,7 @@ async function driveJob(jobId) {
     const tag = "dl-" + job.requestId;
     if (!job.runId) {
       patchJob(jobId, { status: "queued", detail: "מאתר ריצה ב-GitHub Actions...", percent: 12 });
-      const runId = await findRunByTitle(cfg, tag, signal, job.dispatchedAt);
+      const runId = await findRunByTitle(cfg, tag, signal);
       patchJob(jobId, { runId });
     }
     patchJob(jobId, { status: "running", detail: "מתחבר לשרת GitHub Actions...", percent: 20 });
@@ -485,18 +451,22 @@ async function driveJob(jobId) {
     }, signal);
 
     if (conclusion !== "success") throw new Error("הריצה הסתיימה עם סטטוס: " + conclusion);
-    patchJob(jobId, { status: "fetching", detail: "מושך קובץ מ-GitHub API (כולל גשר JSON ישיר)...", percent: 76 });
+    patchJob(jobId, { status: "fetching", detail: "מושך קובץ מ-GitHub API...", percent: 76 });
 
     let files = null;
-    for (let a = 0; a < 8 && !files; a++) {
+    for (let a = 0; a < 10 && !files; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
       if (assets && assets.length) {
         const isBundle = job.mode === "collection";
         const inner = [];
         for (const x of assets) {
-          const isZip = x.name.toLowerCase().endsWith(".zip");
-          const unpacked = await unpackZipUrl(x, jobId, cfg, isBundle || !isZip);
-          inner.push(...unpacked);
+          try {
+            const isZip = x.name.toLowerCase().endsWith(".zip");
+            const unpacked = await unpackZipUrl(x, jobId, cfg, isBundle || !isZip);
+            inner.push(...unpacked);
+          } catch (unpackErr) {
+            console.warn("Release asset unpack warning:", unpackErr);
+          }
         }
         if (inner.length) { files = inner; break; }
       }
@@ -504,9 +474,10 @@ async function driveJob(jobId) {
     }
 
     if (!files) {
+      patchJob(jobId, { detail: "מושך תוצר מגיבוי Artifacts ב-GitHub...", percent: 82 });
       const artRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + jobs.get(jobId).runId + "/artifacts", cfg);
       const list = ((await artRes.json()).artifacts) || [];
-      const found = list.find((x) => x.name === tag);
+      const found = list.find((x) => x.name === tag) || list[0];
       if (!found) throw new Error("לא נמצא תוצר להורדה ב-Release או ב-Artifacts");
       const artUrl = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/artifacts/" + found.id + "/zip";
       const isBundle = job.mode === "collection";
@@ -659,13 +630,13 @@ async function fetchJsonAssetWithRetry(asset, cfg) {
   return null;
 }
 
-async function driveRecommendations(requestId, query, minViews, dispatchedAt) {
+async function driveRecommendations(requestId, query, minViews) {
   const cfg = await getConfig();
   const tag = "rec-" + requestId;
   if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   try {
     await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש ב-GitHub Actions...", items: [] });
-    const runId = await findRunByTitle(cfg, tag, null, dispatchedAt);
+    const runId = await findRunByTitle(cfg, tag, null);
     await setRecsState({ status: "running", query, minViews, detail: "סורק ומדרג תוצאות היסטוריות פופולריות בענן...", items: [] });
     const conclusion = await waitForRun(cfg, runId, null, null);
     if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
@@ -708,7 +679,6 @@ async function startRecommendations(payload) {
   const hist = await getHistory();
   const excludeIds = hist.map((h) => h.videoId).filter(Boolean).slice(0, 40).join(",");
   const requestId = crypto.randomUUID();
-  const dispatchedAt = Date.now();
 
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/workflows/recommend.yml/dispatches";
   const res = await ghFetch(url, cfg, {
@@ -725,9 +695,9 @@ async function startRecommendations(payload) {
     })
   });
   if (res.status !== 204) {
-    return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ") - ודא שהעלית את הקובץ recommend.yml למאגר" };
+    return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ")" };
   }
-  void driveRecommendations(requestId, query, minViews, dispatchedAt);
+  void driveRecommendations(requestId, query, minViews);
   return { ok: true, requestId };
 }
 
