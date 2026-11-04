@@ -12,14 +12,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Delete All Temporary Releases and Tags
+      - name: Delete All Temporary Releases, Tags and Completed Runs
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          CUR_RUN_ID: ${{ github.run_id }}
         run: |
           RELEASES=$(gh api "repos/${GH_REPO}/releases?per_page=100" --jq '.[].tag_name' || true)
           for tag in $RELEASES; do
             if [[ "$tag" == dl-* || "$tag" == rec-* ]]; then
               gh release delete "$tag" --repo "$GH_REPO" --cleanup-tag --yes || true
+            fi
+          done
+          RUNS=$(gh api "repos/${GH_REPO}/actions/runs?status=completed&per_page=100" --jq '.workflow_runs[].id' || true)
+          for rid in $RUNS; do
+            if [[ "$rid" != "$CUR_RUN_ID" ]]; then
+              gh api -X DELETE "repos/${GH_REPO}/actions/runs/${rid}" || true
             fi
           done
