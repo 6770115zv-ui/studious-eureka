@@ -29,33 +29,27 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Set up Node.js for POT Server
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies & Start POT Provider Server
+      - name: Install yt-dlp + ffmpeg + curl_cffi + atomicparsley
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends ffmpeg zip python3-cryptography python3-pip atomicparsley
-          python3 -m pip install --break-system-packages -q -U "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider
-          sudo curl -sSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-
-          # הפעלת שרת POT מקומי ברקע ליצירת GVS PO-Tokens עבור 1080p/4K
-          git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/pot-server || true
-          if [ -d "/tmp/pot-server/server" ]; then
-            cd /tmp/pot-server/server && npm install && node index.js &
-            sleep 3
+          python3 -m pip install --break-system-packages -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography
+          if command -v docker >/dev/null 2>&1; then
+            docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest || true
           fi
+          sleep 2
+          python3 -m yt_dlp --version
 
-      - name: Execute Full HD Engine
+      - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
         env:
           GH_TOKEN: ${{ github.token }}
           COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+          COOKIE_KEY_FALLBACK: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3"
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: |
           python3 - << 'EOF'
-          import os, sys, re, json, time, base64, shutil, zipfile, subprocess
+          import os, sys, re, json, time, base64, shutil, zipfile, subprocess, smtplib, email.message
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -65,23 +59,31 @@ jobs:
 
           req_id = str(inp.get("request_id", "")).strip()
           target_url = str(inp.get("url", "")).strip()
-          quality = str(inp.get("quality", "best")).strip() or "best"
-          mode = str(inp.get("mode", "video")).strip() or "video"
+          quality = str(inp.get("quality", "best")).strip().lower() or "best"
+          mode = str(inp.get("mode", "video")).strip().lower() or "video"
+          urls_raw = str(inp.get("urls", "")).strip()
           clip_start = str(inp.get("clip_start", "")).strip()
           clip_end = str(inp.get("clip_end", "")).strip()
+          subtitles = str(inp.get("subtitles", "none")).strip().lower()
           raw_sb = str(inp.get("sponsorblock", "{}")).strip()
           cookies_enc = str(inp.get("cookies_enc", "")).strip()
-          hex_key = os.environ.get("COOKIE_KEY", "").strip()
+          hex_key = (os.environ.get("COOKIE_KEY", "").strip() or os.environ.get("COOKIE_KEY_FALLBACK", "").strip())
 
-          try: opts = json.loads(raw_sb) if raw_sb.startswith("{") else {}
-          except: opts = {}
+          try:
+              opts = json.loads(raw_sb) if raw_sb.startswith("{") else {"sb": raw_sb.lower() == "true"}
+          except Exception:
+              opts = {}
 
-          geo = opts.get("geo") or "IL"
+          geo = str(opts.get("geo") or "IL").upper()
           sb = bool(opts.get("sb"))
           chapters = bool(opts.get("chapters"))
+          norm_audio = bool(opts.get("norm"))
+          speed_val = str(opts.get("speed") or "1").strip()
+          email_to = str(opts.get("email") or "").strip()
 
           out_dir = Path("/tmp/out")
           pkg_dir = Path("/tmp/pkg")
+          stage_dir = Path("/tmp/stage")
           out_dir.mkdir(parents=True, exist_ok=True)
           pkg_dir.mkdir(parents=True, exist_ok=True)
           cookie_file = Path("/tmp/cookies.txt")
@@ -95,69 +97,178 @@ jobs:
                   has_ck = True
                   print("Cookies decrypted successfully.", flush=True)
               except Exception as e:
-                  print("Cookie decrypt notice:", e)
+                  print("Cookie decrypt notice:", e, flush=True)
 
-          # איכות מרבית: וידאו HD + אודיו נפרד באיכות מקסימלית
-          if quality.startswith("audio"):
-              fmt_args = ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"]
-          elif quality in ("2160", "1440", "1080", "720"):
-              fmt_args = [
-                  "-f", f"bv*[height<={quality}]+ba/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]",
-                  "-S", f"res:{quality},fps,br",
-                  "--merge-output-format", "mp4"
-              ]
+          # בניית רשימת הקישורים להורדה
+          target_urls = [target_url]
+          if mode == "list" and urls_raw:
+              try:
+                  parsed = json.loads(urls_raw)
+                  if isinstance(parsed, list) and parsed:
+                      target_urls = [str(u).strip() for u in parsed if str(u).strip().startswith("http")]
+              except Exception:
+                  pass
+
+          is_audio = quality.startswith("audio")
+          height_map = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480, "360": 360}
+          req_h = height_map.get(quality, 2160)
+
+          def get_fmt_args(strict_hd: bool):
+              if quality == "audio":
+                  return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
+              if quality == "audio_m4a":
+                  return ["-f", "ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+              if quality == "audio_opus":
+                  return ["-f", "ba[acodec=opus]/ba/b", "-x", "--audio-format", "opus", "--audio-quality", "0", "--embed-metadata"]
+              if quality == "audio_flac":
+                  return ["-f", "ba/b", "-x", "--audio-format", "flac", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+              if quality == "audio_wav":
+                  return ["-f", "ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
+
+              # איסור מוחלט על נפילה ל-360p (itag 18) בשלבי ה-HD
+              if strict_hd and req_h >= 720:
+                  fmt = f"bv*[height<={req_h}][height>=720]+ba/bv*[height<={req_h}][height>=480]+ba/b[height<={req_h}][height>=720]"
+              else:
+                  fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
+
+              if req_h <= 1080:
+                  sort_str = f"res:{req_h},fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
+              else:
+                  sort_str = f"res:{req_h},fps,vcodec:vp9:av01:h264,acodec:m4a:opus,ext:mp4"
+
+              return ["-f", fmt, "-S", sort_str, "--merge-output-format", "mp4", "--remux-video", "mp4", "--embed-metadata"]
+
+          def probe_height(fpath: Path) -> int:
+              try:
+                  r = subprocess.run(
+                      ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", str(fpath)],
+                      capture_output=True, text=True, timeout=15
+                  )
+                  return int(r.stdout.strip().splitlines()[0].strip())
+              except Exception:
+                  return 0
+
+          pot_cfg = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+          extra_args = [
+              "--geo-bypass",
+              "--no-mtime",
+              "--no-warnings",
+              "--no-check-certificates",
+              "--js-runtimes", "deno",
+              "--concurrent-fragments", "4",
+          ]
+          if mode != "collection":
+              extra_args.append("--no-playlist")
           else:
-              fmt_args = [
-                  "-f", "bv*[height<=1080]+ba/bestvideo+bestaudio/best",
-                  "-S", "res:1080,fps,br",
-                  "--merge-output-format", "mp4"
-              ]
+              extra_args += ["--yes-playlist", "--playlist-end", "35"]
 
-          extra_args = ["--geo-bypass", "--no-mtime"]
-          if mode != "collection": extra_args.append("--no-playlist")
           if clip_start or clip_end:
               s = clip_start or "00:00:00"
               e = clip_end or "inf"
               extra_args += ["--download-sections", f"*{s}-{e}", "--force-keyframes-at-cuts"]
-          if sb: extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
-          if chapters: extra_args += ["--split-chapters"]
 
-          # אסטרטגיות עקיפה חכמות: עם העוגיות ועם שרת ה-PO Token המקומי
-          ck_arg = ["--cookies", str(cookie_file)] if has_ck else []
+          if subtitles in ("embed", "files"):
+              extra_args += ["--write-subs", "--write-auto-subs", "--sub-langs", "he,iw,en.*,en", "--convert-subs", "srt"]
+              if subtitles == "embed" and not is_audio:
+                  extra_args.append("--embed-subs")
+
+          if sb:
+              extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
+          if chapters and not is_audio:
+              extra_args += ["--split-chapters"]
+
+          # רשימת ניסיונות מדורגת (נכון לנובמבר 2026):
+          # 1. קליינטים ללא עוגיות (android_vr / tv / ios) שמספקים 1080p/4K ישיר בענן
+          # 2. קליינטים עם PO Token ועוגיות משתמש (אם קיימות)
+          # 3. גיבוי אוניברסלי אם הסרטון עצמו קיים רק באיכות נמוכה במקור
           attempts = [
-              ("mweb + Cookies + POT Provider", ck_arg + ["--extractor-args", "youtube:player_client=mweb"]),
-              ("web + Chrome Impersonation + Cookies", ck_arg + ["--impersonate", "chrome", "--extractor-args", "youtube:player_client=web"]),
-              ("android_vr + ios fallback", ["--extractor-args", "youtube:player_client=android_vr,ios"]),
-              ("tv client fallback", ["--extractor-args", "youtube:player_client=tv"]),
-              ("General best fallback", ck_arg)
+              ("Android VR + TV Direct HD", ["--xff", geo, "--extractor-args", f"youtube:player_client=android_vr,tv,web_safari;po_token={pot_cfg}"], True),
+              ("iOS + MWeb Pure HD + PO-Token", ["--xff", geo, "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=ios,mweb,web;po_token={pot_cfg}"], True),
+              ("Global US Bypass HD (Android VR / iOS)", ["--xff", "US", "--extractor-args", f"youtube:player_client=android_vr,ios,tv;po_token={pot_cfg}"], True),
           ]
+          if has_ck:
+              attempts.insert(2, (
+                  "Authenticated TV/MWeb + Cookies + PO-Token",
+                  ["--cookies", str(cookie_file), "--xff", geo, "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=tv,mweb,web_safari,web;po_token={pot_cfg}"],
+                  True
+              ))
+          attempts.append((
+              "Universal Compatibility Fallback",
+              (["--cookies", str(cookie_file)] if has_ck else []) + ["--xff", geo, "--extractor-args", f"youtube:player_client=android_vr,tv,ios,mweb,web;po_token={pot_cfg}"],
+              False
+          ))
 
-          def get_dl():
-              return [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
+          def get_stage_files():
+              return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
 
-          for label, args in attempts:
-              if get_dl(): break
-              for item in out_dir.iterdir():
-                  if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
-                  else: item.unlink(missing_ok=True)
+          for u_idx, cur_url in enumerate(target_urls, 1):
+              print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
+              for label, args, strict_hd in attempts:
+                  if stage_dir.exists():
+                      shutil.rmtree(stage_dir, ignore_errors=True)
+                  stage_dir.mkdir(parents=True, exist_ok=True)
 
-              cmd = ["/usr/local/bin/yt-dlp"] + args + fmt_args + extra_args + [
-                  "--ffmpeg-location", "/usr/bin/ffmpeg",
-                  "--retries", "4",
-                  "--fragment-retries", "4",
-                  "-o", "/tmp/out/%(title).150B [%(id)s].%(ext)s",
-                  target_url
-              ]
-              print(f"=== Trying: {label} ===", flush=True)
-              subprocess.run(cmd, check=False)
+                  cmd = [
+                      "python3", "-m", "yt_dlp",
+                      "--ignore-config",
+                      "--ffmpeg-location", "/usr/bin/ffmpeg",
+                      "--retries", "6",
+                      "--fragment-retries", "6",
+                      "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
+                  ] + args + get_fmt_args(strict_hd) + extra_args + [cur_url]
 
-          files = get_dl()
+                  print(f"=== Trying: {label} (StrictHD={strict_hd}) ===", flush=True)
+                  subprocess.run(cmd, check=False)
+
+                  s_files = get_stage_files()
+                  media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
+                  if media_files:
+                      if not is_audio and strict_hd and req_h >= 720:
+                          heights = [probe_height(m) for m in media_files]
+                          max_h = max(heights) if heights else 0
+                          print(f"Detected video height: {max_h}p", flush=True)
+                          if 0 < max_h <= 360:
+                              print("Rejected 360p fallback! Advancing to next HD client...", flush=True)
+                              continue
+                      for f in s_files:
+                          shutil.move(str(f), str(out_dir / f.name))
+                      print(f"=== Success with: {label} ===", flush=True)
+                      break
+
+          files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
           if not files:
-              raise SystemExit("::error::הורדת HD מלא נכשלה בכל הניסיונות")
+              raise SystemExit("::error::הורדת המדיה נכשלה בכל הקליינטים")
+
+          # עיבוד משלים: מהירות השמעה או נרמול שמע
+          if (speed_val not in ("1", "1.0", "")) or norm_audio:
+              for fpath in list(files):
+                  if fpath.suffix.lower() not in (".mp4", ".mkv", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
+                      continue
+                  try:
+                      spd = float(speed_val) if speed_val else 1.0
+                  except Exception:
+                      spd = 1.0
+                  if spd <= 0 or (abs(spd - 1.0) < 0.01 and not norm_audio):
+                      continue
+                  tmp_p = fpath.with_name("proc_" + fpath.name)
+                  af = []
+                  if abs(spd - 1.0) >= 0.01:
+                      af.append(f"atempo={spd}")
+                  if norm_audio:
+                      af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+                  ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath)]
+                  if fpath.suffix.lower() in (".mp4", ".mkv", ".webm") and abs(spd - 1.0) >= 0.01:
+                      ff_cmd += ["-filter:v", f"setpts=PTS/{spd}"]
+                  if af:
+                      ff_cmd += ["-filter:a", ",".join(af)]
+                  ff_cmd.append(str(tmp_p))
+                  if subprocess.run(ff_cmd, check=False).returncode == 0 and tmp_p.exists():
+                      tmp_p.replace(fpath)
 
           zip_path = pkg_dir / ("dl-" + req_id + ".zip")
           with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
-              for f in files: zf.write(f, f.relative_to(out_dir))
+              for f in files:
+                  zf.write(f, f.relative_to(out_dir))
 
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           sha = os.environ.get("GITHUB_SHA", "")
@@ -171,15 +282,37 @@ jobs:
                   chunk = raw_bytes[offset:offset + chunk_size]
                   b64_payload = json.dumps({"content": base64.b64encode(chunk).decode("ascii"), "encoding": "base64"})
                   p = subprocess.run(["gh", "api", f"repos/{repo}/git/blobs", "-q", ".sha", "--input", "-"], input=b64_payload, text=True, capture_output=True, check=False)
-                  if p.returncode == 0 and p.stdout.strip(): blob_shas.append(p.stdout.strip())
+                  if p.returncode == 0 and p.stdout.strip():
+                      blob_shas.append(p.stdout.strip())
 
           notes = json.dumps({"v": 5, "size": len(raw_bytes), "blobs": blob_shas})
           subprocess.run(["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--target", sha, "--title", tag, "--notes", notes, "--prerelease"], check=False)
+
+          # שליחה למייל במידה והוגדר
+          smtp_user = os.environ.get("SMTP_USER", "").strip()
+          smtp_pass = os.environ.get("SMTP_PASS", "").strip()
+          if email_to and smtp_user and smtp_pass:
+              try:
+                  msg = email.message.EmailMessage()
+                  msg["Subject"] = f"YouTube Cloud Ultra - {files[0].name}"
+                  msg["From"] = smtp_user
+                  msg["To"] = email_to
+                  msg.set_content(f"הקובץ ירד בהצלחה:\n{files[0].name}")
+                  attach_target = files[0] if len(files) == 1 else zip_path
+                  if attach_target.stat().st_size <= 24 * 1024 * 1024:
+                      msg.add_attachment(attach_target.read_bytes(), maintype="application", subtype="octet-stream", filename=attach_target.name)
+                      with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as srv:
+                          srv.login(smtp_user, smtp_pass)
+                          srv.send_message(msg)
+              except Exception as e:
+                  print("Email notice:", e, flush=True)
           EOF
 
       - name: Upload Backup Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dl-${{ inputs.request_id }}
           path: /tmp/pkg/*.zip
+          if-no-files-found: ignore
           retention-days: 1
