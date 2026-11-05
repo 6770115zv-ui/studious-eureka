@@ -110,33 +110,39 @@ jobs:
 
           is_audio = quality.startswith("audio")
           height_map = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480, "360": 360}
-          req_h = height_map.get(quality, 2160)
+          req_h = height_map.get(quality, 1080 if quality == "best" else 2160)
 
-          def get_fmt_args(strict_hd: bool):
+          def get_fmt_args(strict_hd: bool, prefer_hls: bool = False):
               if quality == "audio":
-                  return ["-f", "ba[protocol^=http]/ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
+                  return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
               if quality == "audio_m4a":
-                  return ["-f", "ba[ext=m4a][protocol^=http]/ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+                  return ["-f", "ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
               if quality == "audio_opus":
-                  return ["-f", "ba[acodec=opus][protocol^=http]/ba/b", "-x", "--audio-format", "opus", "--audio-quality", "0", "--embed-metadata"]
+                  return ["-f", "ba[acodec=opus]/ba/b", "-x", "--audio-format", "opus", "--audio-quality", "0", "--embed-metadata"]
               if quality == "audio_flac":
-                  return ["-f", "ba[protocol^=http]/ba/b", "-x", "--audio-format", "flac", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+                  return ["-f", "ba/b", "-x", "--audio-format", "flac", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
               if quality == "audio_wav":
-                  return ["-f", "ba[protocol^=http]/ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
+                  return ["-f", "ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
 
-              if strict_hd and req_h >= 720:
+              max_h = 2160 if quality == "best" else req_h
+              if prefer_hls:
+                  fmt = f"bv*[protocol*=m3u8][height<={max_h}][height>=720]+ba/b[protocol*=m3u8][height<={max_h}][height>=720]/bv*[height<={max_h}][height>=720]+ba"
+                  sort_str = f"proto:m3u8_native,res:{max_h},vcodec:h264:vp9,ext:mp4"
+              elif strict_hd and max_h >= 720:
+                  # עדיפות ל-H264 MP4 שאינו נחסם באמצע ההורדה כמו f248/f303 webm
                   fmt = (
-                      f"bv*[protocol^=http][height<={req_h}][height>=720]+ba[protocol^=http]/"
-                      f"bv*[height<={req_h}][height>=720]+ba/"
-                      f"bv*[protocol^=http][height<={req_h}][height>=480]+ba[protocol^=http]"
+                      f"bv*[vcodec^=avc1][height<={max_h}][height>=720]+ba[ext=m4a]/"
+                      f"bv*[height<={max_h}][height>=720]+ba/"
+                      f"bv*[height<={max_h}][height>=480]+ba/"
+                      f"b[height<={max_h}][height>=720]"
                   )
+                  if quality in ("2160", "1440"):
+                      sort_str = f"res:{max_h},vcodec:vp9:av01:h264,acodec:m4a:aac,ext:mp4:m4a"
+                  else:
+                      sort_str = f"res:{max_h},vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
               else:
-                  fmt = f"bv*[protocol^=http][height<={req_h}]+ba[protocol^=http]/bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
-
-              if req_h <= 1080:
-                  sort_str = f"proto:https,res:{req_h},fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
-              else:
-                  sort_str = f"proto:https,res:{req_h},fps,vcodec:vp9:av01:h264,acodec:m4a:opus,ext:mp4"
+                  fmt = f"bv*[height<={max_h}]+ba/b[height<={max_h}]/bv*+ba/b"
+                  sort_str = f"res:{max_h},vcodec:h264:vp9,acodec:m4a:aac,ext:mp4:m4a"
 
               return ["-f", fmt, "-S", sort_str, "--merge-output-format", "mp4", "--remux-video", "mp4", "--embed-metadata"]
 
@@ -150,15 +156,15 @@ jobs:
               except Exception:
                   return 0
 
+          # שימוש ב-http-chunk-size 10M עם concurrent-fragments 1 מונע לחלוטין את חסימת ה-403 אחרי 8MB!
           extra_args = [
               "--no-mtime",
               "--no-warnings",
               "--no-check-certificates",
               "--js-runtimes", "deno",
-              "--concurrent-fragments", "8",
-              "--socket-timeout", "15",
-              "--throttled-rate", "100K",
-              "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+              "--concurrent-fragments", "1",
+              "--http-chunk-size", "10M",
+              "--socket-timeout", "25",
           ]
           if mode != "collection":
               extra_args.append("--no-playlist")
@@ -180,29 +186,37 @@ jobs:
           if chapters and not is_audio:
               extra_args += ["--split-chapters"]
 
+          pot_base = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
           attempts = []
+
+          # שילוב אסטרטגיות ללא עוגיות (עם IP מקומי של השרת ו-PO Token) + אסטרטגיות עם עוגיות
+          # כך שגם אם העוגיות מהארץ נחסמות ב-403 על שרת בארה"ב, הקליינטים הנקיים משלימים את ההורדה!
+          attempts.extend([
+              ("Android VR + TV Embedded Pure HD (Chunked)", ["--extractor-args", f"youtube:player_client=android_vr,tv_embedded;player_skip=webpage;{pot_base}"], True, False),
+              ("iOS + Web Safari HLS Segmented HD", ["--impersonate", "safari", "--extractor-args", f"youtube:player_client=ios,web_safari;{pot_base}"], True, True),
+              ("MWeb + Web + Chrome Impersonate + PO-Token", ["--impersonate", "chrome", "--extractor-args", f"youtube:player_client=mweb,web;fetch_pot=always;{pot_base}"], True, False),
+          ])
+
           if has_ck:
               attempts.extend([
-                  ("Authenticated Web + Chrome Impersonate + PO-Token", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web;fetch_pot=always"], True),
-                  ("Authenticated MWeb Pure HD + PO-Token", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb;fetch_pot=always"], True),
-                  ("Authenticated Web Creator / TV Embedded HD", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=web_creator,tv_embedded;fetch_pot=always"], True),
-                  ("Authenticated TV Client HD", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=tv;fetch_pot=always"], True),
-                  ("Authenticated Geo-Bypass Fallback (XFF)", ["--cookies", str(cookie_file), "--xff", geo, "--extractor-args", "youtube:player_client=mweb,tv;fetch_pot=always"], True),
-                  ("Authenticated Universal Compatibility", ["--cookies", str(cookie_file), "--extractor-args", "youtube:player_client=mweb,web,tv;fetch_pot=always"], False),
+                  ("Authenticated Web + Chrome + Chunked 10M", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=web,mweb;fetch_pot=always;{pot_base}"], True, False),
+                  ("Authenticated Web Safari / iOS HLS Stream", ["--cookies", str(cookie_file), "--impersonate", "safari", "--extractor-args", f"youtube:player_client=web_safari,mweb;{pot_base}"], True, True),
+                  ("Authenticated TV Embedded / Creator HD", ["--cookies", str(cookie_file), "--extractor-args", f"youtube:player_client=tv_embedded,web_creator;{pot_base}"], True, False),
               ])
-          else:
-              attempts.extend([
-                  ("TV Embedded + Android VR (No-Cookies HD)", ["--extractor-args", "youtube:player_client=tv_embedded,android_vr;player_skip=webpage;fetch_pot=always"], True),
-                  ("MWeb + iOS + PO-Token (No-Cookies HD)", ["--impersonate", "chrome", "--extractor-args", "youtube:player_client=mweb,ios;fetch_pot=always"], True),
-                  ("Universal No-Cookies Fallback", ["--extractor-args", "youtube:player_client=tv_embedded,mweb,web;fetch_pot=always"], False),
-              ])
+
+          attempts.append((
+              "Universal Compatibility Fallback",
+              (["--cookies", str(cookie_file)] if has_ck else []) + ["--impersonate", "chrome", "--extractor-args", f"youtube:player_client=android_vr,ios,mweb,web;{pot_base}"],
+              False,
+              False
+          ))
 
           def get_stage_files():
               return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
 
           for u_idx, cur_url in enumerate(target_urls, 1):
               print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
-              for label, args, strict_hd in attempts:
+              for label, args, strict_hd, prefer_hls in attempts:
                   if stage_dir.exists():
                       shutil.rmtree(stage_dir, ignore_errors=True)
                   stage_dir.mkdir(parents=True, exist_ok=True)
@@ -211,12 +225,13 @@ jobs:
                       "python3", "-m", "yt_dlp",
                       "--ignore-config",
                       "--ffmpeg-location", "/usr/bin/ffmpeg",
-                      "--retries", "4",
-                      "--fragment-retries", "4",
+                      "--retries", "10",
+                      "--fragment-retries", "10",
+                      "--file-access-retries", "5",
                       "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
-                  ] + args + get_fmt_args(strict_hd) + extra_args + [cur_url]
+                  ] + args + get_fmt_args(strict_hd, prefer_hls) + extra_args + [cur_url]
 
-                  print(f"=== Trying: {label} (StrictHD={strict_hd}) ===", flush=True)
+                  print(f"=== Trying: {label} (StrictHD={strict_hd}, HLS={prefer_hls}) ===", flush=True)
                   subprocess.run(cmd, check=False)
 
                   s_files = get_stage_files()
@@ -273,7 +288,6 @@ jobs:
           zip_size = zip_path.stat().st_size
           blob_shas = []
 
-          # גשר Blobs ישיר מופעל רק לקבצים עד 35MB כדי לא להעמיס זיכרון בקובצי HD גדולים
           if zip_size <= 35 * 1024 * 1024:
               raw_bytes = zip_path.read_bytes()
               chunk_size = 12 * 1024 * 1024
@@ -291,10 +305,7 @@ jobs:
               capture_output=True, text=True, check=False
           )
           if rel_proc.returncode != 0:
-              print("gh release create notice:", rel_proc.stderr, flush=True)
               subprocess.run(["gh", "release", "upload", tag, str(zip_path), "--repo", repo, "--clobber"], check=False)
-          else:
-              print(f"Release {tag} created and asset uploaded successfully ({zip_size} bytes).", flush=True)
 
           smtp_user = os.environ.get("SMTP_USER", "").strip()
           smtp_pass = os.environ.get("SMTP_PASS", "").strip()
