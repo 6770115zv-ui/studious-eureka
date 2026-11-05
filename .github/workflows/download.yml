@@ -300,7 +300,6 @@ jobs:
                   if subprocess.run(ff_cmd, check=False).returncode == 0 and tmp_p.exists():
                       tmp_p.replace(fpath)
 
-          # בדיקת איכות הקובץ הסופי שירד
           primary_file = files[0]
           detected_h, detected_dur, quality_report = inspect_media_quality(primary_file)
           file_mb = round(primary_file.stat().st_size / (1024 * 1024), 1)
@@ -327,7 +326,6 @@ jobs:
                       blob_shas.append(p.stdout.strip())
               del raw_bytes
 
-          # שליחה למייל: תומך אוטומטית בסודות שהוגדרו ב-GitHub גם בלי להקליד כתובת בחלון, ומכווץ אוטומטית אם הקובץ מעל 24MB!
           smtp_user = (
               os.environ.get("SMTP_USER", "").strip()
               or os.environ.get("EMAIL_USER", "").strip()
@@ -358,7 +356,6 @@ jobs:
                   try:
                       attach_target = primary_file if len(files) == 1 else zip_path
                       attach_note = "מצורף הקובץ המקורי."
-                      # אם הקובץ גדול ממגבלת Gmail (24MB), ניצור עותק מוקטן עבור הצרופה במייל כדי שהמייל יגיע תמיד!
                       if attach_target.stat().st_size > 24 * 1024 * 1024 and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
                           print(f"File is {file_mb}MB (>24MB Gmail limit). Creating compressed email attachment...", flush=True)
                           mail_mp4 = Path("/tmp/email_copy.mp4")
