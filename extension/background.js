@@ -63,6 +63,7 @@ async function addHistoryEntry(entry) {
     title: cleanTitle,
     url: entry.url || "",
     quality: entry.quality || "best",
+    actualQuality: entry.actualQuality || "",
     timestamp: Date.now()
   });
   const trimmed = filtered.slice(0, 80);
@@ -248,7 +249,7 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
       const nameMap = {
         "Set up Deno": "מכין סביבת ריצה בענן (Deno)...",
         "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "מתקין כלי הורדה וקידוד (yt-dlp + FFmpeg)...",
-        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית (Chunked HD), מעבד ואורז בענן...",
+        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית, בודק רזולוציה בפועל ואורז בענן...",
         "Upload Backup Artifact": "שומר גיבוי תוצר ב-GitHub..."
       };
       const baseStepPct = 20 + Math.round((completedCount / totalCount) * 35);
@@ -299,14 +300,18 @@ async function findReleaseAssetsByTag(cfg, tag) {
   }
   if (!rel) return null;
   let blobShas = [];
+  let qualityInfo = "";
+  let emailStatus = "";
   if (rel.body && String(rel.body).trim().startsWith("{")) {
     try {
       const parsed = JSON.parse(String(rel.body).trim());
       if (Array.isArray(parsed.blobs)) blobShas = parsed.blobs;
+      if (parsed.quality_info) qualityInfo = String(parsed.quality_info);
+      if (parsed.email_status) emailStatus = String(parsed.email_status);
     } catch {}
   }
   const assets = (rel.assets || []).filter((a) => a.url || a.browser_download_url).map((a) => ({
-    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas
+    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus
   }));
   return assets.length ? assets : null;
 }
@@ -449,12 +454,19 @@ async function driveJob(jobId) {
     }, signal);
 
     if (conclusion !== "success") throw new Error("הריצה הסתיימה עם סטטוס: " + conclusion);
-    patchJob(jobId, { status: "fetching", detail: "מושך קובץ מ-GitHub API...", percent: 76 });
+    patchJob(jobId, { status: "fetching", detail: "מושך קובץ ונתוני איכות מ-GitHub API...", percent: 76 });
 
     let files = null;
+    let detectedQuality = "";
+    let detectedEmailStatus = "";
+
     for (let a = 0; a < 10 && !files; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
       if (assets && assets.length) {
+        if (assets[0].qualityInfo) detectedQuality = assets[0].qualityInfo;
+        if (assets[0].emailStatus) detectedEmailStatus = assets[0].emailStatus;
+        if (detectedQuality) patchJob(jobId, { actualQuality: detectedQuality });
+
         const isBundle = job.mode === "collection";
         const inner = [];
         for (const x of assets) {
@@ -493,13 +505,24 @@ async function driveJob(jobId) {
     await addHistoryEntry({
       url: job.url,
       title: saved[0] || job.title || job.url,
-      quality: job.quality
+      quality: job.quality,
+      actualQuality: detectedQuality
     });
 
     if (cfg.autoCleanRelease === "true") await deleteReleaseAndTagByName(cfg, tag);
-    const emailNote = job.sendEmail ? " (ונשלח גם למייל)" : "";
-    patchJob(jobId, { status: "completed", detail: "הושלם ונשמר במחשב!" + emailNote, files: saved, percent: 100 });
-    notifyUser("הורדה הושלמה בהצלחה", (saved[0] || job.title || "הקובץ נשמר") + emailNote);
+    const qualityNote = detectedQuality ? (" | איכות הקובץ שנבדקה: " + detectedQuality) : "";
+    const emailNote = detectedEmailStatus
+      ? (" | " + detectedEmailStatus)
+      : (job.sendEmail ? " | נשלח גם למייל הקבוע" : "");
+
+    patchJob(jobId, {
+      status: "completed",
+      actualQuality: detectedQuality,
+      detail: "הושלם ונשמר במחשב!" + qualityNote + emailNote,
+      files: saved,
+      percent: 100
+    });
+    notifyUser("הורדה הושלמה בהצלחה", (saved[0] || job.title || "הקובץ נשמר") + qualityNote + emailNote);
   } catch (err) {
     patchJob(jobId, { status: "failed", detail: err.message, error: err.message });
   } finally {
@@ -530,19 +553,21 @@ async function startDownload(payload) {
     repUrl = list[0];
   }
 
-  const targetEmail = payload.sendEmail ? (payload.emailTo || cfg.emailTo || "") : "";
+  // אם המשתמש סימן שליחה למייל (גם ללא הזנת כתובת בתיבה), שולחים דגל send_email: true והענן ישלח אוטומטית למייל שב-GitHub Secrets!
+  const targetEmail = payload.sendEmail ? (payload.emailTo || cfg.emailTo || "AUTO_SECRET") : "";
   const extOptions = JSON.stringify({
     sb: Boolean(payload.sponsorblock),
     geo: payload.geoCountry || "IL",
     chapters: Boolean(payload.splitChapters),
     norm: Boolean(payload.normalizeAudio),
     speed: payload.speedFactor || "1",
+    send_email: Boolean(payload.sendEmail),
     email: targetEmail
   });
 
   jobs.set(requestId, {
     id: requestId, requestId, url: repUrl, urls: payload.urls || [], title: payload.title || repUrl,
-    thumbnail: payload.thumbnail || "", quality: payload.quality || "best", mode,
+    thumbnail: payload.thumbnail || "", quality: payload.quality || "best", actualQuality: "", mode,
     clipStart: payload.clipStart || "", clipEnd: payload.clipEnd || "", subtitles: payload.subtitles || "none",
     sponsorblock: payload.sponsorblock ? "true" : "false",
     splitChapters: Boolean(payload.splitChapters),
@@ -633,9 +658,9 @@ async function driveRecommendations(requestId, query, minViews) {
   const tag = "rec-" + requestId;
   if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   try {
-    await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש וסינון AI ב-GitHub Actions...", items: [] });
+    await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש רב-לשוני וסינון AI ב-GitHub Actions...", items: [] });
     const runId = await findRunByTitle(cfg, tag, null);
-    await setRecsState({ status: "running", query, minViews, detail: "סורק תוצאות ומסנן באמצעות מודל בינה מלאכותית בענן...", items: [] });
+    await setRecsState({ status: "running", query, minViews, detail: "סורק תוצאות בעברית ובאנגלית ומסנן עם AI בענן...", items: [] });
     const conclusion = await waitForRun(cfg, runId, null, null);
     if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
 
@@ -651,11 +676,12 @@ async function driveRecommendations(requestId, query, minViews) {
     }
     await deleteReleaseAndTagByName(cfg, tag);
     if (!data || !Array.isArray(data.items)) throw new Error("לא התקבלו תוצאות מהענן");
+    const trLabel = data.en_query ? (" (כולל תרגום: " + data.en_query + ")") : "";
     await setRecsState({
       status: "completed",
       query,
       minViews,
-      detail: "נמצאו ואושרו ע\"י ה-AI " + data.items.length + " תוצאות נקיות בנושא \"" + query + "\"",
+      detail: "נמצאו ואושרו ע\"י ה-AI " + data.items.length + " תוצאות נקיות בנושא \"" + query + "\"" + trLabel,
       items: data.items,
       updatedAt: Date.now()
     });
@@ -747,7 +773,7 @@ async function handle(msg) {
         url: old.url, urls: old.urls, title: old.title, thumbnail: old.thumbnail, quality: old.quality, mode: old.mode,
         clipStart: old.clipStart, clipEnd: old.clipEnd, subtitles: old.subtitles, sponsorblock: old.sponsorblock === "true",
         splitChapters: Boolean(old.splitChapters), normalizeAudio: Boolean(old.normalizeAudio),
-        speedFactor: old.speedFactor || "1", sendEmail: Boolean(old.sendEmail), emailTo: old.emailTo || "", geoCountry: old.geoCountry || "IL"
+        speedFactor: old.speedFactor || "1", sendEmail: Boolean(old.sendEmail), emailTo: old.emailTo === "AUTO_SECRET" ? "" : (old.emailTo || ""), geoCountry: old.geoCountry || "IL"
       });
     }
     case "RUN_CLEANUP": return runCloudCleanup();
