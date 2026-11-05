@@ -13,6 +13,20 @@
   let previewDebounce = null;
   const selectedRecUrls = new Set();
   let lastHistory = [];
+  const FILTER_STORAGE_KEY = "ytproxy_ai_filter_prompt";
+
+  chrome.storage.local.get(FILTER_STORAGE_KEY).then((d) => {
+    if (d && d[FILTER_STORAGE_KEY] && el("recFilterPromptInput")) {
+      el("recFilterPromptInput").value = d[FILTER_STORAGE_KEY];
+    }
+  }).catch(() => {});
+
+  if (el("recFilterPromptInput")) {
+    el("recFilterPromptInput").addEventListener("change", () => {
+      const val = el("recFilterPromptInput").value.trim();
+      if (val) chrome.storage.local.set({ [FILTER_STORAGE_KEY]: val }).catch(() => {});
+    });
+  }
 
   el("emailToggle").addEventListener("change", () => {
     el("emailInputWrap").style.display = el("emailToggle").checked ? "block" : "none";
@@ -156,7 +170,7 @@
     if (topics.length) {
       const lbl = document.createElement("span");
       lbl.className = "small muted";
-      lbl.textContent = "נושאים מההורדות האחרונות שלך:";
+      lbl.textContent = "נושאים אחרונים:";
       lbl.style.alignSelf = "center";
       chipsWrap.append(lbl);
       for (const t of topics) {
@@ -195,13 +209,13 @@
     el("batchRecsBtn").onclick = async () => {
       if (!selectedRecUrls.size) return;
       const urls = Array.from(selectedRecUrls);
-      el("recStatusText").textContent = "שולח " + urls.length + " המלצות להורדה מרוכזת בריצה אחת...";
+      el("recStatusText").textContent = "שולח " + urls.length + " קבצים מסוננים להורדה מרוכזת בריצה אחת...";
       const res = await chrome.runtime.sendMessage({
         type: "START_DOWNLOAD",
         payload: {
           ...getActiveDownloadOptions(),
           urls,
-          title: "חבילת המלצות (" + urls.length + " קבצים)",
+          title: "חבילת המלצות מסוננת (" + urls.length + " קבצים)",
           mode: "list"
         }
       });
@@ -324,13 +338,18 @@
       el("recStatusText").textContent = "נא להקליד נושא לחיפוש";
       return;
     }
+    const filterPrompt = el("recFilterPromptInput") ? el("recFilterPromptInput").value.trim() : "";
+    if (filterPrompt) {
+      chrome.storage.local.set({ [FILTER_STORAGE_KEY]: filterPrompt }).catch(() => {});
+    }
     selectedRecUrls.clear();
-    el("recStatusText").textContent = "משגר חיפוש קשיח ל-GitHub Actions...";
+    el("recStatusText").textContent = "משגר חיפוש וסינון AI ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
       payload: {
         query,
-        minViews: el("recMinViewsSelect").value
+        minViews: el("recMinViewsSelect").value,
+        filterPrompt
       }
     });
     if (!res || !res.ok) {
