@@ -14,10 +14,15 @@
   const selectedRecUrls = new Set();
   let lastHistory = [];
   const FILTER_STORAGE_KEY = "ytproxy_ai_filter_prompt";
+  const AUTO_EMAIL_TOGGLE_KEY = "ytproxy_send_email_enabled";
 
-  chrome.storage.local.get(FILTER_STORAGE_KEY).then((d) => {
+  chrome.storage.local.get([FILTER_STORAGE_KEY, AUTO_EMAIL_TOGGLE_KEY]).then((d) => {
     if (d && d[FILTER_STORAGE_KEY] && el("recFilterPromptInput")) {
       el("recFilterPromptInput").value = d[FILTER_STORAGE_KEY];
+    }
+    if (d && d[AUTO_EMAIL_TOGGLE_KEY] !== undefined && el("emailToggle")) {
+      el("emailToggle").checked = Boolean(d[AUTO_EMAIL_TOGGLE_KEY]);
+      el("emailInputWrap").style.display = el("emailToggle").checked ? "block" : "none";
     }
   }).catch(() => {});
 
@@ -30,6 +35,7 @@
 
   el("emailToggle").addEventListener("change", () => {
     el("emailInputWrap").style.display = el("emailToggle").checked ? "block" : "none";
+    chrome.storage.local.set({ [AUTO_EMAIL_TOGGLE_KEY]: el("emailToggle").checked }).catch(() => {});
   });
 
   el("urlInput").addEventListener("input", () => {
@@ -299,7 +305,7 @@
       const title = document.createElement("div");
       title.className = "small";
       title.style.cssText = "flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;";
-      title.textContent = h.title;
+      title.textContent = h.title + (h.actualQuality ? (" — [" + h.actualQuality + "]") : "");
 
       const btns = document.createElement("div");
       btns.style.cssText = "display:flex;gap:6px;";
@@ -343,7 +349,7 @@
       chrome.storage.local.set({ [FILTER_STORAGE_KEY]: filterPrompt }).catch(() => {});
     }
     selectedRecUrls.clear();
-    el("recStatusText").textContent = "משגר חיפוש וסינון AI ל-GitHub Actions...";
+    el("recStatusText").textContent = "משגר חיפוש רב-לשוני וסינון AI ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
       payload: {
@@ -376,13 +382,19 @@
       card.style.cssText = "background:var(--surface-2);padding:12px;border-radius:12px;border:1px solid var(--border);display:flex;flex-direction:column;gap:8px;";
       
       const topRow = document.createElement("div");
-      topRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;";
+      topRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;";
       const title = document.createElement("div");
       title.style.fontWeight = "600";
       title.textContent = (j.files && j.files[0]) || j.title || j.url;
       const badge = document.createElement("span");
       badge.className = "small muted";
-      badge.textContent = j.quality + " • " + (j.percent || 0) + "%" + elapsedLabel;
+      if (j.actualQuality) {
+        badge.style.color = "var(--ok)";
+        badge.style.fontWeight = "600";
+        badge.textContent = "✓ איכות בפועל: " + j.actualQuality + " • " + (j.percent || 0) + "%";
+      } else {
+        badge.textContent = "יעד: " + j.quality + " • " + (j.percent || 0) + "%" + elapsedLabel;
+      }
       topRow.append(title, badge);
 
       const progTrack = document.createElement("div");
