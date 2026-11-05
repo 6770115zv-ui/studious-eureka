@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v6.5 — מרכז הורדות ענן וסינון AI</title>
+  <title>YouTube Cloud Ultra v7.0 — מרכז הורדות ענן, בדיקת איכות וסינון AI</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,7 +10,7 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v6.5</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v7.0</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
@@ -99,13 +99,13 @@
         </label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
           <input type="checkbox" id="emailToggle" class="switch"/>
-          <span>📧 שלח גם למייל</span>
+          <span>📧 שלח גם למייל הקבוע</span>
         </label>
       </div>
 
       <div id="emailInputWrap" style="display:none;">
-        <label class="small muted">כתובת מייל לקבלת הקובץ כצרופה (דורש הגדרת SMTP_USER ו-SMTP_PASS ב-GitHub Secrets):</label>
-        <input id="emailToInput" class="input" dir="ltr" placeholder="your-email@gmail.com"/>
+        <label class="small muted">כתובת מייל (השאר ריק לשליחה אוטומטית למייל הקבוע שב-GitHub Secrets, או הזן מייל חלופי):</label>
+        <input id="emailToInput" class="input" dir="ltr" placeholder="השאר ריק לשליחה למייל הקבוע ב-GitHub Secrets..."/>
       </div>
 
       <button class="btn btn--primary btn--block" id="downloadBtn" type="button">🚀 התחל הורדה בענן GitHub</button>
@@ -115,8 +115,8 @@
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
         <div>
-          <h2 style="margin:0;font-size:15px;">🎯 מנוע חיפוש והמלצות מבוסס סינון AI בענן</h2>
-          <p class="small muted" style="margin:2px 0 0;">סורק בענן תוצאות פופולריות ומסנן אותן באמצעות מודל בינה מלאכותית לפי כללי הנקיות והתוכן שתגדיר</p>
+          <h2 style="margin:0;font-size:15px;">🎯 מנוע חיפוש רב-לשוני (עברית + בינלאומי) מבוסס סינון AI בענן</h2>
+          <p class="small muted" style="margin:2px 0 0;">מתרגם אוטומטית גם לאנגלית להבאת סרטונים פופולריים מהעולם ומסנן אותם עם AI לפי הגדרת הנקיות שלך</p>
         </div>
       </div>
 
@@ -124,8 +124,8 @@
 
       <div class="grid-2">
         <div>
-          <label class="small muted">נושא קשיח לחיפוש (למשל: בנייה, נגרות, פייתון):</label>
-          <input id="recQueryInput" class="input" placeholder="הקלד נושא מדויק או לחץ על תגית למעלה..."/>
+          <label class="small muted">נושא קשיח לחיפוש (למשל: בנייה, נגרות, אלקטרוניקה):</label>
+          <input id="recQueryInput" class="input" placeholder="הקלד נושא בעברית או באנגלית..."/>
         </div>
         <div>
           <label class="small muted">סינון פופולריות מינימלי (צפיות):</label>
@@ -145,7 +145,7 @@
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 חפש וסנן באמצעות AI בענן</button>
+        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 חפש (עברית + עולמי) וסנן באמצעות AI</button>
         <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
         <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
       </div>
@@ -155,7 +155,7 @@
 
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (מעקב שלבים + גשר JSON ישיר)</h2>
+        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (כולל בדיקת איכות קובץ בפועל)</h2>
         <button class="btn small" id="clearJobsBtn" type="button">נקה שהושלמו</button>
       </div>
       <div id="jobList" style="display:flex;flex-direction:column;gap:10px;"></div>
