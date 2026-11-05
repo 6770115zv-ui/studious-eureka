@@ -46,7 +46,6 @@
     const out = {};
     for (const item of parseZipEntries(buf)) {
       if (item.method === 0) {
-        // ללא העתקת זיכרון כפולה כדי לתמוך בקובצי HD גדולים (500MB+)
         out[item.name] = item.raw;
       } else if (item.method === 8) {
         const stream = new Blob([item.raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
