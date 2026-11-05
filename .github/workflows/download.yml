@@ -47,6 +47,13 @@ jobs:
           COOKIE_KEY_FALLBACK: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3"
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           python3 - << 'EOF'
           import os, sys, re, json, time, base64, shutil, zipfile, subprocess, smtplib, email.message
@@ -79,7 +86,8 @@ jobs:
           chapters = bool(opts.get("chapters"))
           norm_audio = bool(opts.get("norm"))
           speed_val = str(opts.get("speed") or "1").strip()
-          email_to = str(opts.get("email") or "").strip()
+          email_opt = str(opts.get("email") or "").strip()
+          send_email_flag = bool(opts.get("send_email")) or bool(email_opt)
 
           out_dir = Path("/tmp/out")
           pkg_dir = Path("/tmp/pkg")
@@ -129,7 +137,6 @@ jobs:
                   fmt = f"bv*[protocol*=m3u8][height<={max_h}][height>=720]+ba/b[protocol*=m3u8][height<={max_h}][height>=720]/bv*[height<={max_h}][height>=720]+ba"
                   sort_str = f"proto:m3u8_native,res:{max_h},vcodec:h264:vp9,ext:mp4"
               elif strict_hd and max_h >= 720:
-                  # עדיפות ל-H264 MP4 שאינו נחסם באמצע ההורדה כמו f248/f303 webm
                   fmt = (
                       f"bv*[vcodec^=avc1][height<={max_h}][height>=720]+ba[ext=m4a]/"
                       f"bv*[height<={max_h}][height>=720]+ba/"
@@ -146,17 +153,38 @@ jobs:
 
               return ["-f", fmt, "-S", sort_str, "--merge-output-format", "mp4", "--remux-video", "mp4", "--embed-metadata"]
 
-          def probe_height(fpath: Path) -> int:
+          def inspect_media_quality(fpath: Path):
               try:
-                  r = subprocess.run(
-                      ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", str(fpath)],
-                      capture_output=True, text=True, timeout=15
-                  )
-                  return int(r.stdout.strip().splitlines()[0].strip())
+                  cmd = [
+                      "ffprobe", "-v", "error",
+                      "-show_entries", "stream=codec_type,codec_name,width,height,bit_rate:format=bit_rate,duration",
+                      "-of", "json", str(fpath)
+                  ]
+                  r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                  data = json.loads(r.stdout)
+                  streams = data.get("streams") or []
+                  v_s = next((s for s in streams if s.get("codec_type") == "video" and int(s.get("height") or 0) > 0), None)
+                  a_s = next((s for s in streams if s.get("codec_type") == "audio"), None)
+                  dur = float((data.get("format") or {}).get("duration") or 0)
+                  if v_s:
+                      w = int(v_s.get("width") or 0)
+                      h = int(v_s.get("height") or 0)
+                      vc = (v_s.get("codec_name") or "mp4").upper()
+                      if h >= 2160 or w >= 3840: tag = f"4K UHD ({h}p)"
+                      elif h >= 1440 or w >= 2560: tag = f"2K QHD ({h}p)"
+                      elif h >= 1080 or w >= 1920: tag = f"Full HD ({h}p)"
+                      elif h >= 720 or w >= 1280: tag = f"HD ({h}p)"
+                      else: tag = f"{h}p"
+                      return h, dur, f"{tag} [{w}x{h} • {vc}]"
+                  if a_s:
+                      ac = (a_s.get("codec_name") or fpath.suffix.lstrip(".")).upper()
+                      br = int(a_s.get("bit_rate") or (data.get("format") or {}).get("bit_rate") or 0)
+                      kbps = f" {round(br / 1000)}kbps" if br > 0 else ""
+                      return 0, dur, f"אודיו ({ac}{kbps})"
               except Exception:
-                  return 0
+                  pass
+              return 0, 0.0, "תקין"
 
-          # שימוש ב-http-chunk-size 10M עם concurrent-fragments 1 מונע לחלוטין את חסימת ה-403 אחרי 8MB!
           extra_args = [
               "--no-mtime",
               "--no-warnings",
@@ -187,23 +215,17 @@ jobs:
               extra_args += ["--split-chapters"]
 
           pot_base = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
-          attempts = []
-
-          # שילוב אסטרטגיות ללא עוגיות (עם IP מקומי של השרת ו-PO Token) + אסטרטגיות עם עוגיות
-          # כך שגם אם העוגיות מהארץ נחסמות ב-403 על שרת בארה"ב, הקליינטים הנקיים משלימים את ההורדה!
-          attempts.extend([
+          attempts = [
               ("Android VR + TV Embedded Pure HD (Chunked)", ["--extractor-args", f"youtube:player_client=android_vr,tv_embedded;player_skip=webpage;{pot_base}"], True, False),
               ("iOS + Web Safari HLS Segmented HD", ["--impersonate", "safari", "--extractor-args", f"youtube:player_client=ios,web_safari;{pot_base}"], True, True),
               ("MWeb + Web + Chrome Impersonate + PO-Token", ["--impersonate", "chrome", "--extractor-args", f"youtube:player_client=mweb,web;fetch_pot=always;{pot_base}"], True, False),
-          ])
-
+          ]
           if has_ck:
               attempts.extend([
                   ("Authenticated Web + Chrome + Chunked 10M", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=web,mweb;fetch_pot=always;{pot_base}"], True, False),
                   ("Authenticated Web Safari / iOS HLS Stream", ["--cookies", str(cookie_file), "--impersonate", "safari", "--extractor-args", f"youtube:player_client=web_safari,mweb;{pot_base}"], True, True),
                   ("Authenticated TV Embedded / Creator HD", ["--cookies", str(cookie_file), "--extractor-args", f"youtube:player_client=tv_embedded,web_creator;{pot_base}"], True, False),
               ])
-
           attempts.append((
               "Universal Compatibility Fallback",
               (["--cookies", str(cookie_file)] if has_ck else []) + ["--impersonate", "chrome", "--extractor-args", f"youtube:player_client=android_vr,ios,mweb,web;{pot_base}"],
@@ -238,7 +260,7 @@ jobs:
                   media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
                   if media_files:
                       if not is_audio and strict_hd and req_h >= 720:
-                          heights = [probe_height(m) for m in media_files]
+                          heights = [inspect_media_quality(m)[0] for m in media_files]
                           max_h = max(heights) if heights else 0
                           print(f"Detected video height: {max_h}p", flush=True)
                           if 0 < max_h <= 360:
@@ -278,6 +300,12 @@ jobs:
                   if subprocess.run(ff_cmd, check=False).returncode == 0 and tmp_p.exists():
                       tmp_p.replace(fpath)
 
+          # בדיקת איכות הקובץ הסופי שירד
+          primary_file = files[0]
+          detected_h, detected_dur, quality_report = inspect_media_quality(primary_file)
+          file_mb = round(primary_file.stat().st_size / (1024 * 1024), 1)
+          print(f">>> VERIFIED DOWNLOADED QUALITY: {quality_report} ({file_mb} MB) <<<", flush=True)
+
           tag = "dl-" + req_id
           zip_path = pkg_dir / (tag + ".zip")
           with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
@@ -299,31 +327,96 @@ jobs:
                       blob_shas.append(p.stdout.strip())
               del raw_bytes
 
-          notes = json.dumps({"v": 6, "size": zip_size, "blobs": blob_shas})
+          # שליחה למייל: תומך אוטומטית בסודות שהוגדרו ב-GitHub גם בלי להקליד כתובת בחלון, ומכווץ אוטומטית אם הקובץ מעל 24MB!
+          smtp_user = (
+              os.environ.get("SMTP_USER", "").strip()
+              or os.environ.get("EMAIL_USER", "").strip()
+              or os.environ.get("GMAIL_USER", "").strip()
+          )
+          smtp_pass = (
+              os.environ.get("SMTP_PASS", "").strip()
+              or os.environ.get("EMAIL_PASS", "").strip()
+              or os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+              or os.environ.get("GMAIL_PASS", "").strip()
+          )
+          secret_to = (
+              os.environ.get("EMAIL_TO", "").strip()
+              or os.environ.get("SMTP_TO", "").strip()
+              or smtp_user
+          )
+          recipient = email_opt if (email_opt and "@" in email_opt) else secret_to
+
+          email_sent_status = ""
+          if send_email_flag:
+              if not smtp_user or not smtp_pass:
+                  email_sent_status = "שגיאת מייל: חסר SMTP_USER או SMTP_PASS ב-Secrets"
+                  print(email_sent_status, flush=True)
+              elif not recipient or "@" not in recipient:
+                  email_sent_status = "שגיאת מייל: לא נמצאה כתובת יעד"
+                  print(email_sent_status, flush=True)
+              else:
+                  try:
+                      attach_target = primary_file if len(files) == 1 else zip_path
+                      attach_note = "מצורף הקובץ המקורי."
+                      # אם הקובץ גדול ממגבלת Gmail (24MB), ניצור עותק מוקטן עבור הצרופה במייל כדי שהמייל יגיע תמיד!
+                      if attach_target.stat().st_size > 24 * 1024 * 1024 and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
+                          print(f"File is {file_mb}MB (>24MB Gmail limit). Creating compressed email attachment...", flush=True)
+                          mail_mp4 = Path("/tmp/email_copy.mp4")
+                          target_total_kbps = max(250, int((21 * 8192) / max(10.0, detected_dur or 300.0)) - 96)
+                          ff_mail = [
+                              "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
+                              "-vf", "scale='min(854,iw)':-2",
+                              "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{target_total_kbps}k", "-maxrate", f"{target_total_kbps}k", "-bufsize", f"{target_total_kbps*2}k",
+                              "-c:a", "aac", "-b:a", "96k",
+                              str(mail_mp4)
+                          ]
+                          subprocess.run(ff_mail, check=False)
+                          if mail_mp4.exists() and mail_mp4.stat().st_size <= 24 * 1024 * 1024:
+                              attach_target = mail_mp4
+                              attach_note = f"הקובץ המקורי ({file_mb}MB) ירד באיכות {quality_report} למחשב. למייל זה צורף עותק מכווץ ({round(mail_mp4.stat().st_size/(1024*1024),1)}MB) המותאם למגבלת 25MB של Gmail."
+
+                      msg = email.message.EmailMessage()
+                      msg["Subject"] = f"YouTube Cloud Ultra [{quality_report}] - {primary_file.name}"
+                      msg["From"] = smtp_user
+                      msg["To"] = recipient
+                      msg.set_content(
+                          f"שלום,\n\n"
+                          f"הקובץ ירד בהצלחה בענן!\n"
+                          f"• שם הקובץ: {primary_file.name}\n"
+                          f"• איכות שנבדקה בפועל: {quality_report}\n"
+                          f"• גודל הקובץ המקורי: {file_mb} MB\n"
+                          f"• הערה: {attach_note}\n"
+                      )
+                      if attach_target.stat().st_size <= 24 * 1024 * 1024:
+                          msg.add_attachment(
+                              attach_target.read_bytes(),
+                              maintype="application",
+                              subtype="octet-stream",
+                              filename=primary_file.name if attach_target != zip_path else zip_path.name
+                          )
+                      with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as srv:
+                          srv.login(smtp_user, smtp_pass)
+                          srv.send_message(msg)
+                      email_sent_status = f"נשלח למייל ({recipient})"
+                      print(f"Email sent successfully to {recipient}", flush=True)
+                  except Exception as e:
+                      email_sent_status = f"שגיאה בשליחת מייל: {e}"
+                      print("Email error:", e, flush=True)
+
+          notes = json.dumps({
+              "v": 7,
+              "size": zip_size,
+              "quality_info": f"{quality_report} ({file_mb} MB)",
+              "email_status": email_sent_status,
+              "blobs": blob_shas
+          }, ensure_ascii=False)
+
           rel_proc = subprocess.run(
               ["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--title", tag, "--notes", notes],
               capture_output=True, text=True, check=False
           )
           if rel_proc.returncode != 0:
               subprocess.run(["gh", "release", "upload", tag, str(zip_path), "--repo", repo, "--clobber"], check=False)
-
-          smtp_user = os.environ.get("SMTP_USER", "").strip()
-          smtp_pass = os.environ.get("SMTP_PASS", "").strip()
-          if email_to and smtp_user and smtp_pass:
-              try:
-                  msg = email.message.EmailMessage()
-                  msg["Subject"] = f"YouTube Cloud Ultra - {files[0].name}"
-                  msg["From"] = smtp_user
-                  msg["To"] = email_to
-                  msg.set_content(f"הקובץ ירד בהצלחה:\n{files[0].name}")
-                  attach_target = files[0] if len(files) == 1 else zip_path
-                  if attach_target.stat().st_size <= 24 * 1024 * 1024:
-                      msg.add_attachment(attach_target.read_bytes(), maintype="application", subtype="octet-stream", filename=attach_target.name)
-                      with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as srv:
-                          srv.login(smtp_user, smtp_pass)
-                          srv.send_message(msg)
-              except Exception as e:
-                  print("Email notice:", e, flush=True)
           EOF
 
       - name: Upload Backup Artifact
