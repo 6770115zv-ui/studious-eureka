@@ -219,7 +219,6 @@ function patchJob(id, patch) {
   return job;
 }
 
-// זיהוי מדויק בלבד לפי targetTitle (dl-<request_id>) למניעת הצמדות לריצה קודמת!
 async function findRunByTitle(cfg, targetTitle, signal) {
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?event=workflow_dispatch&per_page=35";
   for (let i = 0; i < 120; i++) {
@@ -249,7 +248,7 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
       const nameMap = {
         "Set up Deno": "מכין סביבת ריצה בענן (Deno)...",
         "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "מתקין כלי הורדה וקידוד (yt-dlp + FFmpeg)...",
-        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית, מעבד ואורז מדיה בענן...",
+        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית (Chunked HD), מעבד ואורז בענן...",
         "Upload Backup Artifact": "שומר גיבוי תוצר ב-GitHub..."
       };
       const baseStepPct = 20 + Math.round((completedCount / totalCount) * 35);
@@ -367,7 +366,6 @@ async function unpackZipUrl(assetOrUrl, jobId, cfg, rawZip = false) {
   const zipName = (typeof assetOrUrl === "object" && assetOrUrl.name) ? assetOrUrl.name : ("dl-" + jobId + ".zip");
   const blobShas = (typeof assetOrUrl === "object" && assetOrUrl.blobShas) ? assetOrUrl.blobShas : [];
 
-  // עבור קבצים קטנים עם blobShas נשתמש בגשר Cache; עבור קובצי HD גדולים ניתן ל-offscreen להוריד ישירות ללא הגבלת זיכרון של Service Worker
   let cacheKey = null;
   if (blobShas && blobShas.length) {
     cacheKey = await fetchDirectBlobsToCache(cfg, blobShas, jobId);
@@ -635,13 +633,13 @@ async function driveRecommendations(requestId, query, minViews) {
   const tag = "rec-" + requestId;
   if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   try {
-    await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש ב-GitHub Actions...", items: [] });
+    await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש וסינון AI ב-GitHub Actions...", items: [] });
     const runId = await findRunByTitle(cfg, tag, null);
-    await setRecsState({ status: "running", query, minViews, detail: "סורק ומדרג תוצאות היסטוריות פופולריות בענן...", items: [] });
+    await setRecsState({ status: "running", query, minViews, detail: "סורק תוצאות ומסנן באמצעות מודל בינה מלאכותית בענן...", items: [] });
     const conclusion = await waitForRun(cfg, runId, null, null);
     if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
 
-    await setRecsState({ status: "fetching", query, minViews, detail: "מושך תוצאות מומלצות מ-GitHub...", items: [] });
+    await setRecsState({ status: "fetching", query, minViews, detail: "מושך תוצאות מסוננות מ-GitHub...", items: [] });
     let data = null;
     for (let a = 0; a < 8 && !data; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
@@ -657,7 +655,7 @@ async function driveRecommendations(requestId, query, minViews) {
       status: "completed",
       query,
       minViews,
-      detail: "נמצאו " + data.items.length + " תוצאות היסטוריות פופולריות בנושא \"" + query + "\"",
+      detail: "נמצאו ואושרו ע\"י ה-AI " + data.items.length + " תוצאות נקיות בנושא \"" + query + "\"",
       items: data.items,
       updatedAt: Date.now()
     });
@@ -675,7 +673,8 @@ async function startRecommendations(payload) {
   }
   const query = String(payload.query || "").trim();
   if (!query) return { ok: false, error: "נא להזין או לבחור נושא לחיפוש" };
-  const minViews = String(payload.minViews || "500000").trim();
+  const minViews = String(payload.minViews || "100000").trim();
+  const filterPrompt = String(payload.filterPrompt || "").trim();
   const hist = await getHistory();
   const excludeIds = hist.map((h) => h.videoId).filter(Boolean).slice(0, 40).join(",");
   const requestId = crypto.randomUUID();
@@ -690,7 +689,8 @@ async function startRecommendations(payload) {
         request_id: requestId,
         query,
         min_views: minViews,
-        exclude_ids: excludeIds
+        exclude_ids: excludeIds,
+        filter_prompt: filterPrompt
       }
     })
   });
