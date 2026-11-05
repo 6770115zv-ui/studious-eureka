@@ -4,10 +4,13 @@ on:
     inputs:
       request_id: { required: true, type: string }
       query: { required: true, type: string }
-      min_views: { required: false, default: "1000000", type: string }
+      min_views: { required: false, default: "100000", type: string }
       exclude_ids: { required: false, default: "", type: string }
+      filter_prompt: { required: false, default: "", type: string }
 run-name: rec-${{ inputs.request_id }}
-permissions: { contents: write }
+permissions:
+  contents: write
+  models: read
 jobs:
   recommend:
     runs-on: ubuntu-latest
@@ -19,27 +22,36 @@ jobs:
           deno-version: v2.x
       - name: Install yt-dlp
         run: python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests
-      - name: Search Historical Popular Videos
+      - name: Search and Filter with Cloud AI Model
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
           MIN_VIEWS: ${{ inputs.min_views }}
           EXCLUDE_IDS: ${{ inputs.exclude_ids }}
+          FILTER_PROMPT: ${{ inputs.filter_prompt }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - << 'EOF'
           import base64, json, os, re, subprocess, requests
           from concurrent.futures import ThreadPoolExecutor
 
           query = os.environ.get("QUERY", "").strip()
-          min_views = int(os.environ.get("MIN_VIEWS", "1000000") or 1000000)
+          min_views = int(os.environ.get("MIN_VIEWS", "100000") or 100000)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
+          filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
+          if not filter_prompt:
+              filter_prompt = (
+                  f"הבא אך ורק תוצאות מקצועיות, נקיות וטהורות שעוסקות ישירות בנושא '{query}' בלבד. "
+                  "סנן החוצה סרטים, סדרות, קליפים, בידור, דמויות לא מתאימות וכל תוכן שאינו מתאים למגזר שומר תורה ומצוות."
+              )
 
+          # שאילתות חיפוש ממוקדות ומקצועיות בנושא המבוקש (ללא מונחי בידור)
           search_queries = [
-              f"ytsearch100:{query}",
-              f"ytsearch80:{query} popular",
-              f"ytsearch60:{query} full"
+              f"ytsearch80:{query}",
+              f"ytsearch50:{query} מקצועי הדרכה",
+              f"ytsearch50:{query} professional guide"
           ]
 
           def fetch_search(q):
@@ -60,26 +72,39 @@ jobs:
               for batch in ex.map(fetch_search, search_queries):
                   raw.extend(batch)
 
+          # סינון קשיח ראשוני לניקוי מונחי סרטים, בידור ותכנים לא מתאימים
+          BLOCKED_RX = re.compile(
+              r"\b(movie|movies|film|trailer|cinema|netflix|hollywood|actor|actress|romance|dating|"
+              r"bikini|sexy|girl|girls|woman|women|lady|ladies|singer|music video|official video|concert|"
+              r"prank|comedy|tiktok|shorts|dance|dancing|"
+              r"סרט|סרטים|טריילר|קולנוע|סדרה|פרק מלא|שחקן|שחקנית|זמר|זמרת|קליפ|רומנטי|בנות|נשים|אישה|בחורה|ריקוד|מתיחה)\b",
+              re.IGNORECASE
+          )
+
           seen = set(exclude)
           cands = []
           for e in raw:
               vid = e.get("id")
               title = (e.get("title") or "").strip()
+              channel = (e.get("channel") or e.get("uploader") or "").strip()
               if not vid or vid in seen or len(vid) != 11 or not title:
                   continue
               seen.add(vid)
+              combined_text = f"{title} {channel}"
+              if BLOCKED_RX.search(combined_text):
+                  continue
               views = int(e.get("view_count") or 0)
               cands.append({
                   "id": vid,
                   "title": title,
                   "url": f"https://www.youtube.com/watch?v={vid}",
-                  "channel": (e.get("channel") or e.get("uploader") or "").strip(),
+                  "channel": channel,
                   "views": views,
                   "duration": int(e.get("duration") or 0),
                   "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          need_meta = [c for c in cands if c["views"] == 0][:50]
+          need_meta = [c for c in cands if c["views"] == 0][:40]
           def enrich(c):
               cmd = ["python3", "-m", "yt_dlp", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
               r = subprocess.run(cmd, capture_output=True, text=True)
@@ -95,11 +120,78 @@ jobs:
                   list(ex.map(enrich, need_meta))
 
           cands.sort(key=lambda x: x["views"], reverse=True)
-          filtered = [c for c in cands if c["views"] >= min_views][:30]
-          if not filtered:
-              filtered = cands[:30]
+          pool = [c for c in cands if c["views"] >= min_views][:45]
+          if len(pool) < 10:
+              pool = cands[:45]
 
-          payload_bytes = json.dumps({"query": query, "items": filtered}, ensure_ascii=False).encode("utf-8")
+          # שלב סינון בינה מלאכותית בענן (Cloud AI Filter) לפי הגדרת המשתמש
+          def ai_filter_candidates(candidates_list, topic_str, user_rule):
+              if not candidates_list:
+                  return []
+              compact = [{"id": c["id"], "title": c["title"], "channel": c["channel"]} for c in candidates_list]
+              sys_msg = (
+                  "אתה מסנן תוכן קפדני עבור ציבור שומר תורה ומצוות. "
+                  "תפקידך לבדוק רשימת סרטונים ולהחזיר אך ורק את המזהים (id) של סרטונים שעומדים ב-100% בנושא המבוקש ובהנחיית הסינון של המשתמש. "
+                  "חובה לפסול מיד כל סרטון שקשור לסרטים, סדרות, תרבות פופולרית, בידור, נשים/דמויות לא מתאימות, או שאינו מקצועי ונקי לחלוטין. "
+                  "החזר אך ורק אובייקט JSON תקין בפורמט: {\"approved_ids\": [\"id1\", \"id2\"]}"
+              )
+              usr_msg = (
+                  f"נושא מבוקש: {topic_str}\n"
+                  f"הנחיית סינון קשיחה מהמשתמש: {user_rule}\n\n"
+                  f"רשימת מועמדים לבדיקה:\n{json.dumps(compact, ensure_ascii=False)}"
+              )
+
+              # 1. ניסיון ראשון: GitHub Models API (gpt-4o-mini) או Gemini API
+              gh_tok = os.environ.get("GH_TOKEN", "").strip()
+              gem_key = os.environ.get("GEMINI_API_KEY", "").strip()
+
+              endpoints = []
+              if gh_tok:
+                  endpoints.append((
+                      "https://models.inference.ai.azure.com/chat/completions",
+                      {"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"},
+                      {"model": "gpt-4o-mini", "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": usr_msg}], "temperature": 0.1}
+                  ))
+              if gem_key:
+                  endpoints.append((
+                      f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gem_key}",
+                      {"Content-Type": "application/json"},
+                      {"contents": [{"parts": [{"text": sys_msg + "\n\n" + usr_msg}]}]}
+                  ))
+              # 2. גיבוי ענן חינמי מובנה ללא צורך במפתח (Pollinations OpenAI GPT-4o-mini)
+              endpoints.append((
+                  "https://text.pollinations.ai/openai",
+                  {"Content-Type": "application/json"},
+                  {"model": "openai", "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": usr_msg}], "temperature": 0.1}
+              ))
+
+              for url, headers, payload in endpoints:
+                  try:
+                      resp = requests.post(url, headers=headers, json=payload, timeout=35)
+                      if resp.status_code == 200:
+                          data = resp.json()
+                          text = ""
+                          if "choices" in data and data["choices"]:
+                              text = data["choices"][0].get("message", {}).get("content", "")
+                          elif "candidates" in data and data["candidates"]:
+                              text = data["candidates"][0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                          m = re.search(r"\{.*\"approved_ids\"\s*:\s*\[.*?\].*\}", text, re.DOTALL)
+                          if m:
+                              parsed = json.loads(m.group(0))
+                              approved = set(parsed.get("approved_ids") or [])
+                              if approved:
+                                  res_list = [c for c in candidates_list if c["id"] in approved]
+                                  print(f"[AI Filter] Approved {len(res_list)}/{len(candidates_list)} clean items.", flush=True)
+                                  if res_list:
+                                      return res_list
+                  except Exception as ex_err:
+                      print(f"[AI Filter Notice] Endpoint fallback: {ex_err}", flush=True)
+
+              return candidates_list
+
+          filtered = ai_filter_candidates(pool, query, filter_prompt)[:25]
+
+          payload_bytes = json.dumps({"query": query, "filter_prompt": filter_prompt, "items": filtered}, ensure_ascii=False).encode("utf-8")
           with open("recommendations.json", "wb") as f:
               f.write(payload_bytes)
 
