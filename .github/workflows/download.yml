@@ -136,7 +136,6 @@ jobs:
           req_h = height_map.get(quality, 1080 if quality == "best" else 2160)
           max_h = 2160 if quality == "best" else req_h
 
-          # פונקציה לתרגום קובץ SRT מאנגלית לעברית בענן (כאשר אין כתוביות בעברית ביוטיוב או שיש חסימת 429)
           def translate_srt_file_to_hebrew(src_srt: Path, dest_he_srt: Path) -> bool:
               try:
                   raw_srt = src_srt.read_text(encoding="utf-8", errors="replace")
@@ -182,7 +181,6 @@ jobs:
                   print("Subtitle translation notice:", e, flush=True)
               return False
 
-          # פונקציה מרכזית להורדת כתוביות (עובדת גם במצב "כתוביות בלבד" ללא הווידאו, וגם לצד הווידאו)
           def fetch_subtitles_for_url(video_url: str, base_stem: str = None):
               if subs_dir.exists():
                   shutil.rmtree(subs_dir, ignore_errors=True)
@@ -204,8 +202,6 @@ jobs:
               if has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
-              # 1. ניסיון ראשון: כתוביות בעברית (ידניות או אוטומטיות)
-              print("Attempting to fetch Hebrew subtitles (he/iw)...", flush=True)
               for sub_try in [
                   ["--write-subs", "--sub-langs", "he,iw"],
                   ["--write-auto-subs", "--sub-langs", "iw,he"],
@@ -213,12 +209,8 @@ jobs:
                   subprocess.run(base_sub_cmd + sub_try + [video_url], check=False)
                   he_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
                   if he_srts:
-                      print(f"Found direct Hebrew subtitle: {he_srts[0].name}", flush=True)
                       return he_srts, "כתוביות בעברית (SRT)"
 
-              # 2. ניסיון שני: אם אין עברית (או נחסם ב-429), מורידים כתוביות באנגלית!
-              # שומרים למשתמש גם את קובץ האנגלית המקורי (כדי שיוכל להעלות לתרגום חיצוני) וגם מתרגמים לו אוטומטית לעברית!
-              print("Hebrew subtitles unavailable. Fetching English subtitles (en) as fallback...", flush=True)
               for en_try in [
                   ["--write-subs", "--sub-langs", "en-orig,en,en.*"],
                   ["--write-auto-subs", "--sub-langs", "en-orig,en,en.*"],
@@ -237,14 +229,11 @@ jobs:
                           status_label = "כתוביות מתורגמות לעברית + מקור באנגלית (SRT)"
                       return result_files, status_label
 
-              return [], "לא נמצאו כתוביות זמינות בסרטון זה"
+              return [], "לא נמצאו כתוביות זמינות"
 
-          # אם המשתמש בחר "כתוביות בלבד" (ללא הורדת הסרטון!)
           if is_subs_only:
-              print("=== Mode: SUBTITLES ONLY (Skipping Video Download) ===", flush=True)
               quality_report = "כתוביות בלבד (SRT)"
               for u_idx, cur_url in enumerate(target_urls, 1):
-                  print(f">>> Fetching Subtitles Only ({u_idx}/{len(target_urls)}): {cur_url}", flush=True)
                   srt_list, q_label = fetch_subtitles_for_url(cur_url)
                   quality_report = q_label
                   for s_file in srt_list:
@@ -252,7 +241,7 @@ jobs:
 
               files = [p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0]
               if not files:
-                  raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור סרטון זה")
+                  raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור קישור זה")
           else:
               def get_fmt_args(mode_type: str):
                   if quality == "audio":
@@ -391,7 +380,6 @@ jobs:
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
 
               for u_idx, cur_url in enumerate(target_urls, 1):
-                  print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
                   downloaded_media_for_url = None
                   for label, args, f_mode in attempts:
                       if stage_dir.exists():
@@ -408,7 +396,6 @@ jobs:
                           "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
                       ] + args + get_fmt_args(f_mode) + base_extra_args + [cur_url]
 
-                      print(f"=== Trying: {label} (Mode={f_mode}) ===", flush=True)
                       subprocess.run(cmd, check=False)
 
                       s_files = get_stage_files()
@@ -417,16 +404,13 @@ jobs:
                           if not is_audio and f_mode != "any" and req_h >= 720:
                               heights = [inspect_media_quality(m)[0] for m in media_files]
                               max_det_h = max(heights) if heights else 0
-                              print(f"Detected video height: {max_det_h}p", flush=True)
                               if 0 < max_det_h <= 360:
-                                  print("Rejected 360p fallback! Advancing to next HD client...", flush=True)
                                   continue
                           for f in s_files:
                               dest_f = out_dir / f.name
                               shutil.move(str(f), str(dest_f))
                               if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
                                   downloaded_media_for_url = dest_f
-                          print(f"=== Success with: {label} ===", flush=True)
                           break
 
                   if downloaded_media_for_url and subtitles in ("embed", "files"):
@@ -480,20 +464,45 @@ jobs:
 
           primary_file = files[0]
           file_mb = round(primary_file.stat().st_size / (1024 * 1024), 2)
-          print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) <<<", flush=True)
 
+          # חידוש קריטי ב-v8.2:
+          # אם מדובר בקובץ בודד (כגון קובץ וידאו .mp4) ואינו מצב אוסף, נעלה אותו ל-Release ישירות כקובץ מדיה (ללא עטיפת ZIP) אם גודלו עד 1,950MB!
+          # ואם הוא גדול מ-1,950MB (מעבר למגבלת 2GB של GitHub Release), נארוז או נפצל כדי שיוכל לרדת ישירות לדיסק ללא קריסת RAM ב-99%!
           tag = "dl-" + req_id
-          zip_path = pkg_dir / (tag + ".zip")
-          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
-              for f in files:
-                  zf.write(f, f.relative_to(out_dir))
-
           repo = os.environ.get("GITHUB_REPOSITORY", "")
-          zip_size = zip_path.stat().st_size
-          blob_shas = []
+          MAX_GH_RELEASE_ASSET = 1950 * 1024 * 1024
 
-          if zip_size <= 35 * 1024 * 1024:
-              raw_bytes = zip_path.read_bytes()
+          upload_assets = []
+          direct_file_mode = False
+          if len(files) == 1 and mode != "collection" and primary_file.stat().st_size <= MAX_GH_RELEASE_ASSET:
+              upload_assets = [primary_file]
+              direct_file_mode = True
+              asset_total_size = primary_file.stat().st_size
+          else:
+              zip_path = pkg_dir / (tag + ".zip")
+              with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+                  for f in files:
+                      zf.write(f, f.relative_to(out_dir))
+              asset_total_size = zip_path.stat().st_size
+              if asset_total_size <= MAX_GH_RELEASE_ASSET:
+                  upload_assets = [zip_path]
+              elif len(files) == 1 and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
+                  # אם הסרטון הבודד גדול מ-2GB (כמו 2.35GB), נפצל אותו בענן ל-2 חלקים תקניים של MP4 ללא קידוד מחדש (-c copy)
+                  # כדי שיעלו ל-GitHub Release וירדו ישירות לדיסק ב-0MB RAM!
+                  dur_total = float(locals().get("detected_dur") or 0.0)
+                  if dur_total > 60:
+                      half_t = int(dur_total / 2)
+                      part1 = pkg_dir / f"{primary_file.stem} - Part1{primary_file.suffix}"
+                      part2 = pkg_dir / f"{primary_file.stem} - Part2{primary_file.suffix}"
+                      subprocess.run(["/usr/bin/ffmpeg", "-y", "-i", str(primary_file), "-t", str(half_t), "-c", "copy", str(part1)], check=False)
+                      subprocess.run(["/usr/bin/ffmpeg", "-y", "-ss", str(half_t), "-i", str(primary_file), "-c", "copy", str(part2)], check=False)
+                      if part1.exists() and part2.exists() and part1.stat().st_size <= MAX_GH_RELEASE_ASSET:
+                          upload_assets = [part1, part2]
+                          direct_file_mode = True
+
+          blob_shas = []
+          if not direct_file_mode and upload_assets and upload_assets[0].stat().st_size <= 35 * 1024 * 1024:
+              raw_bytes = upload_assets[0].read_bytes()
               chunk_size = 12 * 1024 * 1024
               for offset in range(0, len(raw_bytes), chunk_size):
                   chunk = raw_bytes[offset:offset + chunk_size]
@@ -503,8 +512,6 @@ jobs:
                       blob_shas.append(p.stdout.strip())
               del raw_bytes
 
-          # שליחה למייל: תיקון מוחלט לצירוף קובץ הווידאו/הכתוביות!
-          # הגבלת הגודל האמיתית של Gmail לצרופה בינארית (לפני קידוד Base64 שמוסיף 33%) היא 18.0MB!
           MAX_GMAIL_RAW_BYTES = int(18.0 * 1024 * 1024)
           smtp_user = (
               os.environ.get("SMTP_USER", "").strip()
@@ -525,106 +532,79 @@ jobs:
           recipient = email_opt if (email_opt and "@" in email_opt) else secret_to
 
           email_sent_status = ""
-          if send_email_flag:
-              if not smtp_user or not smtp_pass:
-                  email_sent_status = "שגיאת מייל: חסר SMTP_USER או SMTP_PASS ב-Secrets"
-              elif not recipient or "@" not in recipient:
-                  email_sent_status = "שגיאת מייל: לא נמצאה כתובת יעד"
-              else:
-                  try:
-                      attach_target = primary_file if len(files) == 1 else zip_path
-                      attach_note = f"מצורף הקובץ המקורי ({file_mb} MB)."
+          if send_email_flag and smtp_user and smtp_pass and recipient and "@" in recipient:
+              try:
+                  attach_target = primary_file
+                  attach_note = f"מצורף הקובץ המקורי ({file_mb} MB)."
+                  if attach_target.stat().st_size > MAX_GMAIL_RAW_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
+                      mail_mp4 = Path("/tmp/email_copy.mp4")
+                      dur_sec = float(locals().get("detected_dur") or 600.0)
+                      if dur_sec <= 1.0:
+                          dur_sec = 600.0
+                      target_v_kbps = max(95, int((15.5 * 8192) / max(10.0, dur_sec)) - 56)
+                      target_h = 480 if target_v_kbps >= 280 else 360
+                      ff_mail = [
+                          "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
+                          "-vf", f"scale=trunc(oh*a/2)*2:{target_h}",
+                          "-c:v", "libx264", "-preset", "veryfast",
+                          "-b:v", f"{target_v_kbps}k", "-maxrate", f"{int(target_v_kbps * 1.15)}k", "-bufsize", f"{target_v_kbps * 2}k",
+                          "-c:a", "aac", "-b:a", "56k",
+                          "-fs", str(MAX_GMAIL_RAW_BYTES - 300000),
+                          str(mail_mp4)
+                      ]
+                      subprocess.run(ff_mail, capture_output=True, text=True, check=False)
+                      if mail_mp4.exists() and 0 < mail_mp4.stat().st_size <= MAX_GMAIL_RAW_BYTES:
+                          attach_target = mail_mp4
+                          comp_mb = round(mail_mp4.stat().st_size / (1024 * 1024), 1)
+                          attach_note = f"הקובץ המלא ({file_mb}MB) ירד באיכות {quality_report} למחשב. למייל זה צורף עותק וידאו מותאם ({comp_mb}MB) עבור מגבלת Gmail."
 
-                      # אם הקובץ גדול מ-18MB, אנו מכווצים אותו עם תחביר FFmpeg תקני (ללא גרשיים ב-scale!) ותקרת גודל קשיחה (-fs)
-                      if attach_target.stat().st_size > MAX_GMAIL_RAW_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
-                          print(f"File is {file_mb}MB (>18MB Gmail raw binary limit). Compressing attachment for email...", flush=True)
-                          mail_mp4 = Path("/tmp/email_copy.mp4")
-                          # חילוץ אורך מדויק של הסרטון
-                          dur_sec = float(locals().get("detected_dur") or 0.0)
-                          if dur_sec <= 1.0:
-                              try:
-                                  pr = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(primary_file)], capture_output=True, text=True, timeout=15)
-                                  dur_sec = float(pr.stdout.strip() or 600.0)
-                              except Exception:
-                                  dur_sec = 600.0
-
-                          # יעד גודל: 15.5MB (כדי שתמיד יישאר מתחת ל-18MB)
-                          target_v_kbps = max(95, int((15.5 * 8192) / max(10.0, dur_sec)) - 56)
-                          target_h = 480 if target_v_kbps >= 280 else 360
-                          ff_mail = [
-                              "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
-                              "-vf", f"scale=trunc(oh*a/2)*2:{target_h}",
-                              "-c:v", "libx264", "-preset", "veryfast",
-                              "-b:v", f"{target_v_kbps}k", "-maxrate", f"{int(target_v_kbps * 1.15)}k", "-bufsize", f"{target_v_kbps * 2}k",
-                              "-c:a", "aac", "-b:a", "56k",
-                              "-fs", str(MAX_GMAIL_RAW_BYTES - 300000),
-                              str(mail_mp4)
-                          ]
-                          ff_res = subprocess.run(ff_mail, capture_output=True, text=True, check=False)
-                          if mail_mp4.exists() and 0 < mail_mp4.stat().st_size <= MAX_GMAIL_RAW_BYTES:
-                              attach_target = mail_mp4
-                              comp_mb = round(mail_mp4.stat().st_size / (1024 * 1024), 1)
-                              attach_note = f"הקובץ המלא ({file_mb}MB) ירד באיכות {quality_report} למחשב. למייל זה צורף עותק וידאו מותאם ({comp_mb}MB) כדי לעמוד במגבלת הנפח של Gmail."
-                          else:
-                              print("FFmpeg email compression stderr:", ff_res.stderr[-500:] if ff_res.stderr else "", flush=True)
-
-                      msg = email.message.EmailMessage()
-                      msg["Subject"] = f"YouTube Cloud Ultra [{quality_report}] - {primary_file.name}"
-                      msg["From"] = smtp_user
-                      msg["To"] = recipient
-                      msg.set_content(
-                          f"שלום,\n\n"
-                          f"המשימה הושלמה בהצלחה בענן!\n"
-                          f"• שם הקובץ: {primary_file.name}\n"
-                          f"• איכות / סוג: {quality_report}\n"
-                          f"• גודל הקובץ: {file_mb} MB\n"
-                          f"• פירוט צרופה: {attach_note}\n"
+                  msg = email.message.EmailMessage()
+                  msg["Subject"] = f"YouTube Cloud Ultra [{quality_report}] - {primary_file.name}"
+                  msg["From"] = smtp_user
+                  msg["To"] = recipient
+                  msg.set_content(
+                      f"שלום,\n\n"
+                      f"המשימה הושלמה בהצלחה בענן!\n"
+                      f"• שם הקובץ: {primary_file.name}\n"
+                      f"• איכות / סוג: {quality_report}\n"
+                      f"• גודל הקובץ: {file_mb} MB\n"
+                      f"• פירוט צרופה: {attach_note}\n"
+                  )
+                  if attach_target.exists() and attach_target.stat().st_size <= MAX_GMAIL_RAW_BYTES:
+                      msg.add_attachment(
+                          attach_target.read_bytes(),
+                          maintype="application",
+                          subtype="octet-stream",
+                          filename=primary_file.name
                       )
+                  for srt_f in out_dir.glob("*.srt"):
+                      if srt_f != attach_target and srt_f.stat().st_size <= 2 * 1024 * 1024:
+                          msg.add_attachment(srt_f.read_bytes(), maintype="text", subtype="plain", filename=srt_f.name)
 
-                      # צירוף הקובץ הראשי (ווידאו / אודיו / כתוביות)
-                      if attach_target.exists() and attach_target.stat().st_size <= MAX_GMAIL_RAW_BYTES:
-                          msg.add_attachment(
-                              attach_target.read_bytes(),
-                              maintype="application",
-                              subtype="octet-stream",
-                              filename=primary_file.name if attach_target != zip_path else zip_path.name
-                          )
-                          print(f"Attached file {attach_target.name} ({round(attach_target.stat().st_size/(1024*1024), 2)} MB) to email.", flush=True)
-
-                      # אם ירדו גם קובצי כתוביות נפרדים (.srt), נצרף גם אותם למייל!
-                      for srt_f in out_dir.glob("*.srt"):
-                          if srt_f != attach_target and srt_f.stat().st_size <= 2 * 1024 * 1024:
-                              msg.add_attachment(
-                                  srt_f.read_bytes(),
-                                  maintype="text",
-                                  subtype="plain",
-                                  filename=srt_f.name
-                              )
-
-                      with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=90) as srv:
-                          srv.login(smtp_user, smtp_pass)
-                          srv.send_message(msg)
-                      email_sent_status = f"נשלח למייל עם הקובץ המצורף ({recipient})"
-                      print(f"Email with attachment sent successfully to {recipient}", flush=True)
-                  except Exception as e:
-                      email_sent_status = f"שגיאה בשליחת מייל: {e}"
-                      print("Email error:", e, flush=True)
+                  with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=90) as srv:
+                      srv.login(smtp_user, smtp_pass)
+                      srv.send_message(msg)
+                  email_sent_status = f"נשלח למייל ({recipient})"
+              except Exception as e:
+                  email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 8,
-              "size": zip_size,
+              "v": 8.2,
+              "size": asset_total_size,
+              "direct_file": direct_file_mode,
+              "orig_filename": primary_file.name,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
-              "cloud_temp_path": "/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name,
+              "cloud_temp_path": "/tmp/stage -> /tmp/out/" + primary_file.name,
               "blobs": blob_shas
           }, ensure_ascii=False)
 
-          rel_proc = subprocess.run(
-              ["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--title", tag, "--notes", notes],
-              capture_output=True, text=True, check=False
-          )
-          if rel_proc.returncode != 0:
-              subprocess.run(["gh", "release", "upload", tag, str(zip_path), "--repo", repo, "--clobber"], check=False)
+          if upload_assets:
+              cmd_rel = ["gh", "release", "create", tag] + [str(a) for a in upload_assets] + ["--repo", repo, "--title", tag, "--notes", notes]
+              rel_proc = subprocess.run(cmd_rel, capture_output=True, text=True, check=False)
+              if rel_proc.returncode != 0:
+                  for a in upload_assets:
+                      subprocess.run(["gh", "release", "upload", tag, str(a), "--repo", repo, "--clobber"], check=False)
           EOF
 
       - name: Upload Backup Artifact
