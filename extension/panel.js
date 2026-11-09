@@ -83,10 +83,12 @@
     renderHistoryArchive(lastHistory);
   });
 
-  function getActiveDownloadOptions() {
+  function getActiveDownloadOptions(forceSubsOnly = false) {
+    const qVal = forceSubsOnly ? "subs_only" : formatSelect.value;
+    const sVal = (forceSubsOnly || qVal === "subs_only") ? "only" : el("subsSelect").value;
     return {
-      quality: formatSelect.value,
-      subtitles: el("subsSelect").value,
+      quality: sVal === "only" ? "subs_only" : qVal,
+      subtitles: sVal,
       clipStart: el("clipStart").value.trim(),
       clipEnd: el("clipEnd").value.trim(),
       geoCountry: el("geoSelect").value,
@@ -99,13 +101,19 @@
     };
   }
 
-  el("downloadBtn").onclick = async () => {
+  async function triggerDownloadFromInput(forceSubsOnly = false) {
     const raw = el("urlInput").value.trim();
-    if (!raw) return;
+    if (!raw) {
+      el("hint").textContent = "נא להדביק קישור תחילה";
+      return;
+    }
     const urls = raw.split(/[\s,]+/).filter((u) => u.startsWith("http"));
-    if (!urls.length) { el("hint").textContent = "נא להזין קישור תקין המתחיל ב-http"; return; }
+    if (!urls.length) {
+      el("hint").textContent = "נא להזין קישור תקין המתחיל ב-http";
+      return;
+    }
     const baseOpts = {
-      ...getActiveDownloadOptions(),
+      ...getActiveDownloadOptions(forceSubsOnly),
       title: (currentPreview && currentPreview.title) || urls[0],
       thumbnail: (currentPreview && currentPreview.thumbnail) || ""
     };
@@ -113,23 +121,30 @@
       ? { ...baseOpts, urls, mode: "list" }
       : { ...baseOpts, url: urls[0], mode: el("collectionToggle").checked ? "collection" : "video" };
 
-    el("hint").textContent = "שולח בקשה ל-GitHub Actions...";
+    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות בלבד (SRT)..." : "שולח בקשה ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({ type: "START_DOWNLOAD", payload });
     if (res && res.ok) {
       el("urlInput").value = "";
       el("videoPreview").style.display = "none";
       currentPreview = null;
-      el("hint").textContent = "נשלח ל-GitHub Actions! ההורדה תישמר אוטומטית בסיום.";
+      el("hint").textContent = forceSubsOnly
+        ? "נשלח! קובץ הכתוביות (עברית, או אנגלית אם אין) יישמר אוטומטית."
+        : "נשלח ל-GitHub Actions! ההורדה תישמר אוטומטית בסיום.";
       void refresh();
     } else {
       el("hint").textContent = (res && res.error) || "שגיאה בשליחה";
     }
-  };
+  }
+
+  el("downloadBtn").onclick = () => triggerDownloadFromInput(false);
+  if (el("subsOnlyBtn")) {
+    el("subsOnlyBtn").onclick = () => triggerDownloadFromInput(true);
+  }
 
   function extractTopicsFromHistory(historyList) {
     const seen = new Set();
     const topics = [];
-    const extRx = new RegExp("\\.(mp4|mp3|mkv|flac|wav|m4a|opus)\\x24", "i");
+    const extRx = new RegExp("\\.(mp4|mp3|mkv|flac|wav|m4a|opus|srt)\\x24", "i");
     for (const item of historyList || []) {
       const cleaned = String(item.title || "")
         .replace(/\[[a-zA-Z0-9_-]{11}\]/g, "")
@@ -219,7 +234,7 @@
       const res = await chrome.runtime.sendMessage({
         type: "START_DOWNLOAD",
         payload: {
-          ...getActiveDownloadOptions(),
+          ...getActiveDownloadOptions(false),
           urls,
           title: "חבילת המלצות מסוננת (" + urls.length + " קבצים)",
           mode: "list"
@@ -273,7 +288,7 @@
         await chrome.runtime.sendMessage({
           type: "START_DOWNLOAD",
           payload: {
-            ...getActiveDownloadOptions(),
+            ...getActiveDownloadOptions(false),
             url: item.url,
             title: item.title,
             mode: "video"
@@ -311,6 +326,19 @@
       btns.style.cssText = "display:flex;gap:6px;";
 
       if (h.url) {
+        const subOnlyHistBtn = document.createElement("button");
+        subOnlyHistBtn.className = "btn small";
+        subOnlyHistBtn.style.padding = "3px 8px";
+        subOnlyHistBtn.title = "הורד כתוביות בלבד (עברית או אנגלית) עבור סרטון זה";
+        subOnlyHistBtn.textContent = "📝 כתוביות";
+        subOnlyHistBtn.onclick = async () => {
+          await chrome.runtime.sendMessage({
+            type: "START_DOWNLOAD",
+            payload: { ...getActiveDownloadOptions(true), url: h.url, title: h.title, mode: "video" }
+          });
+          void refresh();
+        };
+
         const copyBtn = document.createElement("button");
         copyBtn.className = "btn small";
         copyBtn.style.padding = "3px 8px";
@@ -327,11 +355,11 @@
         redlBtn.onclick = async () => {
           await chrome.runtime.sendMessage({
             type: "START_DOWNLOAD",
-            payload: { ...getActiveDownloadOptions(), url: h.url, title: h.title, mode: "video" }
+            payload: { ...getActiveDownloadOptions(false), url: h.url, title: h.title, mode: "video" }
           });
           void refresh();
         };
-        btns.append(copyBtn, redlBtn);
+        btns.append(subOnlyHistBtn, copyBtn, redlBtn);
       }
       row.append(title, btns);
       wrap.append(row);
@@ -388,12 +416,13 @@
       title.textContent = (j.files && j.files[0]) || j.title || j.url;
       const badge = document.createElement("span");
       badge.className = "small muted";
+      const localPctStr = typeof j.localDlPct === "number" ? (" • הורדה למחשב: " + j.localDlPct + "%") : "";
       if (j.actualQuality) {
         badge.style.color = "var(--ok)";
         badge.style.fontWeight = "600";
-        badge.textContent = "✓ איכות בפועל: " + j.actualQuality + " • " + (j.percent || 0) + "%";
+        badge.textContent = "✓ " + j.actualQuality + localPctStr + " • כללי: " + (j.percent || 0) + "%";
       } else {
-        badge.textContent = "יעד: " + j.quality + " • " + (j.percent || 0) + "%" + elapsedLabel;
+        badge.textContent = "יעד: " + (j.quality === "subs_only" ? "כתוביות בלבד" : j.quality) + localPctStr + " • " + (j.percent || 0) + "%" + elapsedLabel;
       }
       topRow.append(title, badge);
 
@@ -408,6 +437,20 @@
       const info = document.createElement("div");
       info.className = "small muted";
       info.textContent = j.detail || j.status;
+
+      card.append(topRow, progTrack, info);
+
+      // הצגת הנתיב הזמני / נתיב בניית הקובץ ונתיב השמירה במחשב
+      if (j.tempPath || j.finalDiskPath) {
+        const pathBox = document.createElement("div");
+        pathBox.className = "small";
+        pathBox.dir = "ltr";
+        pathBox.style.cssText = "background:rgba(0,0,0,0.25);padding:6px 9px;border-radius:8px;border:1px dashed var(--border);font-family:Consolas,monospace;font-size:11.5px;color:var(--accent);word-break:break-all;";
+        pathBox.textContent = j.finalDiskPath
+          ? ("📁 Saved Path: " + j.finalDiskPath + (j.tempPath ? ("  (Built via: " + j.tempPath + ")") : ""))
+          : ("⚙ Temp / Build Path: " + j.tempPath);
+        card.append(pathBox);
+      }
 
       const actions = document.createElement("div");
       actions.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;";
@@ -440,7 +483,7 @@
         b.onclick = () => chrome.runtime.sendMessage({ type: "CANCEL_JOB", jobId: j.id });
         actions.append(b);
       }
-      card.append(topRow, progTrack, info, actions);
+      card.append(actions);
       list.append(card);
     }
   }
@@ -466,6 +509,6 @@
     if (m && m.type === "JOBS_CHANGED") renderJobs(m.jobs);
     if (m && m.type === "RECS_CHANGED") void refresh();
   });
-  setInterval(refresh, 2500);
+  setInterval(refresh, 2000);
   void refresh();
 })();
