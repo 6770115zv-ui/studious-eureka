@@ -11,6 +11,12 @@
     return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   }
 
+  function readU16(buf, off) { return buf[off] | (buf[off + 1] << 8); }
+  function readU32(buf, off) { return (buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0; }
+  function decodeUtf8(bytes) {
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+
   function sendProgress(jobId, localDlPct, overallPct, detail, tempPath) {
     if (!jobId) return;
     chrome.runtime.sendMessage({
@@ -74,7 +80,7 @@
       }
     }
 
-    // שימוש ישיר ב-new Blob(chunks) ללא הקצאת new Uint8Array(received) שגורמת לקריסת זיכרון ב-99%!
+    // איחוד ל-Blob וירטואלי ללא הקצאת Uint8Array בזיכרון ה-RAM!
     const finalBlob = new Blob(chunks);
     chunks.length = 0;
     sendProgress(
@@ -120,44 +126,90 @@
     throw new Error(lastErr);
   }
 
+  // חילוץ Zero-Copy מתוך ה-Blob של ה-ZIP: קורא רק את 128KB האחרונים של ה-ZIP וחותך את ה-MP4 ישירות עם blob.slice() ב-0MB RAM!
+  async function zeroCopyUnzipBlob(zipBlob, jobId) {
+    const tailSize = Math.min(zipBlob.size, 131072);
+    const tailOffset = zipBlob.size - tailSize;
+    const tailBuf = new Uint8Array(await zipBlob.slice(tailOffset, zipBlob.size).arrayBuffer());
+
+    let eocd = -1;
+    for (let i = tailBuf.length - 22; i >= 0; i--) {
+      if (readU32(tailBuf, i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error("Invalid ZIP Central Directory");
+
+    const totalEntries = readU16(tailBuf, eocd + 8);
+    const cdSize = readU32(tailBuf, eocd + 12);
+    const cdOffset = readU32(tailBuf, eocd + 16);
+
+    const cdBuf = new Uint8Array(await zipBlob.slice(cdOffset, cdOffset + cdSize).arrayBuffer());
+    let ptr = 0;
+    const files = [];
+
+    for (let idx = 0; idx < totalEntries; idx++) {
+      if (ptr + 46 > cdBuf.length || readU32(cdBuf, ptr) !== 0x02014b50) break;
+      const method = readU16(cdBuf, ptr + 10);
+      const compSize = readU32(cdBuf, ptr + 20);
+      const nameLen = readU16(cdBuf, ptr + 28);
+      const extraLen = readU16(cdBuf, ptr + 30);
+      const commentLen = readU16(cdBuf, ptr + 32);
+      const lho = readU32(cdBuf, ptr + 42);
+      const name = decodeUtf8(cdBuf.subarray(ptr + 46, ptr + 46 + nameLen));
+      ptr += 46 + nameLen + extraLen + commentLen;
+      if (name.endsWith("/")) continue;
+
+      const lhBuf = new Uint8Array(await zipBlob.slice(lho, lho + 30).arrayBuffer());
+      const lhNameLen = readU16(lhBuf, 26);
+      const lhExtraLen = readU16(lhBuf, 28);
+      const dataStart = lho + 30 + lhNameLen + lhExtraLen;
+
+      const cleanName = name.split("/").pop() || name;
+      const ext = (cleanName.toLowerCase().split(".").pop() || "");
+      const mimeType = MIME[ext] || "application/octet-stream";
+
+      let fileBlob;
+      if (method === 0) {
+        // ZIP_STORED: חיתוך מיידי ב-0 מילי-שניות וללא שום הקצאת זיכרון!
+        fileBlob = zipBlob.slice(dataStart, dataStart + compSize, mimeType);
+      } else if (method === 8) {
+        const compSlice = zipBlob.slice(dataStart, dataStart + compSize);
+        const decompStream = compSlice.stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        const rawDecomp = await new Response(decompStream).blob();
+        fileBlob = new Blob([rawDecomp], { type: mimeType });
+      } else {
+        fileBlob = zipBlob.slice(dataStart, dataStart + compSize, mimeType);
+      }
+
+      if (fileBlob.size > 0) {
+        const blobUrl = URL.createObjectURL(fileBlob);
+        files.push({ name: cleanName, size: fileBlob.size, blobUrl });
+      }
+    }
+
+    if (files.length) {
+      sendProgress(jobId, 100, 93, "קובץ המדיה חולץ ב-Zero-Copy! מעביר לשמירה בדיסק...", files[0].blobUrl + " -> Downloads/" + files[0].name);
+    }
+    return files;
+  }
+
   async function unzipArtifact(msg) {
     try {
       let dataBlob = await readFromCache(msg.cacheKey, msg.jobId);
       if (!dataBlob) dataBlob = await fetchWithRetry(msg.url, msg.token, msg.fallbackUrl, msg.expectedSize, msg.jobId);
 
-      // אם הקובץ גדול מ-400MB או שביקשו rawZip, נשמור אותו ישירות מה-Blob ללא פתיחת Uint8Array בזיכרון!
-      if (msg.rawZip || dataBlob.size > 400 * 1024 * 1024) {
-        const fname = msg.zipName || "download.zip";
-        const ext = (fname.toLowerCase().split(".").pop() || "zip");
-        const typedBlob = new Blob([dataBlob], { type: MIME[ext] || "application/octet-stream" });
-        const blobUrl = URL.createObjectURL(typedBlob);
-        return { ok: true, files: [{ name: fname, size: dataBlob.size, blobUrl }] };
-      }
+      const headBuf = new Uint8Array(await dataBlob.slice(0, 4).arrayBuffer());
+      const isPkZip = headBuf.length === 4 && headBuf[0] === 0x50 && headBuf[1] === 0x4b && headBuf[2] === 0x03 && headBuf[3] === 0x04;
 
-      const buf = new Uint8Array(await dataBlob.arrayBuffer());
-      dataBlob = null;
-      const isPkZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
-      if (!isPkZip) {
+      if (msg.rawZip || !isPkZip) {
         const fname = msg.zipName || "download.mp4";
         const ext = (fname.toLowerCase().split(".").pop() || "mp4");
-        const blob = new Blob([buf], { type: MIME[ext] || "application/octet-stream" });
-        const blobUrl = URL.createObjectURL(blob);
-        return { ok: true, files: [{ name: fname, size: buf.length, blobUrl }] };
+        const typedBlob = dataBlob.slice(0, dataBlob.size, MIME[ext] || "application/octet-stream");
+        const blobUrl = URL.createObjectURL(typedBlob);
+        return { ok: true, files: [{ name: fname, size: typedBlob.size, blobUrl }] };
       }
 
-      sendProgress(msg.jobId, 100, 91, "פורס ארכיון ובונה קובץ מדיה בזיכרון...", "fflate.unzipAsync -> Offscreen Blob Builder");
-      const entries = fflate.unzipAsync ? await fflate.unzipAsync(buf) : fflate.unzipSync(buf);
-      const files = [];
-      for (const name of Object.keys(entries)) {
-        const data = entries[name];
-        delete entries[name];
-        if (!data || !data.length || name.endsWith("/")) continue;
-        const cleanName = name.split("/").pop() || name;
-        const ext = (cleanName.toLowerCase().split(".").pop() || "");
-        const blob = new Blob([data], { type: MIME[ext] || "application/octet-stream" });
-        const blobUrl = URL.createObjectURL(blob);
-        files.push({ name: cleanName, size: data.length, blobUrl });
-      }
+      sendProgress(msg.jobId, 100, 91, "מחלץ קובץ מדיה בשיטת Zero-Copy...", "Offscreen Zero-Copy Blob Slice");
+      const files = await zeroCopyUnzipBlob(dataBlob, msg.jobId);
       return files.length ? { ok: true, files } : { ok: false, error: "ארכיון ה-ZIP ריק" };
     } catch (e) { return { ok: false, error: e.message }; }
   }
