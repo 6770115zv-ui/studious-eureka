@@ -257,7 +257,7 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx, requestId) {
         },
         "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": {
           label: "מוריד ובונה את הקובץ בענן...",
-          path: "/tmp/stage/*.part -> /tmp/out/*.mp4 -> /tmp/pkg/dl-" + requestId + ".zip"
+          path: "/tmp/stage/*.part -> /tmp/out/*.mp4"
         },
         "Upload Backup Artifact": {
           label: "שומר גיבוי תוצר ב-GitHub...",
@@ -318,6 +318,7 @@ async function findReleaseAssetsByTag(cfg, tag) {
   let qualityInfo = "";
   let emailStatus = "";
   let cloudTempPath = "";
+  let origFilename = "";
   if (rel.body && String(rel.body).trim().startsWith("{")) {
     try {
       const parsed = JSON.parse(String(rel.body).trim());
@@ -325,10 +326,11 @@ async function findReleaseAssetsByTag(cfg, tag) {
       if (parsed.quality_info) qualityInfo = String(parsed.quality_info);
       if (parsed.email_status) emailStatus = String(parsed.email_status);
       if (parsed.cloud_temp_path) cloudTempPath = String(parsed.cloud_temp_path);
+      if (parsed.orig_filename) origFilename = String(parsed.orig_filename);
     } catch {}
   }
   const assets = (rel.assets || []).filter((a) => a.url || a.browser_download_url).map((a) => ({
-    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath
+    id: a.id, name: origFilename && !a.name.endsWith(".zip") ? origFilename : a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath
   }));
   return assets.length ? assets : null;
 }
@@ -350,6 +352,43 @@ async function ensureOffscreen() {
   await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Unzip and Blob creation" });
 }
 
+// חילוץ כתובת ההורדה הישירה החתומה (Signed Azure / GitHub Storage URL) כך שמנוע ההורדות של כרום יוריד ישירות לדיסק ב-0MB RAM!
+async function resolveDirectDownloadUrl(apiUrl, fallbackUrl, token) {
+  const isArtifactUrl = apiUrl && apiUrl.includes("/actions/artifacts/");
+  const candidates = [
+    apiUrl ? {
+      url: apiUrl,
+      headers: token
+        ? {
+            Authorization: "Bearer " + token,
+            Accept: isArtifactUrl ? "application/vnd.github+json" : "application/octet-stream",
+            "X-GitHub-Api-Version": "2022-11-28"
+          }
+        : { Accept: "application/octet-stream" }
+    } : null,
+    fallbackUrl ? { url: fallbackUrl, headers: {} } : null
+  ].filter((c) => Boolean(c && c.url));
+
+  for (const cand of candidates) {
+    const ctrl = new AbortController();
+    try {
+      const res = await fetch(cand.url, {
+        headers: cand.headers,
+        redirect: "follow",
+        credentials: "omit",
+        cache: "no-store",
+        signal: ctrl.signal
+      });
+      if (res.ok && res.url) {
+        const signedUrl = res.url;
+        ctrl.abort();
+        return signedUrl;
+      }
+    } catch {}
+  }
+  return fallbackUrl || apiUrl;
+}
+
 async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
   if (!Array.isArray(blobShas) || !blobShas.length) return null;
   try {
@@ -357,7 +396,7 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
     let totalLen = 0;
     for (let i = 0; i < blobShas.length; i++) {
       const sha = blobShas[i];
-      const localPct = Math.round(((i) / blobShas.length) * 100);
+      const localPct = Math.round((i / blobShas.length) * 100);
       patchJob(jobId, {
         localDlPct: localPct,
         percent: 75 + Math.round((i / blobShas.length) * 14),
@@ -381,11 +420,6 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
     const cacheKey = "https://ytcloud.local/asset-" + jobId + "-" + Date.now() + ".zip";
     const cache = await caches.open(ZIP_CACHE_NAME);
     await cache.put(cacheKey, new Response(merged, { headers: { "Content-Type": "application/zip" } }));
-    patchJob(jobId, {
-      localDlPct: 100,
-      percent: 90,
-      tempPath: cacheKey + " (" + self.formatBytes(totalLen) + ")"
-    });
     return cacheKey;
   } catch {
     return null;
@@ -393,13 +427,24 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
 }
 
 async function unpackZipUrl(assetOrUrl, jobId, cfg, rawZip = false) {
-  await ensureOffscreen();
   const apiUrl = typeof assetOrUrl === "string" ? assetOrUrl : (assetOrUrl.apiUrl || assetOrUrl.url);
   const fallbackUrl = typeof assetOrUrl === "string" ? "" : (assetOrUrl.url || "");
   const zipName = (typeof assetOrUrl === "object" && assetOrUrl.name) ? assetOrUrl.name : ("dl-" + jobId + ".zip");
-  const expectedSize = (typeof assetOrUrl === "object" && assetOrUrl.size) ? assetOrUrl.size : 0;
+  const expectedSize = (typeof assetOrUrl === "object" && assetOrUrl.size) ? Number(assetOrUrl.size) : 0;
   const blobShas = (typeof assetOrUrl === "object" && assetOrUrl.blobShas) ? assetOrUrl.blobShas : [];
 
+  // תיקון מוחלט לעצירה ב-99% בקובצי ענק (>350MB) או בקובצי מדיה ישירים שאינם ZIP:
+  // במקום לטעון 2.35GB לתוך ה-RAM של offscreen.js, אנו מפיקים את ה-Signed URL ומורידים ישירות לדיסק דרך מנהל ההורדות של כרום!
+  const isDirectMedia = !zipName.toLowerCase().endsWith(".zip");
+  const isHugeArchive = expectedSize > 350 * 1024 * 1024;
+  if (rawZip || isDirectMedia || isHugeArchive) {
+    const signedUrl = await resolveDirectDownloadUrl(apiUrl, fallbackUrl, cfg.token);
+    if (signedUrl) {
+      return [{ name: zipName, size: expectedSize, url: signedUrl, isDirectStream: true }];
+    }
+  }
+
+  await ensureOffscreen();
   let cacheKey = null;
   if (blobShas && blobShas.length) {
     cacheKey = await fetchDirectBlobsToCache(cfg, blobShas, jobId);
@@ -452,18 +497,21 @@ function saveBlob(blobUrl, filename, jobId) {
         return;
       }
 
-      // מעקב רציף אחרי כתיבת הקובץ לדיסק המקומי והצגת הנתיב הזמני (.crdownload) והסופי במחשב!
       const pollTimer = setInterval(() => {
         chrome.downloads.search({ id: downloadId }, (results) => {
           const item = results && results[0];
           if (!item) return;
           const diskPath = item.filename || filename;
           if (item.state === "in_progress") {
-            const dlPct = item.totalBytes > 0 ? Math.round((item.bytesReceived / item.totalBytes) * 100) : 100;
+            const dlPct = item.totalBytes > 0 ? Math.round((item.bytesReceived / item.totalBytes) * 100) : 50;
+            const overallPct = 75 + Math.round((dlPct / 100) * 24);
+            const mbRec = (item.bytesReceived / (1024 * 1024)).toFixed(1);
+            const mbTot = item.totalBytes > 0 ? (" / " + (item.totalBytes / (1024 * 1024)).toFixed(1) + " MB") : " MB";
             patchJob(jobId, {
               localDlPct: dlPct,
-              tempPath: diskPath + ".crdownload (Local Disk Write -> " + blobUrl + ")",
-              detail: "כותב קובץ לתיקיית ההורדות במחשב: " + dlPct + "%..."
+              percent: overallPct,
+              tempPath: diskPath + ".crdownload (Direct Disk Stream)",
+              detail: "מוריד ישירות לכונן הקשיח במחשב: " + dlPct + "% (" + mbRec + mbTot + ")..."
             });
           } else if (item.state === "complete") {
             patchJob(jobId, {
@@ -472,7 +520,7 @@ function saveBlob(blobUrl, filename, jobId) {
             });
           }
         });
-      }, 300);
+      }, 350);
 
       const listener = (delta) => {
         if (delta.id !== downloadId || !delta.state) return;
@@ -523,7 +571,7 @@ async function driveJob(jobId) {
       const fallbackPct = Math.min(68, 20 + Math.floor(tickIdx * 1.5));
       patchJob(jobId, {
         detail: stepInfo ? stepInfo.label : (run.status === "queued" ? "ממתין בתור ב-GitHub..." : "מעבד ומוריד מדיה ב-GitHub Actions..."),
-        tempPath: (stepInfo && stepInfo.tempPath) || ("/tmp/stage -> /tmp/out -> /tmp/pkg/dl-" + job.requestId + ".zip"),
+        tempPath: (stepInfo && stepInfo.tempPath) || ("/tmp/stage -> /tmp/out"),
         percent: stepInfo ? stepInfo.pct : fallbackPct
       });
     }, signal);
@@ -532,8 +580,8 @@ async function driveJob(jobId) {
     patchJob(jobId, {
       status: "fetching",
       localDlPct: 0,
-      detail: "מתחיל הורדת קובץ מהענן למחשב (0%)...",
-      tempPath: "GitHub Release Asset -> Local Browser Stream Buffer",
+      detail: "מכין הזרמת קובץ מהענן למחשב (0%)...",
+      tempPath: "GitHub Storage -> Local Disk Stream",
       percent: 75
     });
 
@@ -541,7 +589,7 @@ async function driveJob(jobId) {
     let detectedQuality = "";
     let detectedEmailStatus = "";
 
-    for (let a = 0; a < 10 && !files; a++) {
+    for (let a = 0; a < 8 && !files; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
       if (assets && assets.length) {
         if (assets[0].qualityInfo) detectedQuality = assets[0].qualityInfo;
@@ -566,7 +614,7 @@ async function driveJob(jobId) {
     }
 
     if (!files) {
-      patchJob(jobId, { detail: "מושך תוצר מגיבוי Artifacts ב-GitHub...", percent: 82 });
+      patchJob(jobId, { detail: "מושך תוצר מגיבוי Artifacts ב-GitHub...", percent: 80 });
       const artRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + jobs.get(jobId).runId + "/artifacts", cfg);
       const list = ((await artRes.json()).artifacts) || [];
       const found = list.find((x) => x.name === tag) || list[0];
@@ -576,7 +624,7 @@ async function driveJob(jobId) {
       files = await unpackZipUrl({ apiUrl: artUrl, url: "", name: tag + ".zip", size: found.size_in_bytes || 0 }, jobId, cfg, isBundle);
     }
 
-    patchJob(jobId, { status: "saving", localDlPct: 100, detail: "שומר קובץ בתיקיית ההורדות במחשב...", percent: 94 });
+    patchJob(jobId, { status: "saving", detail: "שומר קובץ בתיקיית ההורדות במחשב...", percent: 94 });
     const saved = [];
     for (const f of files) {
       const name = sanitizeFilename(f.name);
