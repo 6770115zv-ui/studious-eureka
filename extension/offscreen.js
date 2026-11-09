@@ -29,27 +29,22 @@
       const cache = await caches.open(ZIP_CACHE_NAME);
       const res = await cache.match(cacheKey);
       if (!res) return null;
-      const buf = new Uint8Array(await res.arrayBuffer());
+      const blob = await res.blob();
       await cache.delete(cacheKey).catch(() => {});
-      if (buf.length) {
-        sendProgress(
-          jobId,
-          100,
-          90,
-          "נטען מזיכרון המטמון המקומי (" + fmtMB(buf.length) + ")...",
-          cacheKey + " -> Offscreen Memory Buffer"
-        );
+      if (blob.size) {
+        sendProgress(jobId, 100, 90, "נטען מזיכרון המטמון המקומי (" + fmtMB(blob.size) + ")...", cacheKey);
+        return blob;
       }
-      return buf.length ? buf : null;
+      return null;
     } catch { return null; }
   }
 
-  async function fetchStreamWithProgress(res, expectedSize, jobId, sourceLabel) {
+  async function fetchStreamAsBlob(res, expectedSize, jobId, sourceLabel) {
     const contentLen = Number(res.headers.get("content-length") || 0) || Number(expectedSize || 0);
     if (!res.body || !res.body.getReader) {
-      const buf = new Uint8Array(await res.arrayBuffer());
-      sendProgress(jobId, 100, 90, "הורדה למחשב הושלמה (" + fmtMB(buf.length) + ")", sourceLabel);
-      return buf;
+      const blob = await res.blob();
+      sendProgress(jobId, 100, 90, "הורדה למחשב הושלמה (" + fmtMB(blob.size) + ")", sourceLabel);
+      return blob;
     }
     const reader = res.body.getReader();
     const chunks = [];
@@ -79,20 +74,17 @@
       }
     }
 
-    const out = new Uint8Array(received);
-    let offset = 0;
-    for (const c of chunks) {
-      out.set(c, offset);
-      offset += c.byteLength;
-    }
+    // שימוש ישיר ב-new Blob(chunks) ללא הקצאת new Uint8Array(received) שגורמת לקריסת זיכרון ב-99%!
+    const finalBlob = new Blob(chunks);
+    chunks.length = 0;
     sendProgress(
       jobId,
       100,
       90,
       "הורדה למחשב הושלמה: 100% (" + fmtMB(received) + ")",
-      "Offscreen Memory Buffer (" + fmtMB(received) + ")"
+      "Offscreen Blob Storage (" + fmtMB(received) + ")"
     );
-    return out;
+    return finalBlob;
   }
 
   async function fetchWithRetry(apiUrl, token, fallbackUrl, expectedSize, jobId) {
@@ -118,8 +110,8 @@
         try {
           const res = await fetch(cand.url, { headers: cand.headers, redirect: "follow", credentials: "omit", cache: "no-store" });
           if (res.ok) {
-            const buf = await fetchStreamWithProgress(res, expectedSize, jobId, cand.url.split("?")[0]);
-            if (buf.length > 0) return buf;
+            const blob = await fetchStreamAsBlob(res, expectedSize, jobId, cand.url.split("?")[0]);
+            if (blob.size > 0) return blob;
           } else { lastErr = "HTTP " + res.status; }
         } catch (e) { lastErr = e.message || "Failed to fetch"; }
       }
@@ -130,23 +122,31 @@
 
   async function unzipArtifact(msg) {
     try {
-      let buf = await readFromCache(msg.cacheKey, msg.jobId);
-      if (!buf) buf = await fetchWithRetry(msg.url, msg.token, msg.fallbackUrl, msg.expectedSize, msg.jobId);
+      let dataBlob = await readFromCache(msg.cacheKey, msg.jobId);
+      if (!dataBlob) dataBlob = await fetchWithRetry(msg.url, msg.token, msg.fallbackUrl, msg.expectedSize, msg.jobId);
+
+      // אם הקובץ גדול מ-400MB או שביקשו rawZip, נשמור אותו ישירות מה-Blob ללא פתיחת Uint8Array בזיכרון!
+      if (msg.rawZip || dataBlob.size > 400 * 1024 * 1024) {
+        const fname = msg.zipName || "download.zip";
+        const ext = (fname.toLowerCase().split(".").pop() || "zip");
+        const typedBlob = new Blob([dataBlob], { type: MIME[ext] || "application/octet-stream" });
+        const blobUrl = URL.createObjectURL(typedBlob);
+        return { ok: true, files: [{ name: fname, size: dataBlob.size, blobUrl }] };
+      }
+
+      const buf = new Uint8Array(await dataBlob.arrayBuffer());
+      dataBlob = null;
       const isPkZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
-      if (msg.rawZip || !isPkZip) {
+      if (!isPkZip) {
         const fname = msg.zipName || "download.mp4";
         const ext = (fname.toLowerCase().split(".").pop() || "mp4");
         const blob = new Blob([buf], { type: MIME[ext] || "application/octet-stream" });
         const blobUrl = URL.createObjectURL(blob);
-        const size = buf.length;
-        buf = null;
-        sendProgress(msg.jobId, 100, 93, "בונה קובץ מדיה לשמירה...", blobUrl + " (" + fname + ")");
-        return { ok: true, files: [{ name: fname, size, blobUrl }] };
+        return { ok: true, files: [{ name: fname, size: buf.length, blobUrl }] };
       }
 
       sendProgress(msg.jobId, 100, 91, "פורס ארכיון ובונה קובץ מדיה בזיכרון...", "fflate.unzipAsync -> Offscreen Blob Builder");
       const entries = fflate.unzipAsync ? await fflate.unzipAsync(buf) : fflate.unzipSync(buf);
-      buf = null;
       const files = [];
       for (const name of Object.keys(entries)) {
         const data = entries[name];
@@ -157,9 +157,6 @@
         const blob = new Blob([data], { type: MIME[ext] || "application/octet-stream" });
         const blobUrl = URL.createObjectURL(blob);
         files.push({ name: cleanName, size: data.length, blobUrl });
-      }
-      if (files.length) {
-        sendProgress(msg.jobId, 100, 93, "קובץ המדיה נבנה בהצלחה! מעביר לשמירה בדיסק...", files[0].blobUrl + " -> Downloads/" + files[0].name);
       }
       return files.length ? { ok: true, files } : { ok: false, error: "ארכיון ה-ZIP ריק" };
     } catch (e) { return { ok: false, error: e.message }; }
