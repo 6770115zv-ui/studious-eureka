@@ -44,10 +44,9 @@ jobs:
           if not filter_prompt:
               filter_prompt = (
                   f"הבא אך ורק תוצאות מקצועיות, נקיות וטהורות שעוסקות ישירות בנושא '{query}' בלבד. "
-                  "סנן החוצה סרטים, סדרות, קליפים, בידור, איפור, אופנה, דמויות לא מתאימות וכל תוכן שאינו מתאים למגזר שומר תורה ומצוות."
+                  "סנן החוצה תכנים זרים וכל תוכן שאינו מתאים למגזר שומר תורה ומצוות."
               )
 
-          # תרגום אוטומטי מעברית לאנגלית (או מאנגלית לעברית) לחיפוש בינלאומי רחב
           en_query = ""
           if any("\u0590" <= ch <= "\u05FF" for ch in query):
               try:
@@ -59,13 +58,10 @@ jobs:
               except Exception as e:
                   print("Translation notice:", e, flush=True)
 
-          # פונקציה לבניית URL חיפוש ישיר ביוטיוב הממוין לפי "מספר צפיות מכל הזמנים" (sp=CAMSAhAB)
           def yt_most_viewed_url(q_text):
               enc = urllib.parse.quote_plus(q_text)
-              # sp=CAMSAhAB = Sort by: View count (All Time) + Type: Video
               return f"https://www.youtube.com/results?search_query={enc}&sp=CAMSAhAB"
 
-          # רשימת מקורות חיפוש: קודם כל מיון שיא צפיות של כל הזמנים (All-Time View Count) ללא סיומות מזהמות!
           search_targets = [
               (yt_most_viewed_url(query), "120"),
               (f"ytsearch80:{query}", "80"),
@@ -80,7 +76,7 @@ jobs:
               target, max_items = task
               cmd = [
                   "python3", "-m", "yt_dlp",
-                  "--dump-json", "--flat-playlist",
+                  "--force-ipv4", "--dump-json", "--flat-playlist",
                   "--playlist-end", max_items,
                   "--ignore-errors", "--no-warnings",
                   target
@@ -101,7 +97,6 @@ jobs:
               for batch in ex.map(fetch_search, search_targets):
                   raw.extend(batch)
 
-          # 1. סינון קשיח נגד תכנים לא מתאימים (כולל איפור, טיפוח, אופנה, סרטים, קליפים ודמויות לא מתאימות)
           BLOCKED_RX = re.compile(
               r"\b(movie|movies|film|trailer|cinema|netflix|hollywood|actor|actress|romance|dating|"
               r"bikini|sexy|girl|girls|woman|women|lady|ladies|female|wife|girlfriend|bride|"
@@ -112,7 +107,6 @@ jobs:
               re.IGNORECASE
           )
 
-          # 2. חילוץ מילות מפתח קשיחות מהנושא המבוקש כדי למנוע לחלוטין תוצאות לא קשורות (כמו ריתוך או איפור)
           STOP_WORDS = {"איך", "מדריך", "הדרכה", "מקצועי", "של", "על", "עם", "the", "and", "for", "how", "to", "in", "of", "with"}
           topic_tokens = []
           for src_q in (query, en_query):
@@ -152,10 +146,9 @@ jobs:
                   "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          # השלמת נתוני צפיות לסרטונים שחזרו ללא view_count בחיפוש שטוח
           need_meta = [c for c in cands if c["views"] == 0][:60]
           def enrich(c):
-              cmd = ["python3", "-m", "yt_dlp", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
+              cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
               r = subprocess.run(cmd, capture_output=True, text=True)
               try:
                   d = json.loads(r.stdout.splitlines()[0])
@@ -168,10 +161,8 @@ jobs:
               with ThreadPoolExecutor(max_workers=12) as ex:
                   list(ex.map(enrich, need_meta))
 
-          # מיון מוחלט לפי שיא צפיות מכל הזמנים (מהגבוה ביותר לנמוך ביותר)
           cands.sort(key=lambda x: x["views"], reverse=True)
 
-          # מניעת הצפה של סרטוני 2026: אם המשתמש לא חיפש במפורש "2026", מגבילים סרטונים שמופיע בהם "2026" לעד 15% מהרשימה
           user_asked_2026 = "2026" in query
           balanced_pool = []
           recent_2026_list = []
@@ -183,19 +174,17 @@ jobs:
               else:
                   balanced_pool.append(c)
 
-          # משלבים עד 8 סרטונים בולטים מ-2026 והשאר קלאסיקות שיא צפיות מכל הזמנים, וממיינים שוב לפי צפיות!
           pool = balanced_pool[:85] + recent_2026_list[:8]
           pool.sort(key=lambda x: x["views"], reverse=True)
           if len(pool) < 20:
               pool = cands[:85]
 
-          # 3. סינון בינה מלאכותית בענן (במנות של 30 סרטונים לדיוק מרבי)
           def call_ai_batch(batch_items, topic_str, en_topic_str, user_rule):
               compact = [{"id": c["id"], "title": c["title"], "channel": c["channel"]} for c in batch_items]
               sys_msg = (
                   "אתה מסנן תוכן קפדני עבור ציבור שומר תורה ומצוות. "
                   "תפקידך לבדוק את רשימת הסרטונים ולהחזיר אך ורק את המזהים (id) של סרטונים שעומדים בשני תנאים:\n"
-                  "1. הם עוסקים ישירות בנושא המבוקש ואינם שייכים לתחום זר (למשל איפור, אופנה, שירים או נושא לא קשור).\n"
+                  "1. הם עוסקים ישירות בנושא המבוקש ואינם שייכים לתחום זר.\n"
                   "2. הם עומדים ב-100% בהנחיית הסינון והנקיות של המשתמש.\n"
                   "החזר אך ורק JSON תקין בפורמט: {\"approved_ids\": [\"id1\", \"id2\"]}"
               )
@@ -254,7 +243,6 @@ jobs:
               chunk = pool[i:i + batch_size]
               approved_all.extend(call_ai_batch(chunk, query, en_query, filter_prompt))
 
-          # מיון סופי לפי כמות צפיות מכל הזמנים והחזרת עד 65 תוצאות!
           approved_all.sort(key=lambda x: x["views"], reverse=True)
           filtered = approved_all[:65]
 
