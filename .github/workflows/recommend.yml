@@ -54,9 +54,8 @@ jobs:
                   tr_res = requests.get(tr_url, timeout=10)
                   if tr_res.status_code == 200:
                       en_query = "".join(part[0] for part in tr_res.json()[0] if part and part[0]).strip()
-                      print(f"Translated query '{query}' -> '{en_query}'", flush=True)
-              except Exception as e:
-                  print("Translation notice:", e, flush=True)
+              except Exception:
+                  pass
 
           def yt_most_viewed_url(q_text):
               enc = urllib.parse.quote_plus(q_text)
