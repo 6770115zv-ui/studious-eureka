@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v7.0 — מרכז הורדות ענן, בדיקת איכות וסינון AI</title>
+  <title>YouTube Cloud Ultra v8.0 — מרכז הורדות ענן, כתוביות וסינון AI</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,7 +10,7 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v7.0</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v8.0</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
@@ -38,11 +38,12 @@
           <select id="formatSelect" class="input"></select>
         </div>
         <div>
-          <label class="small muted">כתוביות (עברית / אנגלית):</label>
+          <label class="small muted">כתוביות (עברית, או אנגלית אם אין עברית):</label>
           <select id="subsSelect" class="input">
             <option value="none">ללא כתוביות</option>
             <option value="embed">הטמע כתוביות בתוך הווידאו</option>
-            <option value="files">הורד כקובץ SRT נפרד</option>
+            <option value="files">הורד כקובץ SRT נפרד לצד הווידאו</option>
+            <option value="only">📝 הורד כתוביות בלבד (ללא הווידאו - SRT)</option>
           </select>
         </div>
       </div>
@@ -104,19 +105,22 @@
       </div>
 
       <div id="emailInputWrap" style="display:none;">
-        <label class="small muted">כתובת מייל (השאר ריק לשליחה אוטומטית למייל הקבוע שב-GitHub Secrets, או הזן מייל חלופי):</label>
+        <label class="small muted">כתובת מייל (השאר ריק לשליחה אוטומטית למייל הקבוע שב-GitHub Secrets, כולל כיווץ אוטומטי לצרופה):</label>
         <input id="emailToInput" class="input" dir="ltr" placeholder="השאר ריק לשליחה למייל הקבוע ב-GitHub Secrets..."/>
       </div>
 
-      <button class="btn btn--primary btn--block" id="downloadBtn" type="button">🚀 התחל הורדה בענן GitHub</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn--primary" id="downloadBtn" type="button" style="flex:2;padding:11px;font-size:14px;">🚀 התחל הורדה בענן GitHub</button>
+        <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:600;border-color:var(--ok);color:var(--ok);" title="מוריד אך ורק את קובץ הכתוביות (עברית, או אנגלית אם אין) ללא הווידאו">📝 הורד כתוביות בלבד (SRT)</button>
+      </div>
       <p id="hint" class="small muted" style="margin:0;text-align:center;"></p>
     </section>
 
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
         <div>
-          <h2 style="margin:0;font-size:15px;">🎯 מנוע חיפוש רב-לשוני (עברית + בינלאומי) מבוסס סינון AI בענן</h2>
-          <p class="small muted" style="margin:2px 0 0;">מתרגם אוטומטית גם לאנגלית להבאת סרטונים פופולריים מהעולם ומסנן אותם עם AI לפי הגדרת הנקיות שלך</p>
+          <h2 style="margin:0;font-size:15px;">🎯 מנוע חיפוש רב-לשוני (שיא צפיות מכל הזמנים) מבוסס סינון AI</h2>
+          <p class="small muted" style="margin:2px 0 0;">מביא את הסרטונים הנצפים ביותר בכל הזמנים ומסנן אותם עם AI לפי הגדרת הנקיות שלך</p>
         </div>
       </div>
 
@@ -145,7 +149,7 @@
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 חפש (עברית + עולמי) וסנן באמצעות AI</button>
+        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 חפש (כל הזמנים) וסנן באמצעות AI</button>
         <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
         <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
       </div>
@@ -155,7 +159,7 @@
 
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (כולל בדיקת איכות קובץ בפועל)</h2>
+        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (אחוז הורדה למחשב + נתיב קבצים זמניים ובנייה)</h2>
         <button class="btn small" id="clearJobsBtn" type="button">נקה שהושלמו</button>
       </div>
       <div id="jobList" style="display:flex;flex-direction:column;gap:10px;"></div>
