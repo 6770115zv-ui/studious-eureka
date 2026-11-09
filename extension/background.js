@@ -235,7 +235,7 @@ async function findRunByTitle(cfg, targetTitle, signal) {
   throw new Error("לא נמצאה ריצה תואמת ב-GitHub Actions");
 }
 
-async function fetchLiveStepInfo(cfg, runId, tickIdx) {
+async function fetchLiveStepInfo(cfg, runId, tickIdx, requestId) {
   try {
     const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + runId + "/jobs", cfg, {}, 1);
     if (!res.ok) return null;
@@ -247,15 +247,29 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
     const totalCount = Math.max(1, ghJob.steps.length);
     if (active) {
       const nameMap = {
-        "Set up Deno": "מכין סביבת ריצה בענן (Deno)...",
-        "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": "מתקין כלי הורדה וקידוד (yt-dlp + FFmpeg)...",
-        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": "מוריד באיכות מרבית, בודק רזולוציה בפועל ואורז בענן...",
-        "Upload Backup Artifact": "שומר גיבוי תוצר ב-GitHub..."
+        "Set up Deno": {
+          label: "מכין סביבת ריצה בענן (Deno)...",
+          path: "/runner/_work/studious-eureka (Cloud VM Init)"
+        },
+        "Install yt-dlp + ffmpeg + curl_cffi + atomicparsley": {
+          label: "מתקין כלי הורדה וקידוד (yt-dlp + FFmpeg + PO Token)...",
+          path: "/usr/bin/ffmpeg + /usr/local/lib/python3/yt_dlp"
+        },
+        "Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)": {
+          label: "מוריד ובונה את הקובץ בענן...",
+          path: "/tmp/stage/*.part -> /tmp/out/*.mp4 -> /tmp/pkg/dl-" + requestId + ".zip"
+        },
+        "Upload Backup Artifact": {
+          label: "שומר גיבוי תוצר ב-GitHub...",
+          path: "/tmp/out/* -> GitHub Artifact Storage"
+        }
       };
+      const mapped = nameMap[active.name] || { label: "מבצע שלב: " + active.name, path: "/tmp/stage -> /tmp/out" };
       const baseStepPct = 20 + Math.round((completedCount / totalCount) * 35);
       const smoothBoost = Math.min(16, Math.floor(tickIdx * 1.2));
       return {
-        label: nameMap[active.name] || ("מבצע שלב: " + active.name),
+        label: mapped.label,
+        tempPath: mapped.path,
         pct: Math.min(72, baseStepPct + smoothBoost)
       };
     }
@@ -263,7 +277,7 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx) {
   return null;
 }
 
-async function waitForRun(cfg, runId, onTick, signal) {
+async function waitForRun(cfg, runId, requestId, onTick, signal) {
   let cachedStepInfo = null;
   for (let i = 0; i < 900; i++) {
     if (signal && signal.cancelled) throw new Error("בוטל");
@@ -272,11 +286,12 @@ async function waitForRun(cfg, runId, onTick, signal) {
     const run = await res.json();
     if (run.status === "completed") return run.conclusion;
     if (run.status === "in_progress" && i % 2 === 0) {
-      const latest = await fetchLiveStepInfo(cfg, runId, i);
+      const latest = await fetchLiveStepInfo(cfg, runId, i, requestId);
       if (latest) cachedStepInfo = latest;
     } else if (cachedStepInfo) {
       cachedStepInfo = {
         label: cachedStepInfo.label,
+        tempPath: cachedStepInfo.tempPath,
         pct: Math.min(72, cachedStepInfo.pct + 1)
       };
     }
@@ -302,16 +317,18 @@ async function findReleaseAssetsByTag(cfg, tag) {
   let blobShas = [];
   let qualityInfo = "";
   let emailStatus = "";
+  let cloudTempPath = "";
   if (rel.body && String(rel.body).trim().startsWith("{")) {
     try {
       const parsed = JSON.parse(String(rel.body).trim());
       if (Array.isArray(parsed.blobs)) blobShas = parsed.blobs;
       if (parsed.quality_info) qualityInfo = String(parsed.quality_info);
       if (parsed.email_status) emailStatus = String(parsed.email_status);
+      if (parsed.cloud_temp_path) cloudTempPath = String(parsed.cloud_temp_path);
     } catch {}
   }
   const assets = (rel.assets || []).filter((a) => a.url || a.browser_download_url).map((a) => ({
-    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus
+    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath
   }));
   return assets.length ? assets : null;
 }
@@ -340,7 +357,13 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
     let totalLen = 0;
     for (let i = 0; i < blobShas.length; i++) {
       const sha = blobShas[i];
-      patchJob(jobId, { detail: "מושך ישירות דרך api.github.com (חלק " + (i + 1) + "/" + blobShas.length + ")..." });
+      const localPct = Math.round(((i) / blobShas.length) * 100);
+      patchJob(jobId, {
+        localDlPct: localPct,
+        percent: 75 + Math.round((i / blobShas.length) * 14),
+        tempPath: "CacheStorage://" + ZIP_CACHE_NAME + "/asset-" + jobId + ".zip (Git Blob Part " + (i + 1) + "/" + blobShas.length + ")",
+        detail: "מוריד למחשב דרך API ישיר: " + localPct + "% (חלק " + (i + 1) + "/" + blobShas.length + ")..."
+      });
       const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/git/blobs/" + sha, cfg);
       if (!res.ok) return null;
       const data = await res.json();
@@ -358,6 +381,11 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
     const cacheKey = "https://ytcloud.local/asset-" + jobId + "-" + Date.now() + ".zip";
     const cache = await caches.open(ZIP_CACHE_NAME);
     await cache.put(cacheKey, new Response(merged, { headers: { "Content-Type": "application/zip" } }));
+    patchJob(jobId, {
+      localDlPct: 100,
+      percent: 90,
+      tempPath: cacheKey + " (" + self.formatBytes(totalLen) + ")"
+    });
     return cacheKey;
   } catch {
     return null;
@@ -369,6 +397,7 @@ async function unpackZipUrl(assetOrUrl, jobId, cfg, rawZip = false) {
   const apiUrl = typeof assetOrUrl === "string" ? assetOrUrl : (assetOrUrl.apiUrl || assetOrUrl.url);
   const fallbackUrl = typeof assetOrUrl === "string" ? "" : (assetOrUrl.url || "");
   const zipName = (typeof assetOrUrl === "object" && assetOrUrl.name) ? assetOrUrl.name : ("dl-" + jobId + ".zip");
+  const expectedSize = (typeof assetOrUrl === "object" && assetOrUrl.size) ? assetOrUrl.size : 0;
   const blobShas = (typeof assetOrUrl === "object" && assetOrUrl.blobShas) ? assetOrUrl.blobShas : [];
 
   let cacheKey = null;
@@ -378,9 +407,17 @@ async function unpackZipUrl(assetOrUrl, jobId, cfg, rawZip = false) {
 
   let lastErr = "שגיאה במשיכת או פריסת ה-ZIP";
   for (let attempt = 1; attempt <= 3; attempt++) {
-    patchJob(jobId, { detail: "מוריד ופורס קובץ מדיה למחשב (ניסיון " + attempt + "/3)..." });
     const res = await chrome.runtime.sendMessage({
-      target: "offscreen", type: "UNZIP_ARTIFACT", jobId, cacheKey, url: apiUrl, fallbackUrl, token: cfg.token, rawZip, zipName
+      target: "offscreen",
+      type: "UNZIP_ARTIFACT",
+      jobId,
+      cacheKey,
+      url: apiUrl,
+      fallbackUrl,
+      token: cfg.token,
+      rawZip,
+      zipName,
+      expectedSize
     }).catch((e) => ({ ok: false, error: e.message }));
     if (res && res.ok && res.files && res.files.length) return res.files;
     lastErr = (res && res.error) || lastErr;
@@ -405,7 +442,7 @@ function sanitizeFilename(name) {
   return segs.length ? segs.join("/") : "download.mp4";
 }
 
-function saveBlob(blobUrl, filename) {
+function saveBlob(blobUrl, filename, jobId) {
   return new Promise((resolve, reject) => {
     pendingNames.set(blobUrl, filename);
     chrome.downloads.download({ url: blobUrl, filename, saveAs: false }, (downloadId) => {
@@ -414,13 +451,45 @@ function saveBlob(blobUrl, filename) {
         reject(new Error("שגיאה בשמירת הקובץ במחשב"));
         return;
       }
+
+      // מעקב רציף אחרי כתיבת הקובץ לדיסק המקומי והצגת הנתיב הזמני (.crdownload) והסופי במחשב!
+      const pollTimer = setInterval(() => {
+        chrome.downloads.search({ id: downloadId }, (results) => {
+          const item = results && results[0];
+          if (!item) return;
+          const diskPath = item.filename || filename;
+          if (item.state === "in_progress") {
+            const dlPct = item.totalBytes > 0 ? Math.round((item.bytesReceived / item.totalBytes) * 100) : 100;
+            patchJob(jobId, {
+              localDlPct: dlPct,
+              tempPath: diskPath + ".crdownload (Local Disk Write -> " + blobUrl + ")",
+              detail: "כותב קובץ לתיקיית ההורדות במחשב: " + dlPct + "%..."
+            });
+          } else if (item.state === "complete") {
+            patchJob(jobId, {
+              localDlPct: 100,
+              finalDiskPath: diskPath
+            });
+          }
+        });
+      }, 300);
+
       const listener = (delta) => {
         if (delta.id !== downloadId || !delta.state) return;
         if (delta.state.current === "complete" || delta.state.current === "interrupted") {
+          clearInterval(pollTimer);
           chrome.downloads.onChanged.removeListener(listener);
-          if (blobUrl.startsWith("blob:")) chrome.runtime.sendMessage({ target: "offscreen", type: "REVOKE", blobUrl }).catch(() => {});
-          if (delta.state.current === "complete") resolve(filename);
-          else reject(new Error("שמירת הקובץ הופסקה"));
+          chrome.downloads.search({ id: downloadId }, (results) => {
+            const item = results && results[0];
+            if (item && item.filename) {
+              patchJob(jobId, { finalDiskPath: item.filename, localDlPct: 100 });
+            }
+            if (blobUrl.startsWith("blob:")) {
+              chrome.runtime.sendMessage({ target: "offscreen", type: "REVOKE", blobUrl }).catch(() => {});
+            }
+            if (delta.state.current === "complete") resolve((item && item.filename) || filename);
+            else reject(new Error("שמירת הקובץ הופסקה"));
+          });
         }
       };
       chrome.downloads.onChanged.addListener(listener);
@@ -440,21 +509,33 @@ async function driveJob(jobId) {
     const cfg = await getConfig();
     const tag = "dl-" + job.requestId;
     if (!job.runId) {
-      patchJob(jobId, { status: "queued", detail: "מאתר ריצה ב-GitHub Actions...", percent: 12 });
+      patchJob(jobId, {
+        status: "queued",
+        detail: "מאתר ריצה ב-GitHub Actions...",
+        tempPath: "GitHub Actions Queue -> dl-" + job.requestId,
+        percent: 12
+      });
       const runId = await findRunByTitle(cfg, tag, signal);
       patchJob(jobId, { runId });
     }
     patchJob(jobId, { status: "running", detail: "מתחבר לשרת GitHub Actions...", percent: 20 });
-    const conclusion = await waitForRun(cfg, jobs.get(jobId).runId, (run, tickIdx, stepInfo) => {
+    const conclusion = await waitForRun(cfg, jobs.get(jobId).runId, job.requestId, (run, tickIdx, stepInfo) => {
       const fallbackPct = Math.min(68, 20 + Math.floor(tickIdx * 1.5));
       patchJob(jobId, {
         detail: stepInfo ? stepInfo.label : (run.status === "queued" ? "ממתין בתור ב-GitHub..." : "מעבד ומוריד מדיה ב-GitHub Actions..."),
+        tempPath: (stepInfo && stepInfo.tempPath) || ("/tmp/stage -> /tmp/out -> /tmp/pkg/dl-" + job.requestId + ".zip"),
         percent: stepInfo ? stepInfo.pct : fallbackPct
       });
     }, signal);
 
     if (conclusion !== "success") throw new Error("הריצה הסתיימה עם סטטוס: " + conclusion);
-    patchJob(jobId, { status: "fetching", detail: "מושך קובץ ונתוני איכות מ-GitHub API...", percent: 76 });
+    patchJob(jobId, {
+      status: "fetching",
+      localDlPct: 0,
+      detail: "מתחיל הורדת קובץ מהענן למחשב (0%)...",
+      tempPath: "GitHub Release Asset -> Local Browser Stream Buffer",
+      percent: 75
+    });
 
     let files = null;
     let detectedQuality = "";
@@ -465,6 +546,7 @@ async function driveJob(jobId) {
       if (assets && assets.length) {
         if (assets[0].qualityInfo) detectedQuality = assets[0].qualityInfo;
         if (assets[0].emailStatus) detectedEmailStatus = assets[0].emailStatus;
+        if (assets[0].cloudTempPath) patchJob(jobId, { tempPath: assets[0].cloudTempPath });
         if (detectedQuality) patchJob(jobId, { actualQuality: detectedQuality });
 
         const isBundle = job.mode === "collection";
@@ -491,14 +573,14 @@ async function driveJob(jobId) {
       if (!found) throw new Error("לא נמצא תוצר להורדה ב-Release או ב-Artifacts");
       const artUrl = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/artifacts/" + found.id + "/zip";
       const isBundle = job.mode === "collection";
-      files = await unpackZipUrl({ apiUrl: artUrl, url: "", name: tag + ".zip" }, jobId, cfg, isBundle);
+      files = await unpackZipUrl({ apiUrl: artUrl, url: "", name: tag + ".zip", size: found.size_in_bytes || 0 }, jobId, cfg, isBundle);
     }
 
-    patchJob(jobId, { status: "saving", detail: "שומר קובץ במחשב...", percent: 92 });
+    patchJob(jobId, { status: "saving", localDlPct: 100, detail: "שומר קובץ בתיקיית ההורדות במחשב...", percent: 94 });
     const saved = [];
     for (const f of files) {
       const name = sanitizeFilename(f.name);
-      await saveBlob(f.blobUrl || f.url, name);
+      await saveBlob(f.blobUrl || f.url, name, jobId);
       saved.push(name);
     }
 
@@ -510,15 +592,16 @@ async function driveJob(jobId) {
     });
 
     if (cfg.autoCleanRelease === "true") await deleteReleaseAndTagByName(cfg, tag);
-    const qualityNote = detectedQuality ? (" | איכות הקובץ שנבדקה: " + detectedQuality) : "";
+    const qualityNote = detectedQuality ? (" | איכות: " + detectedQuality) : "";
     const emailNote = detectedEmailStatus
       ? (" | " + detectedEmailStatus)
       : (job.sendEmail ? " | נשלח גם למייל הקבוע" : "");
 
     patchJob(jobId, {
       status: "completed",
+      localDlPct: 100,
       actualQuality: detectedQuality,
-      detail: "הושלם ונשמר במחשב!" + qualityNote + emailNote,
+      detail: "הושלם ונשמר במחשב! (" + saved.length + " קבצים)" + qualityNote + emailNote,
       files: saved,
       percent: 100
     });
@@ -553,7 +636,6 @@ async function startDownload(payload) {
     repUrl = list[0];
   }
 
-  // אם המשתמש סימן שליחה למייל (גם ללא הזנת כתובת בתיבה), שולחים דגל send_email: true והענן ישלח אוטומטית למייל שב-GitHub Secrets!
   const targetEmail = payload.sendEmail ? (payload.emailTo || cfg.emailTo || "AUTO_SECRET") : "";
   const extOptions = JSON.stringify({
     sb: Boolean(payload.sponsorblock),
@@ -565,10 +647,13 @@ async function startDownload(payload) {
     email: targetEmail
   });
 
+  const effectiveQuality = (payload.subtitles === "only" || payload.quality === "subs_only") ? "subs_only" : (payload.quality || "best");
+  const effectiveSubs = effectiveQuality === "subs_only" ? "only" : (payload.subtitles || "none");
+
   jobs.set(requestId, {
     id: requestId, requestId, url: repUrl, urls: payload.urls || [], title: payload.title || repUrl,
-    thumbnail: payload.thumbnail || "", quality: payload.quality || "best", actualQuality: "", mode,
-    clipStart: payload.clipStart || "", clipEnd: payload.clipEnd || "", subtitles: payload.subtitles || "none",
+    thumbnail: payload.thumbnail || "", quality: effectiveQuality, actualQuality: "", mode,
+    clipStart: payload.clipStart || "", clipEnd: payload.clipEnd || "", subtitles: effectiveSubs,
     sponsorblock: payload.sponsorblock ? "true" : "false",
     splitChapters: Boolean(payload.splitChapters),
     normalizeAudio: Boolean(payload.normalizeAudio),
@@ -576,13 +661,16 @@ async function startDownload(payload) {
     sendEmail: Boolean(payload.sendEmail),
     emailTo: targetEmail,
     geoCountry: payload.geoCountry || "IL",
+    localDlPct: null,
+    tempPath: "/tmp/stage -> /tmp/out (Cloud Runner Initializing)",
+    finalDiskPath: "",
     status: "preparing", detail: "שולח פקודה ל-GitHub Actions...", percent: 5,
     startedAt: Date.now(), dispatchedAt: Date.now(), files: []
   });
   await persistJobs();
 
   if (payload.title && !payload.title.startsWith("http")) {
-    await addHistoryEntry({ url: repUrl, title: payload.title, quality: payload.quality || "best" });
+    await addHistoryEntry({ url: repUrl, title: payload.title, quality: effectiveQuality });
   }
 
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/workflows/" + encodeURIComponent(cfg.workflow) + "/dispatches";
@@ -594,12 +682,12 @@ async function startDownload(payload) {
       inputs: {
         request_id: requestId,
         url: repUrl,
-        quality: payload.quality || "best",
+        quality: effectiveQuality,
         mode,
         urls: urlsJson,
         clip_start: payload.clipStart || "",
         clip_end: payload.clipEnd || "",
-        subtitles: payload.subtitles || "none",
+        subtitles: effectiveSubs,
         sponsorblock: extOptions,
         cookies_enc: cookiesEnc
       }
@@ -660,8 +748,8 @@ async function driveRecommendations(requestId, query, minViews) {
   try {
     await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש רב-לשוני וסינון AI ב-GitHub Actions...", items: [] });
     const runId = await findRunByTitle(cfg, tag, null);
-    await setRecsState({ status: "running", query, minViews, detail: "סורק תוצאות בעברית ובאנגלית ומסנן עם AI בענן...", items: [] });
-    const conclusion = await waitForRun(cfg, runId, null, null);
+    await setRecsState({ status: "running", query, minViews, detail: "סורק תוצאות מכל הזמנים ומסנן עם AI בענן...", items: [] });
+    const conclusion = await waitForRun(cfg, runId, requestId, null, null);
     if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
 
     await setRecsState({ status: "fetching", query, minViews, detail: "מושך תוצאות מסוננות מ-GitHub...", items: [] });
@@ -740,6 +828,17 @@ async function runCloudCleanup() {
 async function handle(msg) {
   await restoreJobs();
   switch (msg.type) {
+    case "OFFSCREEN_PROGRESS": {
+      if (msg.jobId && jobs.has(msg.jobId)) {
+        const patch = {};
+        if (typeof msg.localDlPct === "number") patch.localDlPct = msg.localDlPct;
+        if (typeof msg.overallPct === "number") patch.percent = msg.overallPct;
+        if (msg.detail) patch.detail = msg.detail;
+        if (msg.tempPath) patch.tempPath = msg.tempPath;
+        patchJob(msg.jobId, patch);
+      }
+      return { ok: true };
+    }
     case "GET_PREFS": {
       const cfg = await getConfig();
       return { configured: Boolean(cfg.owner && cfg.repo && cfg.token), owner: cfg.owner, repo: cfg.repo, emailTo: cfg.emailTo || "" };
