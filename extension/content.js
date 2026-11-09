@@ -30,6 +30,7 @@
           url: location.href,
           title: document.title.replace(/ - YouTube/gi, "").trim(),
           quality: sel.value,
+          subtitles: sel.value === "subs_only" ? "only" : "none",
           mode: "video",
           geoCountry: "IL"
         }
@@ -38,6 +39,32 @@
       setTimeout(() => {
         btn.disabled = false;
         btn.textContent = "⬇ הורד בענן";
+      }, 2800);
+    };
+
+    const subsBtn = document.createElement("button");
+    subsBtn.className = "ytproxy-btn";
+    subsBtn.style.background = "rgba(16, 185, 129, 0.28)";
+    subsBtn.title = "הורד קובץ כתוביות בלבד (עברית, או אנגלית אם אין) ללא הווידאו";
+    subsBtn.textContent = "📝 כתוביות";
+    subsBtn.onclick = async () => {
+      subsBtn.disabled = true;
+      subsBtn.textContent = "שולח כתוביות...";
+      const res = await chrome.runtime.sendMessage({
+        type: "START_DOWNLOAD",
+        payload: {
+          url: location.href,
+          title: document.title.replace(/ - YouTube/gi, "").trim(),
+          quality: "subs_only",
+          subtitles: "only",
+          mode: "video",
+          geoCountry: "IL"
+        }
+      }).catch(() => null);
+      subsBtn.textContent = res && res.ok ? "✓ כתוביות בדרך!" : "✕ שגיאה";
+      setTimeout(() => {
+        subsBtn.disabled = false;
+        subsBtn.textContent = "📝 כתוביות";
       }, 2800);
     };
 
@@ -70,7 +97,7 @@
       }, 2800);
     };
 
-    wrap.append(sel, btn, clipBtn);
+    wrap.append(sel, btn, subsBtn, clipBtn);
     bar.appendChild(wrap);
   }
   setInterval(inject, 2000);
