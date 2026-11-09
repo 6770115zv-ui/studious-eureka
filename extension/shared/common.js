@@ -7,6 +7,7 @@ const YTPROXY_PRESETS = [
   { id: "video_720", quality: "720", label: "וידאו HD (720p)" },
   { id: "video_480", quality: "480", label: "וידאו חסכוני (480p)" },
   { id: "video_360", quality: "360", label: "וידאו מהיר (360p)" },
+  { id: "subs_only", quality: "subs_only", label: "📝 כתוביות בלבד - קובץ SRT (עברית, או אנגלית אם אין)" },
   { id: "audio_only", quality: "audio", label: "אודיו בלבד - MP3 320kbps (עם עטיפה)" },
   { id: "audio_m4a", quality: "audio_m4a", label: "אודיו בלבד - M4A (AAC)" },
   { id: "audio_opus", quality: "audio_opus", label: "אודיו איכותי - OPUS" },
