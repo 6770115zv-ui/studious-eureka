@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v8.0 — מרכז הורדות ענן, כתוביות וסינון AI</title>
+  <title>YouTube Cloud Ultra v9.0 — מרכז הורדות ענן, כתוביות וסינון AI</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,15 +10,26 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v8.0</h1>
-        <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
-          <span class="dot" id="conn-dot"></span>
-          <span class="small muted" id="conn-text">בודק חיבור...</span>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v9.0</h1>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:2px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span class="dot" id="conn-dot"></span>
+            <span class="small muted" id="conn-text">בודק חיבור...</span>
+          </div>
+          <span class="small" id="ck-status-badge" style="padding:2px 8px;border-radius:6px;background:var(--surface-2);border:1px solid var(--border);">🔐 מפתח עוגיות קבוע פעיל</span>
         </div>
       </div>
+      <button class="btn" id="copyCkBtn" type="button" title="העתק את מפתח העוגיות הקבוע (COOKIE_KEY) עבור GitHub Secrets">🔑 העתק COOKIE_KEY</button>
       <button class="btn" id="cleanCloudBtn" type="button" title="מחק מיד את כל ה-Releases והריצות ב-GitHub">🧹 ניקוי ענן</button>
       <button class="btn" id="settingsBtn" type="button">⚙ הגדרות</button>
     </header>
+
+    <div id="ckWarningBox" class="card" style="display:none;border-color:var(--warn);background:rgba(245,158,11,0.12);padding:12px 16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="small" id="ckWarningText" style="font-weight:600;color:#fbbf24;"></div>
+        <button class="btn small" id="copyCkWarnBtn" type="button">📋 העתק מפתח COOKIE_KEY ללוח</button>
+      </div>
+    </div>
 
     <section class="card">
       <label class="small muted" style="font-weight:600;">קישור למדיה, אוסף או רשימת קישורים (מופרדים ברווח/שורה):</label>
@@ -38,7 +49,7 @@
           <select id="formatSelect" class="input"></select>
         </div>
         <div>
-          <label class="small muted">כתוביות (עברית, או אנגלית אם אין עברית):</label>
+          <label class="small muted">כתוביות (עברית נקייה ללא כפילויות, או אנגלית אם אין):</label>
           <select id="subsSelect" class="input">
             <option value="none">ללא כתוביות</option>
             <option value="embed">הטמע כתוביות בתוך הווידאו</option>
@@ -105,13 +116,13 @@
       </div>
 
       <div id="emailInputWrap" style="display:none;">
-        <label class="small muted">כתובת מייל (השאר ריק לשליחה אוטומטית למייל הקבוע שב-GitHub Secrets, כולל כיווץ אוטומטי לצרופה):</label>
+        <label class="small muted">כתובת מייל (השאר ריק לשליחה אוטומטית למייל הקבוע שב-GitHub Secrets):</label>
         <input id="emailToInput" class="input" dir="ltr" placeholder="השאר ריק לשליחה למייל הקבוע ב-GitHub Secrets..."/>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn btn--primary" id="downloadBtn" type="button" style="flex:2;padding:11px;font-size:14px;">🚀 התחל הורדה בענן GitHub</button>
-        <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:600;border-color:var(--ok);color:var(--ok);" title="מוריד אך ורק את קובץ הכתוביות (עברית, או אנגלית אם אין) ללא הווידאו">📝 הורד כתוביות בלבד (SRT)</button>
+        <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:600;border-color:var(--ok);color:var(--ok);" title="מוריד קובץ כתוביות נקי אחד בעברית (או באנגלית אם אין) ללא הווידאו">📝 הורד כתוביות בלבד (SRT)</button>
       </div>
       <p id="hint" class="small muted" style="margin:0;text-align:center;"></p>
     </section>
@@ -120,7 +131,7 @@
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
         <div>
           <h2 style="margin:0;font-size:15px;">🎯 מנוע חיפוש רב-לשוני (שיא צפיות מכל הזמנים) מבוסס סינון AI</h2>
-          <p class="small muted" style="margin:2px 0 0;">מביא את הסרטונים הנצפים ביותר בכל הזמנים ומסנן אותם עם AI לפי הגדרת הנקיות שלך</p>
+          <p class="small muted" style="margin:2px 0 0;">מביא את התוצאות הנצפות ביותר בכל הזמנים ומסנן אותן עם AI לפי הגדרת הנקיות שלך</p>
         </div>
       </div>
 
