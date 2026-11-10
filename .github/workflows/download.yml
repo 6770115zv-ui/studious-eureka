@@ -56,7 +56,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           python3 - << 'EOF'
-          import os, sys, re, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
+          import os, sys, re, json, time, math, hashlib, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -74,7 +74,9 @@ jobs:
           subtitles = str(inp.get("subtitles", "none")).strip().lower()
           raw_sb = str(inp.get("sponsorblock", "{}")).strip()
           cookies_enc = str(inp.get("cookies_enc", "")).strip()
-          hex_key = (os.environ.get("COOKIE_KEY", "").strip() or os.environ.get("COOKIE_KEY_FALLBACK", "").strip())
+
+          secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
+          fallback_key_env = os.environ.get("COOKIE_KEY_FALLBACK", "").strip()
 
           if quality == "subs_only" or subtitles == "only":
               quality = "subs_only"
@@ -92,22 +94,47 @@ jobs:
           speed_val = str(opts.get("speed") or "1").strip()
           email_opt = str(opts.get("email") or "").strip()
           send_email_flag = bool(opts.get("send_email")) or bool(email_opt)
+          client_ck_hash = str(opts.get("ck_hash") or "").strip()
 
           out_dir = Path("/tmp/out")
           pkg_dir = Path("/tmp/pkg")
           stage_dir = Path("/tmp/stage")
+          lowres_backup_dir = Path("/tmp/lowres_backup")
           subs_dir = Path("/tmp/subs")
           out_dir.mkdir(parents=True, exist_ok=True)
           pkg_dir.mkdir(parents=True, exist_ok=True)
+          lowres_backup_dir.mkdir(parents=True, exist_ok=True)
           cookie_file = Path("/tmp/cookies.txt")
+          cookie_full_file = Path("/tmp/cookies_full.txt")
+
+          # בדיקת התאמת מפתח העוגיות (COOKIE_KEY) בין התוסף לבין GitHub Secrets
+          secret_hash = hashlib.sha256(secret_key_env.encode("utf-8")).hexdigest()[:12] if len(secret_key_env) == 64 else ""
+          cookie_key_status = "ok"
+          if not secret_key_env:
+              cookie_key_status = "missing_in_github_secrets"
+          elif client_ck_hash and secret_hash != client_ck_hash:
+              cookie_key_status = "mismatch_with_github_secrets"
 
           has_ck = False
-          if cookies_enc and len(hex_key) == 64:
-              try:
-                  raw = base64.b64decode(cookies_enc)
-                  plain = AESGCM(bytes.fromhex(hex_key)).decrypt(raw[:12], raw[12:], None).decode("utf-8", errors="replace")
+          if cookies_enc:
+              raw_enc = base64.b64decode(cookies_enc)
+              decrypted_txt = None
+              # מנסים תחילה עם הסוד מ-GitHub Secrets, ואם חסר/שונה מנסים עם המפתח הקבוע
+              for candidate_name, candidate_hex in [("secret", secret_key_env), ("fallback", fallback_key_env)]:
+                  if len(candidate_hex) == 64:
+                      try:
+                          plain_bytes = AESGCM(bytes.fromhex(candidate_hex)).decrypt(raw_enc[:12], raw_enc[12:], None)
+                          decrypted_txt = plain_bytes.decode("utf-8", errors="replace")
+                          if candidate_name == "fallback" and cookie_key_status == "ok":
+                              cookie_key_status = "mismatch_with_github_secrets"
+                          break
+                      except Exception:
+                          pass
+
+              if decrypted_txt and ("youtube.com" in decrypted_txt or "# Netscape" in decrypted_txt):
+                  cookie_full_file.write_text(decrypted_txt, encoding="utf-8")
                   cleaned_lines = []
-                  for line in plain.splitlines():
+                  for line in decrypted_txt.splitlines():
                       if line.startswith("#") or not line.strip():
                           cleaned_lines.append(line)
                           continue
@@ -117,9 +144,10 @@ jobs:
                       cleaned_lines.append(line)
                   cookie_file.write_text("\n".join(cleaned_lines) + "\n", encoding="utf-8")
                   has_ck = True
-                  print("Cookies decrypted successfully.", flush=True)
-              except Exception as e:
-                  print("Cookie decrypt notice:", e, flush=True)
+                  print(f"Cookies decrypted successfully (Key status: {cookie_key_status}).", flush=True)
+              else:
+                  cookie_key_status = "decrypt_failed_mismatch"
+                  print("Cookie decryption failed! Key mismatch between extension and GitHub.", flush=True)
 
           target_urls = [target_url]
           if mode == "list" and urls_raw:
@@ -133,53 +161,155 @@ jobs:
           is_subs_only = (quality == "subs_only" or subtitles == "only")
           is_audio = quality.startswith("audio")
           height_map = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480, "360": 360}
-          # במצב best מאפשרים עד 4K (2160p) עם עדיפות ל-1080p ומעלה!
           req_h = height_map.get(quality, 2160)
 
-          def translate_srt_file_to_hebrew(src_srt: Path, dest_he_srt: Path) -> bool:
+          # ====================================================================
+          # מנוע ניקוי, איחוד כפילויות (Rollup) ותרגום כתוביות לעברית (ללא חזרות!)
+          # ====================================================================
+          def ts_to_ms(ts_str: str) -> int:
               try:
-                  raw_srt = src_srt.read_text(encoding="utf-8", errors="replace")
-                  blocks = re.split(r"\r?\n\r?\n", raw_srt.strip())
-                  texts_to_tr = []
-                  block_meta = []
-                  for b in blocks:
-                      lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
-                      if len(lines) >= 3 and "-->" in lines[1]:
-                          block_meta.append((lines[0], lines[1]))
-                          texts_to_tr.append(" ".join(lines[2:]))
-                      elif len(lines) >= 2 and "-->" in lines[0]:
-                          block_meta.append((str(len(block_meta) + 1), lines[0]))
-                          texts_to_tr.append(" ".join(lines[1:]))
+                  ts_str = ts_str.strip().replace(".", ",")
+                  hms, ms = ts_str.split(",")
+                  h, m, s = [int(x) for x in hms.split(":")]
+                  return ((h * 3600 + m * 60 + s) * 1000) + int(ms[:3].ljust(3, "0"))
+              except Exception:
+                  return 0
 
-                  if not texts_to_tr:
-                      return False
+          def ms_to_ts(ms: int) -> str:
+              ms = max(0, int(ms))
+              h = ms // 3600000
+              ms %= 3600000
+              m = ms // 60000
+              ms %= 60000
+              s = ms // 1000
+              rem = ms % 1000
+              return f"{h:02d}:{m:02d}:{s:02d},{rem:03d}"
 
-                  translated_texts = []
-                  chunk_sz = 30
-                  for i in range(0, len(texts_to_tr), chunk_sz):
-                      batch = texts_to_tr[i:i + chunk_sz]
-                      joined = "\n ||| \n".join(batch)
-                      tr_url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=iw&dt=t&q=" + urllib.parse.quote(joined)
-                      r = requests.get(tr_url, timeout=15)
+          def clean_and_deduplicate_srt(raw_srt_text: str):
+              blocks = re.split(r"\r?\n\r?\n+", raw_srt_text.strip())
+              parsed_cues = []
+              for b in blocks:
+                  lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
+                  if not lines:
+                      continue
+                  ts_line_idx = -1
+                  for idx, ln in enumerate(lines[:3]):
+                      if "-->" in ln:
+                          ts_line_idx = idx
+                          break
+                  if ts_line_idx < 0:
+                      continue
+                  ts_parts = lines[ts_line_idx].split("-->")
+                  if len(ts_parts) < 2:
+                      continue
+                  start_ms = ts_to_ms(ts_parts[0])
+                  end_ms = ts_to_ms(ts_parts[1].split()[0])
+                  # דילוג על כתוביות מעבר זעירות (כמו 10ms בכתוביות אוטומטיות של יוטיוב)
+                  if end_ms - start_ms < 140:
+                      continue
+
+                  text_lines = []
+                  for ln in lines[ts_line_idx + 1:]:
+                      cl = re.sub(r"<[^>]+>", "", ln)
+                      cl = re.sub(r"\{\\an\d+\}", "", cl).strip()
+                      if cl and not re.match(r"^(WEBVTT|Kind:|Language:)", cl, re.I):
+                          if not text_lines or text_lines[-1] != cl:
+                              text_lines.append(cl)
+                  if not text_lines:
+                      continue
+                  parsed_cues.append([start_ms, end_ms, text_lines])
+
+              # הסרת כפילויות מתגלגלות (Rollup): אם שורה כבר הופיעה בכתובית הקודמת, משאירים רק את השורה החדשה!
+              deduped = []
+              recent_lines = []
+              for start_ms, end_ms, t_lines in parsed_cues:
+                  new_lines = []
+                  for ln in t_lines:
+                      norm_ln = re.sub(r"\s+", " ", ln).strip().lower()
+                      if norm_ln not in recent_lines:
+                          new_lines.append(ln)
+                          recent_lines.append(norm_ln)
+                          if len(recent_lines) > 6:
+                              recent_lines.pop(0)
+                  if not new_lines:
+                      if deduped and start_ms - deduped[-1][1] <= 500:
+                          deduped[-1][1] = max(deduped[-1][1], end_ms)
+                      continue
+                  joined_text = " ".join(new_lines).strip()
+                  # אם הכתובית הנוכחית זהה לקודמת, רק מאריכים את זמן הסיום שלה
+                  if deduped and deduped[-1][2].lower() == joined_text.lower():
+                      deduped[-1][1] = max(deduped[-1][1], end_ms)
+                  else:
+                      deduped.append([start_ms, end_ms, joined_text])
+
+              return deduped
+
+          def build_srt_string(cues_list) -> str:
+              out = []
+              for idx, (s_ms, e_ms, txt) in enumerate(cues_list, 1):
+                  out.append(f"{idx}\n{ms_to_ts(s_ms)} --> {ms_to_ts(e_ms)}\n{txt}")
+              return "\n\n".join(out) + "\n"
+
+          def translate_cues_to_hebrew(cues_list):
+              if not cues_list:
+                  return None
+              # אם הטקסט כבר מכיל עברית, אין צורך לתרגם
+              sample_txt = " ".join(c[2] for c in cues_list[:15])
+              if sum(1 for ch in sample_txt if "\u0590" <= ch <= "\u05FF") >= 5:
+                  return cues_list
+
+              print(f"Translating {len(cues_list)} deduplicated subtitle cues to Hebrew via POST...", flush=True)
+              translated_cues = []
+              batch_size = 40
+              hebrew_chars_count = 0
+
+              for i in range(0, len(cues_list), batch_size):
+                  batch = cues_list[i:i + batch_size]
+                  src_lines = [c[2].replace("\n", " ").strip() for c in batch]
+                  payload_text = "\n".join(src_lines)
+                  tr_lines = None
+                  try:
+                      r = requests.post(
+                          "https://translate.googleapis.com/translate_a/single",
+                          params={"client": "gtx", "sl": "auto", "tl": "iw", "dt": "t"},
+                          data={"q": payload_text},
+                          timeout=20
+                      )
                       if r.status_code == 200:
                           tr_full = "".join(p[0] for p in r.json()[0] if p and p[0])
-                          parts = [x.strip() for x in tr_full.split("|||")]
-                          if len(parts) == len(batch):
-                              translated_texts.extend(parts)
-                          else:
-                              translated_texts.extend(batch)
-                      else:
-                          translated_texts.extend(batch)
+                          cand_lines = [ln.strip() for ln in tr_full.splitlines() if ln.strip()]
+                          if len(cand_lines) == len(src_lines):
+                              tr_lines = cand_lines
+                  except Exception as e:
+                      print("Batch POST translate notice:", e, flush=True)
 
-                  out_srt_blocks = []
-                  for (idx_str, ts_str), txt_str in zip(block_meta, translated_texts):
-                      out_srt_blocks.append(f"{idx_str}\n{ts_str}\n{txt_str}")
-                  if out_srt_blocks:
-                      dest_he_srt.write_text("\n\n".join(out_srt_blocks) + "\n", encoding="utf-8")
-                      return dest_he_srt.exists() and dest_he_srt.stat().st_size > 20
-              except Exception as e:
-                  print("Subtitle translation notice:", e, flush=True)
-              return False
+                  # אם כמות השורות במנה לא תאמה בגלל ירידת שורה, מתרגמים שורות בודדות במנה
+                  if not tr_lines:
+                      tr_lines = []
+                      for s_ln in src_lines:
+                          try:
+                              r_single = requests.post(
+                                  "https://translate.googleapis.com/translate_a/single",
+                                  params={"client": "gtx", "sl": "auto", "tl": "iw", "dt": "t"},
+                                  data={"q": s_ln},
+                                  timeout=10
+                              )
+                              if r_single.status_code == 200:
+                                  t_s = "".join(p[0] for p in r_single.json()[0] if p and p[0]).strip()
+                                  tr_lines.append(t_s or s_ln)
+                              else:
+                                  tr_lines.append(s_ln)
+                          except Exception:
+                              tr_lines.append(s_ln)
+
+                  for (s_ms, e_ms, _), t_txt in zip(batch, tr_lines):
+                      hebrew_chars_count += sum(1 for ch in t_txt if "\u0590" <= ch <= "\u05FF")
+                      translated_cues.append([s_ms, e_ms, t_txt])
+
+              if hebrew_chars_count > 0:
+                  print(f"Successfully translated subtitles to Hebrew ({len(translated_cues)} clean cues)!", flush=True)
+                  return translated_cues
+              return None
 
           def fetch_subtitles_for_url(video_url: str, base_stem: str = None):
               if subs_dir.exists():
@@ -202,6 +332,7 @@ jobs:
               if has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
+              # 1. ניסיון ראשון: כתוביות בעברית
               for sub_try in [
                   ["--write-subs", "--sub-langs", "he,iw"],
                   ["--write-auto-subs", "--sub-langs", "iw,he"],
@@ -209,8 +340,18 @@ jobs:
                   subprocess.run(base_sub_cmd + sub_try + [video_url], check=False)
                   he_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
                   if he_srts:
-                      return he_srts, "כתוביות בעברית (SRT)"
+                      src_f = he_srts[0]
+                      clean_cues = clean_and_deduplicate_srt(src_f.read_text(encoding="utf-8", errors="replace"))
+                      if clean_cues:
+                          clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_f.stem)
+                          final_he = subs_dir / f"{clean_stem}.he.srt"
+                          final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
+                          for p in he_srts:
+                              if p != final_he:
+                                  p.unlink(missing_ok=True)
+                          return [final_he], "כתוביות בעברית (SRT נקי)"
 
+              # 2. ניסיון שני: הורדת אנגלית, ניקוי שורות כפולות ותרגום לעברית (קובץ יחיד!)
               for en_try in [
                   ["--write-subs", "--sub-langs", "en-orig,en,en.*"],
                   ["--write-auto-subs", "--sub-langs", "en-orig,en,en.*"],
@@ -221,13 +362,23 @@ jobs:
                   if en_srts:
                       src_en = en_srts[0]
                       clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_en.stem)
-                      he_translated = subs_dir / f"{clean_stem}.he-translated.srt"
-                      result_files = [src_en]
-                      status_label = "כתוביות באנגלית (SRT)"
-                      if translate_srt_file_to_hebrew(src_en, he_translated):
-                          result_files.insert(0, he_translated)
-                          status_label = "כתוביות מתורגמות לעברית + מקור באנגלית (SRT)"
-                      return result_files, status_label
+                      clean_en_cues = clean_and_deduplicate_srt(src_en.read_text(encoding="utf-8", errors="replace"))
+                      # מוחקים את הקבצים הגולמיים הכפולים כדי שלעולם לא ירדו 2 קבצים באנגלית!
+                      for p in en_srts:
+                          p.unlink(missing_ok=True)
+
+                      if not clean_en_cues:
+                          continue
+
+                      he_cues = translate_cues_to_hebrew(clean_en_cues)
+                      if he_cues:
+                          final_he = subs_dir / f"{clean_stem}.he.srt"
+                          final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
+                          return [final_he], "כתוביות מתורגמות לעברית (SRT נקי)"
+                      else:
+                          final_en = subs_dir / f"{clean_stem}.en.srt"
+                          final_en.write_text(build_srt_string(clean_en_cues), encoding="utf-8")
+                          return [final_en], "כתוביות באנגלית (SRT נקי)"
 
               return [], "לא נמצאו כתוביות זמינות"
 
@@ -245,12 +396,10 @@ jobs:
                   raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור קישור זה")
               primary_file = files[0]
           else:
-              # מנוע בחירת הפורמטים המתוקן (v8.4):
-              # 1. כאשר מבקשים best/1080/1440/2160, הענפים הראשונים מחייבים height>=1080!
-              #    כך שלעולם לא ירד 720p (f136) כאשר קיים 1080p (כמו f137, f248 או f399)!
-              # 2. בתוך 1080p ומעלה, נעדיף תחילה זרמים שגודלם עד 1800M (כגון 1080p AV1/VP9 בסרטונים ארוכים או 1080p H264 בסרטונים רגילים),
-              #    ואם כולם גדולים מ-1800M, נוריד את ה-1080p המלא ונפצל אותו בבטחה לשני קובצי ZIP תקניים!
-              def get_fmt_args(strict_hd: bool, prefer_hls: bool = False):
+              # מנוע בחירת הפורמטים:
+              # משתמשים ב--format גמיש שתמיד כולל גיבוי (/bv*+ba/b) כך שלעולם לא תתרחש שגיאת "Requested format is not available"!
+              # ובמקביל משתמשים ב--format-sort (-S) כדי לתת עדיפות עליונה ל-1080p/4K!
+              def get_fmt_args(prefer_hls: bool = False):
                   if quality == "audio":
                       return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
                   if quality == "audio_m4a":
@@ -262,36 +411,20 @@ jobs:
                   if quality == "audio_wav":
                       return ["-f", "ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
 
-                  if prefer_hls:
-                      min_hls = 1080 if req_h >= 1080 else 720
-                      fmt = (
-                          f"bv*[protocol*=m3u8][height<={req_h}][height>={min_hls}]+ba/"
-                          f"b[protocol*=m3u8][height<={req_h}][height>={min_hls}]/"
-                          f"bv*[protocol*=m3u8][height<={req_h}][height>=720]+ba/"
-                          f"bv*[height<={req_h}][height>={min_hls}]+ba"
-                      )
-                      sort_str = f"res:{req_h},fps,vcodec:h264:vp9:av01,ext:mp4"
-                  elif strict_hd and req_h >= 1080:
-                      # קודם כל מחייבים 1080p ומעלה (ללא שום אפשרות ל-720p בענפים הראשונים!)
-                      fmt = (
-                          f"bv*[height<={req_h}][height>=1080][filesize<1800M]+ba[ext=m4a]/"
-                          f"bv*[height<={req_h}][height>=1080][filesize_approx<1800M]+ba[ext=m4a]/"
-                          f"bv*[height<={req_h}][height>=1080]+ba[ext=m4a]/"
-                          f"bv*[height<={req_h}][height>=1080]+ba/"
-                          f"bv*[height<={req_h}][height>=720]+ba[ext=m4a]/"
-                          f"bv*[height<={req_h}][height>=720]+ba/"
-                          f"b[height<={req_h}][height>=720]"
-                      )
-                      if quality in ("2160", "1440"):
-                          sort_str = f"res:{req_h},fps,vcodec:vp9:av01:h264,acodec:m4a:aac:opus,ext:mp4:m4a"
-                      else:
-                          sort_str = f"res:1080,fps,vcodec:h264:vp9:av01,acodec:m4a:aac:opus,ext:mp4:m4a"
-                  elif strict_hd and req_h >= 720:
-                      fmt = f"bv*[height<=720][height>=720]+ba[ext=m4a]/bv*[height<=720][height>=720]+ba/b[height<=720][height>=720]"
-                      sort_str = "res:720,fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
-                  else:
+                  if quality in ("2160", "1440", "1080", "720", "480", "360"):
                       fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
-                      sort_str = f"res:{req_h},fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
+                      sort_res = f"res:{req_h}"
+                  else:
+                      # במצב best: מעדיפים 1080p/4K עם גודל עד 1.8GB, אך תמיד נופלים בבטחה לכל פורמט וידאו+אודיו זמין בלי להיכשל!
+                      fmt = "bv*[height>=1080][filesize<1800M]+ba/bv*[height>=1080]+ba/bv*+ba/b"
+                      sort_res = "res:1080"
+
+                  if prefer_hls:
+                      sort_str = f"proto:m3u8_native,{sort_res},fps,vcodec:h264:vp9:av01,ext:mp4"
+                  elif quality in ("2160", "1440"):
+                      sort_str = f"{sort_res},fps,vcodec:vp9:av01:h264,acodec:m4a:aac:opus,ext:mp4:m4a"
+                  else:
+                      sort_str = f"{sort_res},fps,vcodec:h264:vp9:av01,acodec:m4a:aac:opus,ext:mp4:m4a"
 
                   return [
                       "-f", fmt,
@@ -317,13 +450,15 @@ jobs:
                       if v_s:
                           w = int(v_s.get("width") or 0)
                           h = int(v_s.get("height") or 0)
+                          max_dim = max(w, h)
+                          min_dim = min(w, h)
                           vc = (v_s.get("codec_name") or "mp4").upper()
-                          if h >= 2160 or w >= 3840: tag = f"4K UHD ({h}p)"
-                          elif h >= 1440 or w >= 2560: tag = f"2K QHD ({h}p)"
-                          elif h >= 1080 or w >= 1920: tag = f"Full HD ({h}p)"
-                          elif h >= 720 or w >= 1280: tag = f"HD ({h}p)"
-                          else: tag = f"{h}p"
-                          return h, dur, f"{tag} [{w}x{h} • {vc}]"
+                          if min_dim >= 2160 or max_dim >= 3840: tag = f"4K UHD ({min_dim}p)"
+                          elif min_dim >= 1440 or max_dim >= 2560: tag = f"2K QHD ({min_dim}p)"
+                          elif min_dim >= 1080 or max_dim >= 1920: tag = f"Full HD ({min_dim}p)"
+                          elif min_dim >= 720 or max_dim >= 1280: tag = f"HD ({min_dim}p)"
+                          else: tag = f"{min_dim}p"
+                          return max(h, min_dim), dur, f"{tag} [{w}x{h} • {vc}]"
                       if a_s:
                           ac = (a_s.get("codec_name") or fpath.suffix.lstrip(".")).upper()
                           br = int(a_s.get("bit_rate") or (data.get("format") or {}).get("bit_rate") or 0)
@@ -339,9 +474,8 @@ jobs:
                   "--no-warnings",
                   "--no-check-certificates",
                   "--js-runtimes", "deno",
-                  "--concurrent-fragments", "1",
-                  "--http-chunk-size", "10M",
                   "--socket-timeout", "25",
+                  "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
               ]
               if mode != "collection":
                   extra_args.append("--no-playlist")
@@ -358,21 +492,21 @@ jobs:
               if chapters and not is_audio:
                   extra_args += ["--split-chapters"]
 
-              pot_base = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
-              attempts = []
-              # כשיש עוגיות, מריצים קודם כל את הקליינטים המאומתים שפותחים 1080p/4K מיד ללא בזבוז זמן!
+              # מטריצת הניסיונות המלאה (משלבת גם ניסיונות בלי עוגיות וגם ניסיונות עם עוגיות ו-PO Token בנפרד!):
+              attempts = [
+                  # 1. ניסיונות ללא עוגיות (מהירים מאוד בסרטונים רגילים ועוקפים חסימת IP של עוגיות)
+                  ("No-Cookies: Android VR + TV Embedded Pure HD", ["--concurrent-fragments", "1", "--http-chunk-size", "10M", "--extractor-args", "youtube:player_client=android_vr,tv_embedded;player_skip=webpage"], True, False),
+                  ("No-Cookies: iOS + Web Safari HLS Stream", ["--concurrent-fragments", "4", "--impersonate", "safari", "--extractor-args", "youtube:player_client=ios,web_safari"], True, True),
+                  ("No-Cookies: MWeb + Web + Chrome Impersonate + PO-Token", ["--concurrent-fragments", "1", "--http-chunk-size", "10M", "--impersonate", "chrome", "--extractor-args", "youtube:player_client=mweb,web;fetch_pot=always"], True, False),
+              ]
               if has_ck:
                   attempts.extend([
-                      ("Authenticated Web + Chrome + Chunked 10M (1080p/4K)", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=web,mweb;fetch_pot=always;{pot_base}"], True, False),
-                      ("Authenticated TV Embedded / Creator HD", ["--cookies", str(cookie_file), "--extractor-args", f"youtube:player_client=tv_embedded,web_creator,tv;{pot_base}"], True, False),
-                      ("Authenticated Web Safari / iOS HLS Stream", ["--cookies", str(cookie_file), "--impersonate", "safari", "--extractor-args", f"youtube:player_client=web_safari;{pot_base}"], True, True),
+                      # 2. ניסיונות מאומתים עם עוגיות (עבור סרטונים שדורשים התחברות / בדיקת בוט)
+                      ("Auth Cookies: Web + MWeb + Chrome + Chunked 10M", ["--cookies", str(cookie_file), "--concurrent-fragments", "1", "--http-chunk-size", "10M", "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web,mweb;fetch_pot=always"], True, False),
+                      ("Auth Cookies: Web Safari HLS Stream", ["--cookies", str(cookie_file), "--concurrent-fragments", "4", "--impersonate", "safari", "--extractor-args", "youtube:player_client=web_safari;fetch_pot=always"], True, True),
+                      ("Auth Cookies: TV / Web Creator HD", ["--cookies", str(cookie_file), "--concurrent-fragments", "1", "--http-chunk-size", "10M", "--extractor-args", "youtube:player_client=tv,web_creator,tv_embedded;fetch_pot=always"], True, False),
+                      ("Auth Full Cookies + Geo-Bypass XFF", ["--cookies", str(cookie_full_file), "--xff", geo, "--concurrent-fragments", "1", "--http-chunk-size", "10M", "--extractor-args", "youtube:player_client=mweb,web,tv;fetch_pot=always"], False, False),
                   ])
-              attempts.extend([
-                  ("Android VR + TV Embedded Pure HD (Chunked)", ["--extractor-args", f"youtube:player_client=android_vr,tv_embedded;player_skip=webpage;{pot_base}"], True, False),
-                  ("MWeb + Web + Chrome Impersonate + PO-Token", ["--impersonate", "chrome", "--extractor-args", f"youtube:player_client=mweb,web;fetch_pot=always;{pot_base}"], True, False),
-                  ("iOS + Web Safari HLS Segmented HD", ["--impersonate", "safari", "--extractor-args", f"youtube:player_client=ios,web_safari;{pot_base}"], True, True),
-                  ("Universal Compatibility Fallback", (["--cookies", str(cookie_file)] if has_ck else []) + ["--extractor-args", f"youtube:player_client=android_vr,ios,mweb,web;{pot_base}"], False, False),
-              ])
 
               def get_stage_files():
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
@@ -380,6 +514,9 @@ jobs:
               for u_idx, cur_url in enumerate(target_urls, 1):
                   print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
                   downloaded_media_for_url = None
+                  for item in lowres_backup_dir.iterdir():
+                      item.unlink(missing_ok=True)
+
                   for label, args, strict_hd, prefer_hls in attempts:
                       if stage_dir.exists():
                           shutil.rmtree(stage_dir, ignore_errors=True)
@@ -389,13 +526,13 @@ jobs:
                           "python3", "-m", "yt_dlp",
                           "--ignore-config",
                           "--ffmpeg-location", "/usr/bin/ffmpeg",
-                          "--retries", "10",
-                          "--fragment-retries", "10",
+                          "--retries", "8",
+                          "--fragment-retries", "8",
                           "--file-access-retries", "5",
                           "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
-                      ] + args + get_fmt_args(strict_hd, prefer_hls) + extra_args + [cur_url]
+                      ] + args + get_fmt_args(prefer_hls) + extra_args + [cur_url]
 
-                      print(f"=== Trying: {label} (StrictHD={strict_hd}, HLS={prefer_hls}) ===", flush=True)
+                      print(f"=== Trying: {label} ===", flush=True)
                       subprocess.run(cmd, check=False)
 
                       s_files = get_stage_files()
@@ -404,9 +541,11 @@ jobs:
                           if not is_audio and strict_hd and req_h >= 720:
                               heights = [inspect_media_quality(m)[0] for m in media_files]
                               max_det_h = max(heights) if heights else 0
-                              print(f"Detected video height: {max_det_h}p", flush=True)
-                              if 0 < max_det_h <= 360:
-                                  print("Rejected 360p fallback! Advancing to next HD client...", flush=True)
+                              print(f"Detected video resolution metric: {max_det_h}p", flush=True)
+                              if 0 < max_det_h <= 480:
+                                  print(f"Got {max_det_h}p; saving as backup and checking next client for 1080p/720p...", flush=True)
+                                  for f in s_files:
+                                      shutil.copy2(str(f), str(lowres_backup_dir / f.name))
                                   continue
                           for f in s_files:
                               dest_f = out_dir / f.name
@@ -415,6 +554,16 @@ jobs:
                                   downloaded_media_for_url = dest_f
                           print(f"=== Success with: {label} ===", flush=True)
                           break
+
+                  # אם כל לקוחות ה-HD החזירו רק איכות נמוכה (כי הסרטון עצמו קיים רק באיכות נמוכה), נשתמש בגיבוי ששמרנו!
+                  if not downloaded_media_for_url:
+                      backup_files = [p for p in lowres_backup_dir.iterdir() if p.is_file() and p.stat().st_size > 0]
+                      if backup_files:
+                          print("Using saved compatibility fallback stream.", flush=True)
+                          for bf in backup_files:
+                              dest_f = out_dir / bf.name
+                              shutil.move(str(bf), str(dest_f))
+                              downloaded_media_for_url = dest_f
 
                   if downloaded_media_for_url and subtitles in ("embed", "files"):
                       srt_list, _ = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
@@ -427,7 +576,7 @@ jobs:
                               if subprocess.run(ff_sub, check=False).returncode == 0 and emb_tmp.exists():
                                   emb_tmp.replace(downloaded_media_for_url)
                               else:
-                                  shutil.copy2(str(best_srt), str(out_dir / f"{downloaded_media_for_url.stem}.srt"))
+                                  shutil.copy2(str(best_srt), str(out_dir / best_srt.name))
                           else:
                               for s_f in srt_list:
                                   shutil.copy2(str(s_f), str(out_dir / s_f.name))
@@ -462,21 +611,16 @@ jobs:
                           tmp_p.replace(fpath)
 
               media_out = [p for p in files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
-              # תיקון הבאג: primary_file נשאר תמיד קובץ הווידאו/אודיו ולא נדרס ע"י קובץ ה-SRT!
               primary_file = media_out[0] if media_out else files[0]
               detected_h, detected_dur, quality_report = inspect_media_quality(primary_file)
 
           file_mb = round(primary_file.stat().st_size / (1024 * 1024), 2)
           print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) <<<", flush=True)
 
-          # בניית ארכיוני ZIP_STORED תקניים ב-100% (ללא חציית מגבלת 1.85GB לארכיון בודד):
-          # אם סרטון 1080p/4K ארוך במיוחד שוקל מעל 1.85GB, מפצלים אותו ללא קידוד מחדש (-c copy) למספר חלקים תקניים
-          # ואורזים כל חלק ב-ZIP_STORED נפרד, כך שכולם יורדים במלואם באיכות 1080p ללא שום פגימת ZIP וללא עצירה ב-99%!
           MAX_SINGLE_ZIP_BYTES = 1850 * 1024 * 1024
           if primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
               num_parts = math.ceil(primary_file.stat().st_size / (1400 * 1024 * 1024))
               part_dur = max(60, int(math.ceil((detected_dur or 7200.0) / num_parts)))
-              print(f"Large 1080p/4K file ({file_mb}MB > 1850MB). Splitting losslessly into {num_parts} parts ({part_dur}s each)...", flush=True)
               seg_pattern = str(out_dir / f"{primary_file.stem} - Part%02d{primary_file.suffix}")
               seg_cmd = [
                   "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
@@ -613,10 +757,11 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 8.4,
+              "v": 9.0,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
+              "cookie_key_status": cookie_key_status,
               "cloud_temp_path": "/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name,
               "blobs": blob_shas
           }, ensure_ascii=False)
