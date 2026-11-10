@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v9.0 — מרכז הורדות ענן, כתוביות וסינון AI</title>
+  <title>YouTube Cloud Ultra v9.6 — מרכז הורדות ענן, כתוביות וסינון AI</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,26 +10,15 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v9.0</h1>
-        <div style="display:flex;align-items:center;gap:10px;margin-top:2px;flex-wrap:wrap;">
-          <div style="display:flex;align-items:center;gap:6px;">
-            <span class="dot" id="conn-dot"></span>
-            <span class="small muted" id="conn-text">בודק חיבור...</span>
-          </div>
-          <span class="small" id="ck-status-badge" style="padding:2px 8px;border-radius:6px;background:var(--surface-2);border:1px solid var(--border);">🔐 מפתח עוגיות קבוע פעיל</span>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v9.6</h1>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
+          <span class="dot" id="conn-dot"></span>
+          <span class="small muted" id="conn-text">בודק חיבור...</span>
         </div>
       </div>
-      <button class="btn" id="copyCkBtn" type="button" title="העתק את מפתח העוגיות הקבוע (COOKIE_KEY) עבור GitHub Secrets">🔑 העתק COOKIE_KEY</button>
       <button class="btn" id="cleanCloudBtn" type="button" title="מחק מיד את כל ה-Releases והריצות ב-GitHub">🧹 ניקוי ענן</button>
       <button class="btn" id="settingsBtn" type="button">⚙ הגדרות</button>
     </header>
-
-    <div id="ckWarningBox" class="card" style="display:none;border-color:var(--warn);background:rgba(245,158,11,0.12);padding:12px 16px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div class="small" id="ckWarningText" style="font-weight:600;color:#fbbf24;"></div>
-        <button class="btn small" id="copyCkWarnBtn" type="button">📋 העתק מפתח COOKIE_KEY ללוח</button>
-      </div>
-    </div>
 
     <section class="card">
       <label class="small muted" style="font-weight:600;">קישור למדיה, אוסף או רשימת קישורים (מופרדים ברווח/שורה):</label>
@@ -156,7 +145,7 @@
 
       <div>
         <label class="small muted" style="font-weight:600;">🤖 הנחיית סינון ונקיות למודל הבינה המלאכותית בענן (מה לכלול ומה לפסול):</label>
-        <input id="recFilterPromptInput" class="input" value="הבא רק תוצאות מקצועיות שעוסקות ישירות בנושא המבוקש בלבד, ללא דמויות אחרות, ללא סרטים וללא תכנים שאינם מתאימים למגזר שומר תורה ומצוות"/>
+        <input id="recFilterPromptInput" class="input" value="הבא רק תוצאות מקצועיות שעוסקות ישירות בנושא המבוקש בלבד, ללא דמויות אחרות, ללא תכנים זרים וללא תכנים שאינם מתאימים למגזר שומר תורה ומצוות"/>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
