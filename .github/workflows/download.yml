@@ -62,7 +62,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           python3 - << 'EOF'
-          import os, sys, re, json, time, math, hashlib, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
+          import os, sys, re, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -100,7 +100,6 @@ jobs:
           speed_val = str(opts.get("speed") or "1").strip()
           email_opt = str(opts.get("email") or "").strip()
           send_email_flag = bool(opts.get("send_email")) or bool(email_opt)
-          client_ck_hash = str(opts.get("ck_hash") or "").strip()
 
           out_dir = Path("/tmp/out")
           pkg_dir = Path("/tmp/pkg")
@@ -112,36 +111,24 @@ jobs:
           lowres_backup_dir.mkdir(parents=True, exist_ok=True)
           cookie_file = Path("/tmp/cookies_full.txt")
 
-          secret_hash = hashlib.sha256(secret_key_env.encode("utf-8")).hexdigest()[:12] if len(secret_key_env) == 64 else ""
-          cookie_key_status = "ok"
-          if not secret_key_env:
-              cookie_key_status = "missing_in_github_secrets"
-          elif client_ck_hash and secret_hash != client_ck_hash:
-              cookie_key_status = "mismatch_with_github_secrets"
-
           has_ck = False
           if cookies_enc:
               raw_enc = base64.b64decode(cookies_enc)
               decrypted_txt = None
-              for candidate_name, candidate_hex in [("secret", secret_key_env), ("fallback", fallback_key_env)]:
+              # מפענח אוטומטית עם המפתח הקבוע או הסוד ב-GitHub ללא שום הודעות שגיאה או אי-התאמה!
+              for candidate_hex in (fallback_key_env, secret_key_env):
                   if len(candidate_hex) == 64:
                       try:
                           plain_bytes = AESGCM(bytes.fromhex(candidate_hex)).decrypt(raw_enc[:12], raw_enc[12:], None)
                           decrypted_txt = plain_bytes.decode("utf-8", errors="replace")
-                          if candidate_name == "fallback" and cookie_key_status == "ok":
-                              cookie_key_status = "mismatch_with_github_secrets"
                           break
                       except Exception:
                           pass
 
               if decrypted_txt and ("youtube.com" in decrypted_txt or "# Netscape" in decrypted_txt):
-                  # שומרים את כל העוגיות במלואן (כולל VISITOR_INFO1_LIVE ו-__Secure-YEC) כפי שהוכח בלוג שעובד ללא חסימה!
                   cookie_file.write_text(decrypted_txt, encoding="utf-8")
                   has_ck = True
-                  print(f"Full cookies decrypted successfully (Key status: {cookie_key_status}).", flush=True)
-              else:
-                  cookie_key_status = "decrypt_failed_mismatch"
-                  print("Cookie decryption failed! Key mismatch between extension and GitHub.", flush=True)
+                  print("Full cookies decrypted successfully.", flush=True)
 
           target_urls = [target_url]
           if mode == "list" and urls_raw:
@@ -245,7 +232,6 @@ jobs:
               if sum(1 for ch in sample_txt if "\u0590" <= ch <= "\u05FF") >= 5:
                   return cues_list
 
-              print(f"Translating {len(cues_list)} deduplicated subtitle cues to Hebrew via POST...", flush=True)
               translated_cues = []
               batch_size = 40
               hebrew_chars_count = 0
@@ -267,8 +253,8 @@ jobs:
                           cand_lines = [ln.strip() for ln in tr_full.splitlines() if ln.strip()]
                           if len(cand_lines) == len(src_lines):
                               tr_lines = cand_lines
-                  except Exception as e:
-                      print("Batch POST translate notice:", e, flush=True)
+                  except Exception:
+                      pass
 
                   if not tr_lines:
                       tr_lines = []
@@ -395,7 +381,6 @@ jobs:
                       fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
                       sort_res = f"res:{req_h}"
                   else:
-                      # במצב best: מחפשים קודם 1080p/4K, אם אין אז 720p, ורק בסוף כל איכות אחרת
                       fmt = "bv*[height>=1080][filesize<1800M]+ba/bv*[height>=1080]+ba/bv*[height>=720]+ba/bv*+ba/b"
                       sort_res = "res:1080"
 
@@ -448,7 +433,6 @@ jobs:
                       pass
                   return 0, 0.0, "תקין"
 
-              # השהיות מובנות בין קריאות API ובין הורדות כדי שיוטיוב לא יחסום או ישנמך איכות!
               extra_args = [
                   "--force-ipv4",
                   "--no-mtime",
@@ -478,38 +462,32 @@ jobs:
               pot_ep = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
               attempts = []
 
-              # כשיש עוגיות, מתחילים מיד עם העוגיות המלאות וכל קליינט בנפרד (ללא שריפת IP בניסיונות ללא עוגיות)!
               if has_ck:
                   attempts.extend([
-                      # 1. Desktop Web עם עוגיות מלאות + XFF + PO Token + Chunked 10M
                       ("Auth Full Cookies: Desktop Web + XFF + PO-Token (1080p/4K)", [
                           "--cookies", str(cookie_file), "--xff", geo,
                           "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
                           "--extractor-args", f"youtube:player_client=web;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False),
-                      # 2. Web Safari עם עוגיות מלאות + XFF (זרם HLS/MP4 עמיד בפני 403)
                       ("Auth Full Cookies: Web Safari + XFF + PO-Token (1080p/4K)", [
                           "--cookies", str(cookie_file), "--xff", geo,
                           "--impersonate", "safari", "--concurrent-fragments", "3",
                           "--extractor-args", f"youtube:player_client=web_safari;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, True),
-                      # 3. TV Client עם עוגיות מלאות + XFF (פותח 1080p בסרטונים חסומים ב-web)
                       ("Auth Full Cookies: Smart TV Client + XFF + PO-Token (1080p/4K)", [
                           "--cookies", str(cookie_file), "--xff", geo,
                           "--concurrent-fragments", "1", "--http-chunk-size", "10M",
                           "--extractor-args", f"youtube:player_client=tv;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False),
-                      # 4. Desktop Web ללא XFF (למקרה ששרת הווידאו בודק התאמת IP של ה-Runner בארה"ב)
                       ("Auth Full Cookies: Desktop Web Direct IP + PO-Token", [
                           "--cookies", str(cookie_file),
                           "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
                           "--extractor-args", f"youtube:player_client=web,tv_embedded;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False),
-                      # 5. MWeb עם עוגיות מלאות + XFF (השלב שעבד בלוג שלך ב-100%, כעת עם בדיקת רזולוציה!)
                       ("Auth Full Cookies: MWeb + Geo-Bypass XFF", [
                           "--cookies", str(cookie_file), "--xff", geo,
                           "--concurrent-fragments", "1", "--http-chunk-size", "10M",
@@ -518,7 +496,6 @@ jobs:
                       ], True, False),
                   ])
 
-              # שלבים ללא עוגיות (עבור סרטונים פתוחים או כגיבוי נוסף)
               attempts.extend([
                   ("No-Cookies: Android VR + TV Embedded Direct HD", [
                       "--concurrent-fragments", "1", "--http-chunk-size", "10M",
@@ -790,11 +767,10 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 9.5,
+              "v": 9.6,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
-              "cookie_key_status": cookie_key_status,
               "cloud_temp_path": "/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name,
               "blobs": blob_shas
           }, ensure_ascii=False)
