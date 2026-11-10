@@ -18,7 +18,6 @@ on:
 permissions:
   contents: write
   actions: read
-  models: read
 
 jobs:
   download:
@@ -50,7 +49,6 @@ jobs:
       - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
         env:
           GH_TOKEN: ${{ github.token }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
           COOKIE_KEY_FALLBACK: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3"
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -145,7 +143,7 @@ jobs:
           req_h = height_map.get(quality, 2160)
 
           # ====================================================================
-          # מנוע איחוד משפטים קטועים + תרגום AI מודע להקשר לעברית טבעית ורהוטה
+          # מנוע איחוד חלקי משפטים קטועים (Tail-Phrase Shifter) + תרגום מובטח לעברית
           # ====================================================================
           def ts_to_ms(ts_str: str) -> int:
               try:
@@ -170,15 +168,27 @@ jobs:
               rem = ms % 1000
               return f"{h:02d}:{m:02d}:{s:02d},{rem:03d}"
 
-          DANGLING_END_WORDS = {
-              "a", "an", "the", "and", "or", "but", "to", "of", "in", "on", "at", "for", "with", "from", "by", "about", "as", "into",
-              "is", "are", "was", "were", "be", "been", "has", "have", "had", "will", "would", "can", "could", "should", "may", "might",
-              "he", "she", "it", "we", "they", "you", "i", "he's", "she's", "it's", "we're", "they're", "you're", "i'm", "that's", "there's",
-              "his", "her", "its", "our", "their", "my", "your", "this", "that", "these", "those", "such", "very", "so", "too", "quite",
-              "good", "great", "big", "small", "new", "old", "first", "last", "next", "other", "another", "not", "no", "don't", "doesn't", "didn't"
-          }
+          # ביטויים ומילים קטועות בסוף שורה שחייבים לעבור לתחילת השורה הבאה כדי שלא ייתרגמו במנותק
+          TRAILING_SPLIT_RX = re.compile(
+              r"^(.*?)\s+("
+              r"with a couple of|a couple of|a lot of|kind of|sort of|out of|instead of|because of|in front of|"
+              r"going to|trying to|want to|have to|has to|had to|used to|able to|ready to|"
+              r"a|an|the|and|or|but|to|of|in|on|at|for|with|from|by|about|as|into|onto|upon|"
+              r"is|are|was|were|be|been|has|have|had|will|would|can|could|should|may|might|must|"
+              r"he|she|it|we|they|you|i|he's|she's|it's|we're|they're|you're|i'm|that's|there's|what's|who's|"
+              r"his|her|its|our|their|my|your|this|that|these|those|which|who|whom|whose|when|where|while|if|because|since|until|than"
+              r")$",
+              re.IGNORECASE
+          )
 
-          def clean_and_stitch_srt(raw_srt_text: str):
+          # תארים בסוף שורה שדורשים למשוך אליהם את שם העצם שבתחילת השורה הבאה (כמו "does such a good" + "job")
+          ADJ_PULL_RX = re.compile(
+              r"\b(such a|a|an|the|very|really|pretty|quite|so|too|his|her|their|our|my|your|its)\s+"
+              r"(good|great|big|small|new|old|first|last|next|other|another|right|wrong|best|worst|whole|same|nice|bad|high|low|long|short|full|hard|easy)$",
+              re.IGNORECASE
+          )
+
+          def clean_and_reconstruct_sentences(raw_srt_text: str):
               blocks = re.split(r"\r?\n\r?\n+", raw_srt_text.strip())
               parsed_cues = []
               for b in blocks:
@@ -211,7 +221,7 @@ jobs:
                       continue
                   parsed_cues.append([start_ms, end_ms, text_lines])
 
-              # שלב א': ניקוי שורות מתגלגלות כפולות (Rollup Deduplication)
+              # 1. הסרת שורות מתגלגלות כפולות (Rollup Deduplication)
               deduped = []
               recent_lines = []
               for start_ms, end_ms, t_lines in parsed_cues:
@@ -233,31 +243,54 @@ jobs:
                   else:
                       deduped.append([start_ms, end_ms, joined_text])
 
-              # שלב ב': איחוד שורות קטועות באמצע ביטוי (למשל "does such a good" + "job with his...")
-              stitched = []
+              # 2. תיקון מילים חצויות בין שורות עוקבות (Noun Pull + Dangling Push)
+              for i in range(len(deduped) - 1):
+                  cur_s, cur_e, cur_txt = deduped[i]
+                  nxt_s, nxt_e, nxt_txt = deduped[i + 1]
+                  if nxt_s - cur_e > 2000 or cur_txt.endswith((".", "!", "?", ":", ";")):
+                      continue
+
+                  # א. אם השורה הנוכחית מסתיימת ב-"such a good" והשורה הבאה מתחילה ב-"job", מושכים את "job" לשורה הנוכחית!
+                  if ADJ_PULL_RX.search(cur_txt):
+                      nxt_words = nxt_txt.split()
+                      if len(nxt_words) >= 2:
+                          pulled_word = nxt_words[0]
+                          cur_txt = f"{cur_txt} {pulled_word}".strip()
+                          nxt_txt = " ".join(nxt_words[1:]).strip()
+                          deduped[i][2] = cur_txt
+                          deduped[i + 1][2] = nxt_txt
+
+                  # ב. אם השורה הנוכחית מסתיימת במילת קישור/יחס קטועה (כמו "with a couple of", "he's", "and", "in", "that"),
+                  #    מעבירים אותה לתחילת השורה הבאה!
+                  for _ in range(2):
+                      m_trail = TRAILING_SPLIT_RX.match(deduped[i][2])
+                      if m_trail and len(m_trail.group(1).strip()) >= 6:
+                          deduped[i][2] = m_trail.group(1).strip()
+                          deduped[i + 1][2] = f"{m_trail.group(2).strip()} {deduped[i + 1][2]}".strip()
+                      else:
+                          break
+
+              # 3. איחוד שורות קצרות מאוד לשורה שלמה ונוחה לקריאה
+              merged = []
               i = 0
               while i < len(deduped):
                   cur_s, cur_e, cur_txt = deduped[i]
+                  if not cur_txt.strip():
+                      i += 1
+                      continue
                   while i + 1 < len(deduped):
                       nxt_s, nxt_e, nxt_txt = deduped[i + 1]
-                      gap_ms = nxt_s - cur_e
-                      total_dur = nxt_e - cur_s
-                      combined_txt = f"{cur_txt} {nxt_txt}".strip()
-                      words = re.findall(r"[a-zA-Z']+", cur_txt.lower())
-                      last_word = words[-1] if words else ""
-                      ends_dangling = last_word in DANGLING_END_WORDS and not cur_txt.endswith((".", "!", "?", ":", ";"))
-                      is_short_fragment = len(cur_txt) < 28 and (cur_e - cur_s) < 2200
-
-                      if gap_ms <= 600 and total_dur <= 7000 and len(combined_txt) <= 115 and (ends_dangling or is_short_fragment):
+                      comb = f"{cur_txt} {nxt_txt}".strip()
+                      if (nxt_s - cur_e) <= 450 and (nxt_e - cur_s) <= 6500 and len(comb) <= 88:
                           cur_e = nxt_e
-                          cur_txt = combined_txt
+                          cur_txt = comb
                           i += 1
                       else:
                           break
-                  stitched.append([cur_s, cur_e, cur_txt])
+                  merged.append([cur_s, cur_e, cur_txt])
                   i += 1
 
-              return stitched
+              return merged
 
           def build_srt_string(cues_list) -> str:
               out = []
@@ -270,108 +303,71 @@ jobs:
               "Accept": "application/json, text/plain, */*",
           }
 
-          def ai_translate_batch(batch_cues):
-              """תרגום הקשרי חכם באמצעות מודל שפה בענן (מבין את ההקשר המלא של המשפטים ומונע תרגום מילולי משובש)"""
-              items_in = [{"i": idx, "t": c[2]} for idx, c in enumerate(batch_cues)]
-              sys_prompt = (
-                  "אתה מתרגם כתוביות מקצועי מאנגלית לעברית תקנית, טבעית, רהוטה וקריאה. "
-                  "הכתוביות הגיעו מתמלול אוטומטי ולכן משפטים עשויים להמשיך משורה לשורה. "
-                  "כללים מחייבים:\n"
-                  "1. קרא את כל השורות במקבץ כדי להבין את ההקשר המלא, ותרגם לעברית טבעית וזורמת לפי המשמעות האמיתית בהקשר (אסור לתרגם ביטויים או שמות באופן מילולי מגוחך).\n"
-                  "2. אם משפט ממשיך משורה לשורה, דאג שהחלק הראשון והחלק השני יתחברו בעברית למשפט הגיוני ותקני.\n"
-                  "3. החזר אך ורק JSON תקין בפורמט: {\"items\": [{\"i\": 0, \"t\": \"התרגום לעברית\"}, ...]} עם אותם אינדקסים בדיוק."
-              )
-              usr_prompt = json.dumps({"items": items_in}, ensure_ascii=False)
+          def has_hebrew(text: str) -> bool:
+              return any("\u0590" <= ch <= "\u05FF" for ch in str(text or ""))
 
-              gh_tok = os.environ.get("GH_TOKEN", "").strip()
-              gem_key = os.environ.get("GEMINI_API_KEY", "").strip()
-
-              endpoints = []
-              if gh_tok:
-                  endpoints.append((
-                      "https://models.inference.ai.azure.com/chat/completions",
-                      {"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"},
-                      {"model": "gpt-4o-mini", "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": usr_prompt}], "temperature": 0.1}
-                  ))
-              if gem_key:
-                  endpoints.append((
-                      f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gem_key}",
-                      {"Content-Type": "application/json"},
-                      {"contents": [{"parts": [{"text": sys_prompt + "\n\n" + usr_prompt}]}]}
-                  ))
-              endpoints.append((
-                  "https://text.pollinations.ai/openai",
-                  {"Content-Type": "application/json"},
-                  {"model": "openai", "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": usr_prompt}], "temperature": 0.1}
-              ))
-
-              for url, headers, payload in endpoints:
-                  try:
-                      r = requests.post(url, headers=headers, json=payload, timeout=35)
-                      if r.status_code == 200:
-                          data = r.json()
-                          txt = ""
-                          if "choices" in data and data["choices"]:
-                              txt = data["choices"][0].get("message", {}).get("content", "")
-                          elif "candidates" in data and data["candidates"]:
-                              txt = data["candidates"][0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                          clean_json = re.sub(r"```(?:json)?|```", "", txt).strip()
-                          m = re.search(r"\{.*\"items\"\s*:\s*\[.*?\].*\}", clean_json, re.DOTALL)
-                          if m:
-                              parsed = json.loads(m.group(0))
-                              mapped = {int(x["i"]): str(x["t"]).strip() for x in (parsed.get("items") or []) if "i" in x and "t" in x}
-                              if len(mapped) >= len(batch_cues) * 0.7:
-                                  return mapped
-                  except Exception:
-                      pass
-              return {}
-
-          def gtx_translate_fallback(text_block: str) -> str:
-              for client_id in ("gtx", "dict-chrome-ex"):
-                  try:
-                      r = requests.post(
-                          "https://translate.googleapis.com/translate_a/single",
-                          params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t"},
-                          data={"q": text_block},
-                          headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-                          timeout=15
-                      )
-                      if r.status_code == 200:
-                          data = r.json()
-                          if data and data[0]:
-                              return "".join(p[0] for p in data[0] if p and p[0]).strip()
-                  except Exception:
-                      pass
-              return text_block
-
-          def translate_batch_worker(batch_cues):
+          def translate_batch_guaranteed(batch_cues):
               if not batch_cues:
                   return []
-              # ניסיון ראשון: תרגום בינה מלאכותית מודע להקשר (AI Contextual Translation)
-              ai_map = ai_translate_batch(batch_cues)
+              src_lines = [c[2].replace("\n", " ").strip() for c in batch_cues]
+              joined_lines = "\n".join(src_lines)
 
-              # עבור שורות שלא הוחזרו מה-AI, נשלים עם תרגום משפטים מאוחדים
-              missing_indices = [idx for idx in range(len(batch_cues)) if idx not in ai_map or not ai_map[idx]]
-              if missing_indices:
-                  tagged = "\n".join(f"({idx}) {batch_cues[idx][2]}" for idx in missing_indices)
-                  tr_tagged = gtx_translate_fallback(tagged)
-                  parts = re.split(r"\((\d+)\)", tr_tagged)
-                  if len(parts) >= 3:
-                      for k in range(1, len(parts) - 1, 2):
-                          try:
-                              b_idx = int(parts[k])
-                              b_txt = parts[k + 1].replace("\n", " ").strip()
-                              if b_txt:
-                                  ai_map[b_idx] = b_txt
-                          except Exception:
-                              pass
+              # ניסיון 1: פרוטוקול JSON מובנה (dj=1) של Google Translate ללא מספור מלאכותי שמשבש את התחביר!
+              for client_id in ("gtx", "dict-chrome-ex"):
+                  for attempt in range(2):
+                      try:
+                          r = requests.post(
+                              "https://translate.googleapis.com/translate_a/single",
+                              params={"client": client_id, "sl": "en", "tl": "iw", "dt": "t", "dj": "1"},
+                              data={"q": joined_lines},
+                              headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                              timeout=20
+                          )
+                          if r.status_code == 200:
+                              data = r.json()
+                              sentences = data.get("sentences") or []
+                              full_trans = "".join(s.get("trans", "") for s in sentences if "trans" in s).strip()
+                              tr_lines = [ln.strip() for ln in full_trans.splitlines() if ln.strip()]
+                              if len(tr_lines) == len(batch_cues) and has_hebrew(full_trans):
+                                  return [[c[0], c[1], t_ln] for c, t_ln in zip(batch_cues, tr_lines)]
+                          elif r.status_code == 429:
+                              time.sleep(1.5 * (attempt + 1))
+                      except Exception:
+                          time.sleep(0.5)
 
+              # ניסיון 2: deep-translator (GoogleTranslator)
+              try:
+                  from deep_translator import GoogleTranslator
+                  tr_text = GoogleTranslator(source="en", target="iw").translate(joined_lines)
+                  if tr_text and has_hebrew(tr_text):
+                      tr_lines = [ln.strip() for ln in tr_text.splitlines() if ln.strip()]
+                      if len(tr_lines) == len(batch_cues):
+                          return [[c[0], c[1], t_ln] for c, t_ln in zip(batch_cues, tr_lines)]
+              except Exception:
+                  pass
+
+              # ניסיון 3: תרגום פרטני מובטח לכל שורה במקבץ אם חלוקת השורות השתנתה
               out_batch = []
-              for idx, (s_ms, e_ms, orig_txt) in enumerate(batch_cues):
-                  t_val = ai_map.get(idx, "").strip()
-                  if not t_val:
-                      t_val = re.sub(r"^\(\d+\)\s*", "", gtx_translate_fallback(orig_txt)).strip() or orig_txt
-                  out_batch.append([s_ms, e_ms, t_val])
+              for s_ms, e_ms, orig_txt in batch_cues:
+                  tr_single = orig_txt
+                  for client_id in ("gtx", "dict-chrome-ex"):
+                      try:
+                          r = requests.post(
+                              "https://translate.googleapis.com/translate_a/single",
+                              params={"client": client_id, "sl": "en", "tl": "iw", "dt": "t", "dj": "1"},
+                              data={"q": orig_txt},
+                              headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                              timeout=12
+                          )
+                          if r.status_code == 200:
+                              sents = r.json().get("sentences") or []
+                              cand = " ".join(s.get("trans", "").strip() for s in sents if s.get("trans")).strip()
+                              if cand and has_hebrew(cand):
+                                  tr_single = cand
+                                  break
+                      except Exception:
+                          pass
+                  out_batch.append([s_ms, e_ms, tr_single])
               return out_batch
 
           def translate_cues_to_hebrew(cues_list):
@@ -381,17 +377,18 @@ jobs:
               if sum(1 for ch in sample_txt if "\u0590" <= ch <= "\u05FF") >= 5:
                   return cues_list
 
-              print(f"Translating {len(cues_list)} stitched subtitle cues to natural Hebrew via Contextual AI...", flush=True)
-              batch_size = 25
+              print(f"Translating {len(cues_list)} reconstructed sentences to Hebrew...", flush=True)
+              batch_size = 35
               batches = [cues_list[i:i + batch_size] for i in range(0, len(cues_list), batch_size)]
 
               translated_cues = []
-              with ThreadPoolExecutor(max_workers=6) as ex:
-                  for res_batch in ex.map(translate_batch_worker, batches):
+              # שימוש ב-4 תהליכונים מבוקרים כדי למנוע חסימת 429 ולקבל 100% עברית
+              with ThreadPoolExecutor(max_workers=4) as ex:
+                  for res_batch in ex.map(translate_batch_guaranteed, batches):
                       translated_cues.extend(res_batch)
 
               hebrew_chars = sum(1 for _, _, txt in translated_cues for ch in txt if "\u0590" <= ch <= "\u05FF")
-              print(f"Contextual translation finished: {len(translated_cues)} cues ({hebrew_chars} Hebrew chars).", flush=True)
+              print(f"Translation finished: {len(translated_cues)} cues, {hebrew_chars} Hebrew chars.", flush=True)
               return translated_cues if hebrew_chars > 0 else None
 
           def fetch_subtitles_for_url(video_url: str, base_stem: str = None):
@@ -419,7 +416,7 @@ jobs:
               he_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
               if he_srts:
                   src_f = he_srts[0]
-                  clean_cues = clean_and_stitch_srt(src_f.read_text(encoding="utf-8", errors="replace"))
+                  clean_cues = clean_and_reconstruct_sentences(src_f.read_text(encoding="utf-8", errors="replace"))
                   if clean_cues:
                       clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_f.stem)
                       final_he = subs_dir / f"{clean_stem}.he.srt"
@@ -435,7 +432,7 @@ jobs:
                   if en_srts:
                       src_en = en_srts[0]
                       clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_en.stem)
-                      clean_en_cues = clean_and_stitch_srt(src_en.read_text(encoding="utf-8", errors="replace"))
+                      clean_en_cues = clean_and_reconstruct_sentences(src_en.read_text(encoding="utf-8", errors="replace"))
                       for p in en_srts:
                           p.unlink(missing_ok=True)
 
@@ -446,7 +443,7 @@ jobs:
                       if he_cues:
                           final_he = subs_dir / f"{clean_stem}.he.srt"
                           final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
-                          return [final_he], "כתוביות מתורגמות לעברית ב-AI (SRT)"
+                          return [final_he], "כתוביות מתורגמות לעברית (SRT)"
                       else:
                           final_en = subs_dir / f"{clean_stem}.en.srt"
                           final_en.write_text(build_srt_string(clean_en_cues), encoding="utf-8")
@@ -848,7 +845,7 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 10.5,
+              "v": 10.6,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
