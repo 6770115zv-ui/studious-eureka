@@ -362,9 +362,7 @@ jobs:
                   raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור קישור זה")
               primary_file = files[0]
           else:
-              # מנוע בחירת הפורמטים ב-v9.7:
-              # כאשר strict_hd=True (בשלבים הראשונים), אנו דורשים אך ורק height>=720 (עם עדיפות ל-1080p/4K)!
-              # כך אם קליינט מסוים נותן רק 480p (כמו f135), התוכנה מדלגת עליו תוך שנייה אחת (בלי להוריד 750MB של 480p!) ועוברת לקליינט הבא שמספק 1080p!
+              # מניעת הוספת ערוץ bin_data (פרקים משובשים שמנפחים את ציר הזמן ב-VLC ב-5 עד 10 דקות ריקות בסוף!)
               def get_fmt_args(strict_hd: bool, prefer_hls: bool = False):
                   if quality == "audio":
                       return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
@@ -387,7 +385,6 @@ jobs:
                           )
                           sort_res = f"res:{req_h}"
                       else:
-                          # מצב best בשלבי HD: מחייב 1080p ומעלה, או לפחות 720p HD (אוסר לחלוטין הורדת 480p/360p בשלבי ה-HD!)
                           fmt = (
                               "bv*[height>=1080][filesize<1800M]+ba/"
                               "bv*[height>=1080]+ba/"
@@ -396,7 +393,6 @@ jobs:
                           )
                           sort_res = "res:1080"
                   else:
-                      # שלב גיבוי אחרון בלבד (אם לסרטון עצמו בשרתי המקור אין בכלל 720p/1080p)
                       fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
                       sort_res = f"res:{req_h}"
 
@@ -411,8 +407,8 @@ jobs:
                       "-f", fmt,
                       "-S", sort_str,
                       "--merge-output-format", "mp4",
-                      "--postprocessor-args", "Merger+ffmpeg:-movflags +faststart",
-                      "--embed-metadata"
+                      "--no-embed-chapters",
+                      "--postprocessor-args", "Merger+ffmpeg:-dn -map_chapters -1 -movflags +faststart",
                   ]
 
               def inspect_media_quality(fpath: Path):
@@ -477,21 +473,17 @@ jobs:
 
               if has_ck:
                   attempts.extend([
-                      # 1. שרשרת ברירת המחדל העדכנית של yt-dlp 2026 (web_embedded + tv_samsung + web) ללא דריסת player_client!
-                      #    זהו בדיוק השלב שפתח בלוג שלך את פורמט 399+251 (1080p Full HD)!
                       ("Auth Native 2026 Clients (web_embedded + tv_samsung) + PO-Token", [
                           "--cookies", str(cookie_file),
                           "--concurrent-fragments", "3",
                           "--extractor-args", pot_ep
                       ], True, False),
-                      # 2. פנייה מפורשת ללקוחות tv_samsung, web_embedded ו-web_creator עם PO-Token
                       ("Auth TV Samsung / Web Embedded / Creator HD", [
                           "--cookies", str(cookie_file),
                           "--concurrent-fragments", "2",
                           "--extractor-args", "youtube:player_client=tv_samsung,web_embedded,web_creator;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False),
-                      # 3. לקוחות MWeb + Web Safari עם XFF ו-PO-Token (עבור סרטונים חסומים אזורית ב-HD)
                       ("Auth MWeb / Safari HD + Geo-Bypass XFF", [
                           "--cookies", str(cookie_file), "--xff", geo,
                           "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
@@ -500,7 +492,6 @@ jobs:
                       ], True, False),
                   ])
 
-              # 4. ניסיון ללא עוגיות (עבור tv_embedded ו-android_vr שמדולגים אוטומטית כשיש עוגיות)
               attempts.append((
                   "No-Cookies: Android VR + TV Embedded + iOS Direct HD", [
                       "--concurrent-fragments", "2", "--http-chunk-size", "10M",
@@ -509,7 +500,6 @@ jobs:
                   ], True, False
               ))
 
-              # 5. שלב גיבוי אוניברסלי אחרון (מופעל אך ורק אם לסרטון עצמו ביוטיוב אין בכלל 720p/1080p באף קליינט!)
               attempts.append((
                   "Universal Fallback (When Source Video Has Only <=480p)",
                   (["--cookies", str(cookie_file), "--xff", geo] if has_ck else []) + [
@@ -566,7 +556,7 @@ jobs:
                           if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 400 * 1024 * 1024:
                               emb_tmp = downloaded_media_for_url.with_name("sub_" + downloaded_media_for_url.name)
                               sub_c = "mov_text" if downloaded_media_for_url.suffix.lower() == ".mp4" else "srt"
-                              ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-c", "copy", "-c:s", sub_c, "-movflags", "+faststart", str(emb_tmp)]
+                              ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c", "copy", "-c:s", sub_c, "-movflags", "+faststart", str(emb_tmp)]
                               if subprocess.run(ff_sub, check=False).returncode == 0 and emb_tmp.exists():
                                   emb_tmp.replace(downloaded_media_for_url)
                               else:
@@ -595,7 +585,7 @@ jobs:
                           af.append(f"atempo={spd}")
                       if norm_audio:
                           af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
-                      ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath)]
+                      ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-dn", "-map_chapters", "-1"]
                       if fpath.suffix.lower() in (".mp4", ".mkv", ".webm") and abs(spd - 1.0) >= 0.01:
                           ff_cmd += ["-filter:v", f"setpts=PTS/{spd}"]
                       if af:
@@ -611,6 +601,9 @@ jobs:
           file_mb = round(primary_file.stat().st_size / (1024 * 1024), 2)
           print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) <<<", flush=True)
 
+          # פיצול קבצים מעל 1.85GB:
+          # תיקון קריטי: שימוש ב--map 0:v:0 -map 0:a:0? -dn -map_chapters -1 (ללא ערוץ bin_data!)
+          # ושימוש ב--segment_format_options movflags=+faststart כדי שאטום ה-moov ייכתב בתחילת כל חלק!
           MAX_SINGLE_ZIP_BYTES = 1850 * 1024 * 1024
           if primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
               num_parts = math.ceil(primary_file.stat().st_size / (1400 * 1024 * 1024))
@@ -618,10 +611,12 @@ jobs:
               seg_pattern = str(out_dir / f"{primary_file.stem} - Part%02d{primary_file.suffix}")
               seg_cmd = [
                   "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
-                  "-c", "copy", "-map", "0",
+                  "-map", "0:v:0", "-map", "0:a:0?",
+                  "-dn", "-map_chapters", "-1",
+                  "-c", "copy",
                   "-f", "segment", "-segment_time", str(part_dur),
                   "-reset_timestamps", "1",
-                  "-movflags", "+faststart",
+                  "-segment_format_options", "movflags=+faststart",
                   seg_pattern
               ]
               if subprocess.run(seg_cmd, check=False).returncode == 0:
@@ -706,6 +701,7 @@ jobs:
                       target_h = 480 if target_v_kbps >= 280 else 360
                       ff_mail = [
                           "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
+                          "-map", "0:v:0", "-map", "0:a:0?", "-dn", "-map_chapters", "-1",
                           "-vf", f"scale=trunc(oh*a/2)*2:{target_h}",
                           "-c:v", "libx264", "-preset", "veryfast",
                           "-b:v", f"{target_v_kbps}k", "-maxrate", f"{int(target_v_kbps * 1.15)}k", "-bufsize", f"{target_v_kbps * 2}k",
@@ -751,7 +747,7 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 9.7,
+              "v": 9.8,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
