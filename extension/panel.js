@@ -13,6 +13,7 @@
   let previewDebounce = null;
   const selectedRecUrls = new Set();
   let lastHistory = [];
+  let cachedCookieKey = "";
   const FILTER_STORAGE_KEY = "ytproxy_ai_filter_prompt";
   const AUTO_EMAIL_TOGGLE_KEY = "ytproxy_send_email_enabled";
 
@@ -37,6 +38,19 @@
     el("emailInputWrap").style.display = el("emailToggle").checked ? "block" : "none";
     chrome.storage.local.set({ [AUTO_EMAIL_TOGGLE_KEY]: el("emailToggle").checked }).catch(() => {});
   });
+
+  async function copyActiveCookieKey(btnEl) {
+    const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
+    const ck = (cfg && cfg.cookieKey) || cachedCookieKey || "";
+    if (!ck) return;
+    await navigator.clipboard.writeText(ck).catch(() => {});
+    const orig = btnEl.textContent;
+    btnEl.textContent = "✓ הועתק! הדבק ב-GitHub Secrets תחת COOKIE_KEY";
+    setTimeout(() => { btnEl.textContent = orig; }, 3000);
+  }
+
+  if (el("copyCkBtn")) el("copyCkBtn").onclick = () => copyActiveCookieKey(el("copyCkBtn"));
+  if (el("copyCkWarnBtn")) el("copyCkWarnBtn").onclick = () => copyActiveCookieKey(el("copyCkWarnBtn"));
 
   el("urlInput").addEventListener("input", () => {
     clearTimeout(previewDebounce);
@@ -121,14 +135,14 @@
       ? { ...baseOpts, urls, mode: "list" }
       : { ...baseOpts, url: urls[0], mode: el("collectionToggle").checked ? "collection" : "video" };
 
-    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות בלבד (SRT)..." : "שולח בקשה ל-GitHub Actions...";
+    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות נקיות (SRT)..." : "שולח בקשה ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({ type: "START_DOWNLOAD", payload });
     if (res && res.ok) {
       el("urlInput").value = "";
       el("videoPreview").style.display = "none";
       currentPreview = null;
       el("hint").textContent = forceSubsOnly
-        ? "נשלח! קובץ הכתוביות (עברית, או אנגלית אם אין) יישמר אוטומטית."
+        ? "נשלח! קובץ הכתוביות הנקי יישמר אוטומטית."
         : "נשלח ל-GitHub Actions! ההורדה תישמר אוטומטית בסיום.";
       void refresh();
     } else {
@@ -329,7 +343,7 @@
         const subOnlyHistBtn = document.createElement("button");
         subOnlyHistBtn.className = "btn small";
         subOnlyHistBtn.style.padding = "3px 8px";
-        subOnlyHistBtn.title = "הורד כתוביות בלבד (עברית או אנגלית) עבור סרטון זה";
+        subOnlyHistBtn.title = "הורד כתוביות בלבד (עברית נקייה) עבור קישור זה";
         subOnlyHistBtn.textContent = "📝 כתוביות";
         subOnlyHistBtn.onclick = async () => {
           await chrome.runtime.sendMessage({
@@ -440,7 +454,6 @@
 
       card.append(topRow, progTrack, info);
 
-      // הצגת הנתיב הזמני / נתיב בניית הקובץ ונתיב השמירה במחשב
       if (j.tempPath || j.finalDiskPath) {
         const pathBox = document.createElement("div");
         pathBox.className = "small";
@@ -488,10 +501,40 @@
     }
   }
 
+  function updateCookieKeyStatusUI(prefs) {
+    if (!prefs) return;
+    cachedCookieKey = prefs.cookieKey || "";
+    const badge = el("ck-status-badge");
+    const warnBox = el("ckWarningBox");
+    const warnTxt = el("ckWarningText");
+    if (!badge || !warnBox) return;
+
+    const st = prefs.cookieKeyStatus || "unknown";
+    const shortKey = cachedCookieKey ? (cachedCookieKey.slice(0, 6) + "..." + cachedCookieKey.slice(-6)) : "לא מוגדר";
+
+    if (st === "ok") {
+      badge.textContent = "🔐 מפתח עוגיות תואם ל-GitHub (" + shortKey + ")";
+      badge.style.color = "var(--ok)";
+      warnBox.style.display = "none";
+    } else if (st === "missing_in_github_secrets" || st === "mismatch_with_github_secrets" || st === "decrypt_failed_mismatch") {
+      badge.textContent = "⚠️ אי-התאמה ב-COOKIE_KEY מול GitHub (" + shortKey + ")";
+      badge.style.color = "var(--warn)";
+      warnBox.style.display = "block";
+      warnTxt.textContent = st === "missing_in_github_secrets"
+        ? "שים לב: הסוד COOKIE_KEY טרם הוגדר ב-GitHub Secrets שלך (המערכת משתמשת כעת בגיבוי האוטומטי). מומלץ להעתיק ולהדביק אותו ב-GitHub Secrets."
+        : "שים לב: הסוד COOKIE_KEY שמוגדר ב-GitHub Secrets שונה מהמפתח הקבוע שבתוסף (" + shortKey + ")! לחץ כאן להעתקת המפתח והחלף אותו ב-GitHub Secrets.";
+    } else {
+      badge.textContent = "🔐 מפתח עוגיות קבוע: " + shortKey;
+      badge.style.color = "var(--text)";
+      warnBox.style.display = "none";
+    }
+  }
+
   async function refresh() {
     const prefs = await chrome.runtime.sendMessage({ type: "GET_PREFS" });
     el("conn-dot").className = "dot " + (prefs && prefs.configured ? "is-ok" : "is-fail");
     el("conn-text").textContent = prefs && prefs.configured ? ("מחובר אל " + prefs.owner + "/" + prefs.repo) : "לא מוגדר — לחץ על הגדרות";
+    updateCookieKeyStatusUI(prefs);
     if (prefs && prefs.emailTo && !el("emailToInput").value) {
       el("emailToInput").value = prefs.emailTo;
     }
