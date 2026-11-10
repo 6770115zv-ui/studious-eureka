@@ -7,22 +7,31 @@
     if (!cfg) return;
     for (const f of FIELDS) el(f).value = cfg[f] || "";
   }
-  el("genKeyBtn").onclick = () => {
+  el("genKeyBtn").onclick = async () => {
+    const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
+    if (cfg && cfg.cookieKey && cfg.cookieKey.length === 64) {
+      await navigator.clipboard.writeText(cfg.cookieKey).catch(() => {});
+      el("msg").textContent = "המפתח הקבוע הועתק ללוח! (המפתח שמור כקבוע כדי שלא יתאפס מול GitHub Secrets).";
+      return;
+    }
     const arr = new Uint8Array(32);
     crypto.getRandomValues(arr);
     el("cookieKey").value = Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
-    el("msg").textContent = "נוצר מפתח COOKIE_KEY חדש! העתק אותו גם ל-GitHub Secrets במאגר שלך.";
+    el("msg").textContent = "נוצר מפתח COOKIE_KEY! העתק אותו גם ל-GitHub Secrets במאגר שלך.";
   };
   el("save").onclick = async () => {
     const patch = {};
-    for (const f of FIELDS) patch[f] = el(f).value.trim();
+    for (const f of FIELDS) {
+      const v = el(f).value.trim();
+      if (v) patch[f] = v;
+    }
     await chrome.runtime.sendMessage({ type: "SET_CONFIG", patch });
     el("msg").textContent = "ההגדרות נשמרו בהצלחה!";
   };
   el("reset").onclick = async () => {
     await chrome.runtime.sendMessage({ type: "RESET_CONFIG" });
     await load();
-    el("msg").textContent = "אופס לברירת המחדל";
+    el("msg").textContent = "שוחזרו הגדרות ברירת המחדל הקבועות מ-config.js (הטוקן ומפתח העוגיות הקבועים שמורים).";
   };
   el("recheck").onclick = async () => {
     el("conn-text").textContent = "בודק חיבור מול GitHub API...";
