@@ -39,15 +39,28 @@
   });
 
   // =========================================================================
-  // מתרגם קובצי כתוביות מקומיים (SRT / VTT): איחוד משפטים חצויים + תרגום AI הקשרי
+  // מתרגם קובצי כתוביות מקומיים (SRT / VTT): השלמת משפטים קטועים + תרגום מובטח לעברית
   // =========================================================================
-  const DANGLING_WORDS = new Set([
-    "a", "an", "the", "and", "or", "but", "to", "of", "in", "on", "at", "for", "with", "from", "by", "about", "as", "into",
-    "is", "are", "was", "were", "be", "been", "has", "have", "had", "will", "would", "can", "could", "should", "may", "might",
-    "he", "she", "it", "we", "they", "you", "i", "he's", "she's", "it's", "we're", "they're", "you're", "i'm", "that's", "there's",
-    "his", "her", "its", "our", "their", "my", "your", "this", "that", "these", "those", "such", "very", "so", "too", "quite",
-    "good", "great", "big", "small", "new", "old", "first", "last", "next", "other", "another", "not", "no", "don't", "doesn't", "didn't"
-  ]);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const hasHebrew = (s) => /[\u0590-\u05FF]/.test(String(s || ""));
+
+  const TRAILING_SPLIT_RX = new RegExp(
+    "^(.*?)\\s+(" +
+    "with a couple of|a couple of|a lot of|kind of|sort of|out of|instead of|because of|in front of|" +
+    "going to|trying to|want to|have to|has to|had to|used to|able to|ready to|" +
+    "a|an|the|and|or|but|to|of|in|on|at|for|with|from|by|about|as|into|onto|upon|" +
+    "is|are|was|were|be|been|has|have|had|will|would|can|could|should|may|might|must|" +
+    "he|she|it|we|they|you|i|he's|she's|it's|we're|they're|you're|i'm|that's|there's|what's|who's|" +
+    "his|her|its|our|their|my|your|this|that|these|those|which|who|whom|whose|when|where|while|if|because|since|until|than" +
+    ")$",
+    "i"
+  );
+
+  const ADJ_PULL_RX = new RegExp(
+    "\\b(such a|a|an|the|very|really|pretty|quite|so|too|his|her|their|our|my|your|its)\\s+" +
+    "(good|great|big|small|new|old|first|last|next|other|another|right|wrong|best|worst|whole|same|nice|bad|high|low|long|short|full|hard|easy)$",
+    "i"
+  );
 
   function tsToMs(tsStr) {
     try {
@@ -69,7 +82,7 @@
     return [h, m, s].map((v) => String(v).padStart(2, "0")).join(":") + "," + String(milli).padStart(3, "0");
   }
 
-  function parseAndStitchSrt(rawText) {
+  function parseAndReconstructSrt(rawText) {
     const blocks = String(rawText || "").replace(/^\uFEFF/, "").trim().split(/\r?\n\r?\n+/);
     const parsed = [];
     for (const b of blocks) {
@@ -96,6 +109,7 @@
       if (textLines.length) parsed.push([startMs, endMs, textLines]);
     }
 
+    // 1. ניקוי כפילויות מתגלגלות (Rollup)
     const deduped = [];
     const recent = [];
     for (const [startMs, endMs, tLines] of parsed) {
@@ -122,89 +136,60 @@
       }
     }
 
-    // איחוד משפטים חצויים (כגון "does such a good" + "job with his...")
-    const stitched = [];
+    // 2. העברת מילים קטועות בין שורות עוקבות ליצירת משפטים שלמים והגיוניים
+    for (let i = 0; i < deduped.length - 1; i++) {
+      const [curS, curE, curTxt] = deduped[i];
+      const [nxtS, nxtE, nxtTxt] = deduped[i + 1];
+      if (nxtS - curE > 2000 || /[.!?:;]$/.test(curTxt)) continue;
+
+      if (ADJ_PULL_RX.test(curTxt)) {
+        const nxtWords = nxtTxt.split(/\s+/);
+        if (nxtWords.length >= 2) {
+          deduped[i][2] = (curTxt + " " + nxtWords[0]).trim();
+          deduped[i + 1][2] = nxtWords.slice(1).join(" ").trim();
+        }
+      }
+
+      for (let pass = 0; pass < 2; pass++) {
+        const m = deduped[i][2].match(TRAILING_SPLIT_RX);
+        if (m && m[1].trim().length >= 6) {
+          deduped[i][2] = m[1].trim();
+          deduped[i + 1][2] = (m[2].trim() + " " + deduped[i + 1][2]).trim();
+        } else {
+          break;
+        }
+      }
+    }
+
+    // 3. איחוד שורות קצרות סמוכות
+    const merged = [];
     let i = 0;
     while (i < deduped.length) {
       let [curS, curE, curTxt] = deduped[i];
+      if (!curTxt.trim()) { i++; continue; }
       while (i + 1 < deduped.length) {
         const [nxtS, nxtE, nxtTxt] = deduped[i + 1];
-        const gapMs = nxtS - curE;
-        const totalDur = nxtE - curS;
-        const combTxt = (curTxt + " " + nxtTxt).trim();
-        const words = curTxt.toLowerCase().match(/[a-z']+/g) || [];
-        const lastWord = words.length ? words[words.length - 1] : "";
-        const endsPunct = /[.!?:;]$/.test(curTxt);
-        const isDangling = !endsPunct && DANGLING_WORDS.has(lastWord);
-        const isShortFrag = !endsPunct && curTxt.length < 28 && (curE - curS) < 2200;
-
-        if (gapMs <= 600 && totalDur <= 7000 && combTxt.length <= 115 && (isDangling || isShortFrag)) {
+        const comb = (curTxt + " " + nxtTxt).trim();
+        if (nxtS - curE <= 450 && nxtE - curS <= 6500 && comb.length <= 88) {
           curE = nxtE;
-          curTxt = combTxt;
+          curTxt = comb;
           i++;
         } else {
           break;
         }
       }
-      stitched.push([curS, curE, curTxt]);
+      merged.push([curS, curE, curTxt]);
       i++;
     }
-    return stitched;
+    return merged;
   }
 
-  async function translateBatchContextualJS(batchCues, ghToken) {
-    const itemsIn = batchCues.map((c, idx) => ({ i: idx, t: c[2] }));
-    const sysPrompt =
-      "אתה מתרגם כתוביות מקצועי מאנגלית לעברית תקנית, טבעית, רהוטה וקריאה. " +
-      "הכתוביות הגיעו מתמלול אוטומטי ולכן משפטים עשויים להמשיך משורה לשורה. " +
-      "קרא את כל השורות במקבץ כדי להבין את ההקשר המלא, ותרגם לעברית טבעית וזורמת לפי המשמעות האמיתית בהקשר (אסור לתרגם ביטויים או שמות באופן מילולי מגוחך). " +
-      "החזר אך ורק JSON תקין בפורמט: {\"items\": [{\"i\": 0, \"t\": \"התרגום לעברית\"}, ...]} עם אותם אינדקסים בדיוק.";
-
-    const endpoints = [];
-    if (ghToken) {
-      endpoints.push({
-        url: "https://models.inference.ai.azure.com/chat/completions",
-        headers: { Authorization: "Bearer " + ghToken, "Content-Type": "application/json" },
-        body: { model: "gpt-4o-mini", messages: [{ role: "system", content: sysPrompt }, { role: "user", content: JSON.stringify({ items: itemsIn }) }], temperature: 0.1 }
-      });
-    }
-    endpoints.push({
-      url: "https://text.pollinations.ai/openai",
-      headers: { "Content-Type": "application/json" },
-      body: { model: "openai", messages: [{ role: "system", content: sysPrompt }, { role: "user", content: JSON.stringify({ items: itemsIn }) }], temperature: 0.1 }
-    });
-
-    for (const ep of endpoints) {
-      try {
-        const res = await fetch(ep.url, { method: "POST", headers: ep.headers, body: JSON.stringify(ep.body) });
-        if (res.ok) {
-          const data = await res.json();
-          const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-          if (content) {
-            const clean = content.replace(/```(?:json)?|```/g, "").trim();
-            const m = clean.match(/\{[\s\S]*"items"\s*:\s*\[[\s\S]*?\][\s\S]*\}/);
-            if (m) {
-              const parsed = JSON.parse(m[0]);
-              const map = {};
-              for (const it of (parsed.items || [])) {
-                if (typeof it.i === "number" && it.t) map[it.i] = String(it.t).trim();
-              }
-              if (Object.keys(map).length >= batchCues.length * 0.7) {
-                return batchCues.map((c, idx) => [c[0], c[1], map[idx] || c[2]]);
-              }
-            }
-          }
-        }
-      } catch {}
-    }
-
-    // גיבוי משפטים מאוחדים אם שרת ה-AI אינו זמין
-    const tagged = batchCues.map((c, idx) => "(" + idx + ") " + c[2].replace(/\n/g, " ").trim()).join("\n");
+  async function translateSingleCueJS(text) {
     for (const clientName of ["gtx", "dict-chrome-ex"]) {
       try {
-        const body = new URLSearchParams({ q: tagged });
+        const body = new URLSearchParams({ q: text });
         const res = await fetch(
-          "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=auto&tl=iw&dt=t",
+          "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=en&tl=iw&dt=t&dj=1",
           {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
@@ -213,23 +198,54 @@
         );
         if (res.ok) {
           const data = await res.json();
-          if (data && Array.isArray(data[0])) {
-            const fullText = data[0].map((p) => (p && p[0]) || "").join("").trim();
-            const mapped = {};
-            const parts = fullText.split(/\((\d+)\)/);
-            for (let k = 1; k < parts.length - 1; k += 2) {
-              const bIdx = Number(parts[k]);
-              const bTxt = parts[k + 1].replace(/\r?\n/g, " ").trim();
-              if (bTxt) mapped[bIdx] = bTxt;
-            }
-            if (Object.keys(mapped).length > 0) {
-              return batchCues.map((c, i) => [c[0], c[1], mapped[i] || c[2]]);
-            }
-          }
+          const sents = (data && data.sentences) || [];
+          const tr = sents.map((s) => (s && s.trans) || "").join(" ").trim();
+          if (tr && hasHebrew(tr)) return tr;
         }
       } catch {}
     }
-    return batchCues;
+    return text;
+  }
+
+  async function translateBatchGuaranteedJS(batchCues) {
+    const joined = batchCues.map((c) => c[2].replace(/\r?\n/g, " ").trim()).join("\n");
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      for (const clientName of ["gtx", "dict-chrome-ex"]) {
+        try {
+          const body = new URLSearchParams({ q: joined });
+          const res = await fetch(
+            "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=en&tl=iw&dt=t&dj=1",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+              body: body.toString()
+            }
+          );
+          if (res.ok) {
+            const data = await res.json();
+            const sents = (data && data.sentences) || [];
+            const fullTrans = sents.map((s) => (s && s.trans) || "").join("").trim();
+            const trLines = fullTrans.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+            if (trLines.length === batchCues.length && hasHebrew(fullTrans)) {
+              return batchCues.map((c, idx) => [c[0], c[1], trLines[idx]]);
+            }
+          } else if (res.status === 429) {
+            await sleep(1400 * (attempt + 1));
+          }
+        } catch {}
+      }
+      await sleep(500);
+    }
+
+    // גיבוי פרטני מובטח לכל שורה במקבץ אם חלוקת השורות השתנתה
+    const out = [];
+    for (const c of batchCues) {
+      const tr = await translateSingleCueJS(c[2]);
+      out.push([c[0], c[1], tr]);
+      await sleep(80);
+    }
+    return out;
   }
 
   if (el("translateLocalSrtBtn")) {
@@ -242,9 +258,6 @@
         return;
       }
 
-      const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" }).catch(() => ({}));
-      const ghToken = (cfg && cfg.token) || "";
-
       const btn = el("translateLocalSrtBtn");
       btn.disabled = true;
       el("srtTransProgWrap").style.display = "flex";
@@ -253,15 +266,15 @@
         for (let fIdx = 0; fIdx < files.length; fIdx++) {
           const file = files[fIdx];
           el("srtTransProgBar").style.width = "5%";
-          el("srtTransStatus").textContent = "מנקה כפילויות ומאחד משפטים חצויים בקובץ: " + file.name + "...";
+          el("srtTransStatus").textContent = "משלים משפטים קטועים ומנקה כפילויות בקובץ: " + file.name + "...";
           const rawText = await file.text();
-          const cleanCues = parseAndStitchSrt(rawText);
+          const cleanCues = parseAndReconstructSrt(rawText);
           if (!cleanCues.length) {
             el("srtTransStatus").textContent = "לא נמצאו שורות כתוביות תקינות בקובץ " + file.name;
             continue;
           }
 
-          const batchSize = 25;
+          const batchSize = 35;
           const batches = [];
           for (let i = 0; i < cleanCues.length; i += batchSize) {
             batches.push(cleanCues.slice(i, i + batchSize));
@@ -269,21 +282,23 @@
 
           const translatedCues = new Array(batches.length);
           let completedBatches = 0;
-          const concurrency = 4;
+          const concurrency = 2;
 
           async function worker(wId) {
             for (let bIdx = wId; bIdx < batches.length; bIdx += concurrency) {
-              translatedCues[bIdx] = await translateBatchContextualJS(batches[bIdx], ghToken);
+              translatedCues[bIdx] = await translateBatchGuaranteedJS(batches[bIdx]);
               completedBatches++;
               const pct = Math.round((completedBatches / batches.length) * 100);
               el("srtTransProgBar").style.width = pct + "%";
-              el("srtTransStatus").textContent = "מתרגם לעברית טבעית לפי הקשר (" + file.name + "): " + pct + "% (" + Math.min(cleanCues.length, completedBatches * batchSize) + " / " + cleanCues.length + " משפטים)...";
+              el("srtTransStatus").textContent = "מתרגם לעברית (" + file.name + "): " + pct + "% (" + Math.min(cleanCues.length, completedBatches * batchSize) + " / " + cleanCues.length + " משפטים שלמים)...";
+              await sleep(220);
             }
           }
 
           await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, (_, i) => worker(i)));
 
           const flatCues = translatedCues.flat();
+          const hebrewCount = flatCues.filter((c) => hasHebrew(c[2])).length;
           const srtLines = flatCues.map((c, idx) => (idx + 1) + "\r\n" + msToTs(c[0]) + " --> " + msToTs(c[1]) + "\r\n" + c[2]);
           const finalSrtContent = "\uFEFF" + srtLines.join("\r\n\r\n") + "\r\n";
 
@@ -301,7 +316,7 @@
           setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
 
           el("srtTransProgBar").style.width = "100%";
-          el("srtTransStatus").textContent = "✓ התרגום ההקשרי לעברית הושלם ונשמר במחשב: " + outName + " (" + flatCues.length + " משפטים מאוחדים ונקיים)";
+          el("srtTransStatus").textContent = "✓ התרגום לעברית הושלם ונשמר: " + outName + " (" + hebrewCount + "/" + flatCues.length + " משפטים בעברית)";
         }
       } catch (err) {
         el("srtTransStatus").textContent = "שגיאה בתרגום הקובץ: " + err.message;
@@ -394,7 +409,7 @@
       ? { ...baseOpts, urls, mode: "list" }
       : { ...baseOpts, url: urls[0], mode: el("collectionToggle").checked ? "collection" : "video" };
 
-    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות מתורגמות לעברית ב-AI..." : "שולח בקשה ל-GitHub Actions...";
+    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות מתורגמות לעברית..." : "שולח בקשה ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({ type: "START_DOWNLOAD", payload });
     if (res && res.ok) {
       el("urlInput").value = "";
