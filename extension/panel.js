@@ -38,6 +38,198 @@
     chrome.storage.local.set({ [AUTO_EMAIL_TOGGLE_KEY]: el("emailToggle").checked }).catch(() => {});
   });
 
+  // =========================================================================
+  // מתרגם קובצי כתוביות מקומיים (SRT / VTT) לעברית טובה + ניקוי כפילויות
+  // =========================================================================
+  function tsToMs(tsStr) {
+    try {
+      const clean = String(tsStr || "").trim().replace(".", ",");
+      const [hms, msPart] = clean.split(",");
+      const parts = hms.split(":").map(Number);
+      const [h, m, s] = parts.length === 3 ? parts : [0, parts[0] || 0, parts[1] || 0];
+      const ms = Number(String(msPart || "0").slice(0, 3).padEnd(3, "0"));
+      return ((h * 3600 + m * 60 + s) * 1000) + ms;
+    } catch { return 0; }
+  }
+
+  function msToTs(ms) {
+    let rem = Math.max(0, Math.floor(ms));
+    const h = Math.floor(rem / 3600000); rem %= 3600000;
+    const m = Math.floor(rem / 60000); rem %= 60000;
+    const s = Math.floor(rem / 1000);
+    const milli = rem % 1000;
+    return [h, m, s].map((v) => String(v).padStart(2, "0")).join(":") + "," + String(milli).padStart(3, "0");
+  }
+
+  function parseAndDeduplicateSrt(rawText) {
+    const blocks = String(rawText || "").replace(/^\uFEFF/, "").trim().split(/\r?\n\r?\n+/);
+    const parsed = [];
+    for (const b of blocks) {
+      const lines = b.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      if (!lines.length) continue;
+      let tsIdx = -1;
+      for (let i = 0; i < Math.min(3, lines.length); i++) {
+        if (lines[i].includes("-->")) { tsIdx = i; break; }
+      }
+      if (tsIdx < 0) continue;
+      const tsParts = lines[tsIdx].split("-->");
+      if (tsParts.length < 2) continue;
+      const startMs = tsToMs(tsParts[0]);
+      const endMs = tsToMs(tsParts[1].trim().split(/\s+/)[0]);
+      if (endMs - startMs < 140) continue;
+
+      const textLines = [];
+      for (let i = tsIdx + 1; i < lines.length; i++) {
+        const cl = lines[i].replace(/<[^>]+>/g, "").replace(/\{\\an\d+\}/g, "").trim();
+        if (cl && !/^(WEBVTT|Kind:|Language:)/i.test(cl)) {
+          if (!textLines.length || textLines[textLines.length - 1] !== cl) textLines.push(cl);
+        }
+      }
+      if (textLines.length) parsed.push([startMs, endMs, textLines]);
+    }
+
+    const deduped = [];
+    const recent = [];
+    for (const [startMs, endMs, tLines] of parsed) {
+      const newLines = [];
+      for (const ln of tLines) {
+        const norm = ln.replace(/\s+/g, " ").trim().toLowerCase();
+        if (!recent.includes(norm)) {
+          newLines.push(ln);
+          recent.push(norm);
+          if (recent.length > 6) recent.shift();
+        }
+      }
+      if (!newLines.length) {
+        if (deduped.length && startMs - deduped[deduped.length - 1][1] <= 500) {
+          deduped[deduped.length - 1][1] = Math.max(deduped[deduped.length - 1][1], endMs);
+        }
+        continue;
+      }
+      const joined = newLines.join(" ").trim();
+      if (deduped.length && deduped[deduped.length - 1][2].toLowerCase() === joined.toLowerCase()) {
+        deduped[deduped.length - 1][1] = Math.max(deduped[deduped.length - 1][1], endMs);
+      } else {
+        deduped.push([startMs, endMs, joined]);
+      }
+    }
+    return deduped;
+  }
+
+  async function translateBatchToHebrewJS(batchCues) {
+    const tagged = batchCues.map((c, idx) => "(" + idx + ") " + c[2].replace(/\n/g, " ").trim()).join("\n");
+    for (const clientName of ["gtx", "dict-chrome-ex"]) {
+      try {
+        const body = new URLSearchParams({ q: tagged });
+        const res = await fetch(
+          "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=auto&tl=iw&dt=t",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+            body: body.toString()
+          }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data[0])) {
+            const fullText = data[0].map((p) => (p && p[0]) || "").join("").trim();
+            const lines = fullText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+            if (lines.length === batchCues.length) {
+              return batchCues.map((c, i) => [c[0], c[1], lines[i].replace(/^\(\d+\)\s*/, "").trim() || c[2]]);
+            }
+            const mapped = {};
+            const parts = fullText.split(/\((\d+)\)/);
+            for (let k = 1; k < parts.length - 1; k += 2) {
+              const bIdx = Number(parts[k]);
+              const bTxt = parts[k + 1].replace(/\r?\n/g, " ").trim();
+              if (bTxt) mapped[bIdx] = bTxt;
+            }
+            if (Object.keys(mapped).length > 0) {
+              return batchCues.map((c, i) => [c[0], c[1], mapped[i] || c[2]]);
+            }
+          }
+        }
+      } catch {}
+    }
+    return batchCues;
+  }
+
+  if (el("translateLocalSrtBtn")) {
+    el("translateLocalSrtBtn").onclick = async () => {
+      const fileInput = el("localSrtInput");
+      const files = fileInput && fileInput.files ? Array.from(fileInput.files) : [];
+      if (!files.length) {
+        el("srtTransProgWrap").style.display = "flex";
+        el("srtTransStatus").textContent = "נא לבחור קובץ כתוביות (.srt או .vtt) מהמחשב תחילה.";
+        return;
+      }
+
+      const btn = el("translateLocalSrtBtn");
+      btn.disabled = true;
+      el("srtTransProgWrap").style.display = "flex";
+
+      try {
+        for (let fIdx = 0; fIdx < files.length; fIdx++) {
+          const file = files[fIdx];
+          el("srtTransBar" in el ? "srtTransBar" : "srtTransProgBar").style.width = "5%";
+          el("srtTransStatus").textContent = "קורא ומנקה כפילויות בקובץ: " + file.name + "...";
+          const rawText = await file.text();
+          const cleanCues = parseAndDeduplicateSrt(rawText);
+          if (!cleanCues.length) {
+            el("srtTransStatus").textContent = "לא נמצאו שורות כתוביות תקינות בקובץ " + file.name;
+            continue;
+          }
+
+          const batchSize = 25;
+          const batches = [];
+          for (let i = 0; i < cleanCues.length; i += batchSize) {
+            batches.push(cleanCues.slice(i, i + batchSize));
+          }
+
+          const translatedCues = new Array(batches.length);
+          let completedBatches = 0;
+          const concurrency = 5;
+
+          async function worker(wId) {
+            for (let bIdx = wId; bIdx < batches.length; bIdx += concurrency) {
+              translatedCues[bIdx] = await translateBatchToHebrewJS(batches[bIdx]);
+              completedBatches++;
+              const pct = Math.round((completedBatches / batches.length) * 100);
+              el("srtTransProgBar").style.width = pct + "%";
+              el("srtTransStatus").textContent = "מתרגם לעברית (" + file.name + "): " + pct + "% (" + Math.min(cleanCues.length, completedBatches * batchSize) + " / " + cleanCues.length + " שורות)...";
+            }
+          }
+
+          await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, (_, i) => worker(i)));
+
+          const flatCues = translatedCues.flat();
+          const srtLines = flatCues.map((c, idx) => (idx + 1) + "\r\n" + msToTs(c[0]) + " --> " + msToTs(c[1]) + "\r\n" + c[2]);
+          const finalSrtContent = "\uFEFF" + srtLines.join("\r\n\r\n") + "\r\n";
+
+          const blob = new Blob([finalSrtContent], { type: "text/plain;charset=utf-8" });
+          const blobUrl = URL.createObjectURL(blob);
+          const cleanBaseName = file.name.replace(/\.(en-orig|en|iw|he)?\.(srt|vtt|txt)$/i, "");
+          const outName = cleanBaseName + ".he.srt";
+
+          const a = document.createElement("a");
+          a.href = blobUrl;
+          a.download = outName;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+
+          el("srtTransProgBar").style.width = "100%";
+          el("srtTransStatus").textContent = "✓ התרגום לעברית הושלם ונשמר במחשב: " + outName + " (" + flatCues.length + " כתוביות נקיות)";
+        }
+      } catch (err) {
+        el("srtTransStatus").textContent = "שגיאה בתרגום הקובץ: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  }
+
   el("urlInput").addEventListener("input", () => {
     clearTimeout(previewDebounce);
     const val = el("urlInput").value.trim();
@@ -121,14 +313,14 @@
       ? { ...baseOpts, urls, mode: "list" }
       : { ...baseOpts, url: urls[0], mode: el("collectionToggle").checked ? "collection" : "video" };
 
-    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות נקיות (SRT)..." : "שולח בקשה ל-GitHub Actions...";
+    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות מתורגמות לעברית (SRT)..." : "שולח בקשה ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({ type: "START_DOWNLOAD", payload });
     if (res && res.ok) {
       el("urlInput").value = "";
       el("videoPreview").style.display = "none";
       currentPreview = null;
       el("hint").textContent = forceSubsOnly
-        ? "נשלח! קובץ הכתוביות הנקי יישמר אוטומטית."
+        ? "נשלח! קובץ הכתוביות המתורגם לעברית יישמר אוטומטית."
         : "נשלח ל-GitHub Actions! ההורדה תישמר אוטומטית בסיום.";
       void refresh();
     } else {
@@ -329,8 +521,8 @@
         const subOnlyHistBtn = document.createElement("button");
         subOnlyHistBtn.className = "btn small";
         subOnlyHistBtn.style.padding = "3px 8px";
-        subOnlyHistBtn.title = "הורד כתוביות בלבד (עברית נקייה) עבור קישור זה";
-        subOnlyHistBtn.textContent = "📝 כתוביות";
+        subOnlyHistBtn.title = "הורד כתוביות בעברית בלבד עבור קישור זה";
+        subOnlyHistBtn.textContent = "📝 כתוביות בעברית";
         subOnlyHistBtn.onclick = async () => {
           await chrome.runtime.sendMessage({
             type: "START_DOWNLOAD",
@@ -422,7 +614,7 @@
         badge.style.fontWeight = "600";
         badge.textContent = "✓ " + j.actualQuality + localPctStr + " • כללי: " + (j.percent || 0) + "%";
       } else {
-        badge.textContent = "יעד: " + (j.quality === "subs_only" ? "כתוביות בלבד" : j.quality) + localPctStr + " • " + (j.percent || 0) + "%" + elapsedLabel;
+        badge.textContent = "יעד: " + (j.quality === "subs_only" ? "כתוביות בעברית" : j.quality) + localPctStr + " • " + (j.percent || 0) + "%" + elapsedLabel;
       }
       topRow.append(title, badge);
 
