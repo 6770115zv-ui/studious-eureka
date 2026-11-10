@@ -39,8 +39,16 @@
   });
 
   // =========================================================================
-  // מתרגם קובצי כתוביות מקומיים (SRT / VTT) לעברית טובה + ניקוי כפילויות
+  // מתרגם קובצי כתוביות מקומיים (SRT / VTT): איחוד משפטים חצויים + תרגום AI הקשרי
   // =========================================================================
+  const DANGLING_WORDS = new Set([
+    "a", "an", "the", "and", "or", "but", "to", "of", "in", "on", "at", "for", "with", "from", "by", "about", "as", "into",
+    "is", "are", "was", "were", "be", "been", "has", "have", "had", "will", "would", "can", "could", "should", "may", "might",
+    "he", "she", "it", "we", "they", "you", "i", "he's", "she's", "it's", "we're", "they're", "you're", "i'm", "that's", "there's",
+    "his", "her", "its", "our", "their", "my", "your", "this", "that", "these", "those", "such", "very", "so", "too", "quite",
+    "good", "great", "big", "small", "new", "old", "first", "last", "next", "other", "another", "not", "no", "don't", "doesn't", "didn't"
+  ]);
+
   function tsToMs(tsStr) {
     try {
       const clean = String(tsStr || "").trim().replace(".", ",");
@@ -61,7 +69,7 @@
     return [h, m, s].map((v) => String(v).padStart(2, "0")).join(":") + "," + String(milli).padStart(3, "0");
   }
 
-  function parseAndDeduplicateSrt(rawText) {
+  function parseAndStitchSrt(rawText) {
     const blocks = String(rawText || "").replace(/^\uFEFF/, "").trim().split(/\r?\n\r?\n+/);
     const parsed = [];
     for (const b of blocks) {
@@ -113,10 +121,84 @@
         deduped.push([startMs, endMs, joined]);
       }
     }
-    return deduped;
+
+    // איחוד משפטים חצויים (כגון "does such a good" + "job with his...")
+    const stitched = [];
+    let i = 0;
+    while (i < deduped.length) {
+      let [curS, curE, curTxt] = deduped[i];
+      while (i + 1 < deduped.length) {
+        const [nxtS, nxtE, nxtTxt] = deduped[i + 1];
+        const gapMs = nxtS - curE;
+        const totalDur = nxtE - curS;
+        const combTxt = (curTxt + " " + nxtTxt).trim();
+        const words = curTxt.toLowerCase().match(/[a-z']+/g) || [];
+        const lastWord = words.length ? words[words.length - 1] : "";
+        const endsPunct = /[.!?:;]$/.test(curTxt);
+        const isDangling = !endsPunct && DANGLING_WORDS.has(lastWord);
+        const isShortFrag = !endsPunct && curTxt.length < 28 && (curE - curS) < 2200;
+
+        if (gapMs <= 600 && totalDur <= 7000 && combTxt.length <= 115 && (isDangling || isShortFrag)) {
+          curE = nxtE;
+          curTxt = combTxt;
+          i++;
+        } else {
+          break;
+        }
+      }
+      stitched.push([curS, curE, curTxt]);
+      i++;
+    }
+    return stitched;
   }
 
-  async function translateBatchToHebrewJS(batchCues) {
+  async function translateBatchContextualJS(batchCues, ghToken) {
+    const itemsIn = batchCues.map((c, idx) => ({ i: idx, t: c[2] }));
+    const sysPrompt =
+      "אתה מתרגם כתוביות מקצועי מאנגלית לעברית תקנית, טבעית, רהוטה וקריאה. " +
+      "הכתוביות הגיעו מתמלול אוטומטי ולכן משפטים עשויים להמשיך משורה לשורה. " +
+      "קרא את כל השורות במקבץ כדי להבין את ההקשר המלא, ותרגם לעברית טבעית וזורמת לפי המשמעות האמיתית בהקשר (אסור לתרגם ביטויים או שמות באופן מילולי מגוחך). " +
+      "החזר אך ורק JSON תקין בפורמט: {\"items\": [{\"i\": 0, \"t\": \"התרגום לעברית\"}, ...]} עם אותם אינדקסים בדיוק.";
+
+    const endpoints = [];
+    if (ghToken) {
+      endpoints.push({
+        url: "https://models.inference.ai.azure.com/chat/completions",
+        headers: { Authorization: "Bearer " + ghToken, "Content-Type": "application/json" },
+        body: { model: "gpt-4o-mini", messages: [{ role: "system", content: sysPrompt }, { role: "user", content: JSON.stringify({ items: itemsIn }) }], temperature: 0.1 }
+      });
+    }
+    endpoints.push({
+      url: "https://text.pollinations.ai/openai",
+      headers: { "Content-Type": "application/json" },
+      body: { model: "openai", messages: [{ role: "system", content: sysPrompt }, { role: "user", content: JSON.stringify({ items: itemsIn }) }], temperature: 0.1 }
+    });
+
+    for (const ep of endpoints) {
+      try {
+        const res = await fetch(ep.url, { method: "POST", headers: ep.headers, body: JSON.stringify(ep.body) });
+        if (res.ok) {
+          const data = await res.json();
+          const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+          if (content) {
+            const clean = content.replace(/```(?:json)?|```/g, "").trim();
+            const m = clean.match(/\{[\s\S]*"items"\s*:\s*\[[\s\S]*?\][\s\S]*\}/);
+            if (m) {
+              const parsed = JSON.parse(m[0]);
+              const map = {};
+              for (const it of (parsed.items || [])) {
+                if (typeof it.i === "number" && it.t) map[it.i] = String(it.t).trim();
+              }
+              if (Object.keys(map).length >= batchCues.length * 0.7) {
+                return batchCues.map((c, idx) => [c[0], c[1], map[idx] || c[2]]);
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // גיבוי משפטים מאוחדים אם שרת ה-AI אינו זמין
     const tagged = batchCues.map((c, idx) => "(" + idx + ") " + c[2].replace(/\n/g, " ").trim()).join("\n");
     for (const clientName of ["gtx", "dict-chrome-ex"]) {
       try {
@@ -133,10 +215,6 @@
           const data = await res.json();
           if (data && Array.isArray(data[0])) {
             const fullText = data[0].map((p) => (p && p[0]) || "").join("").trim();
-            const lines = fullText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-            if (lines.length === batchCues.length) {
-              return batchCues.map((c, i) => [c[0], c[1], lines[i].replace(/^\(\d+\)\s*/, "").trim() || c[2]]);
-            }
             const mapped = {};
             const parts = fullText.split(/\((\d+)\)/);
             for (let k = 1; k < parts.length - 1; k += 2) {
@@ -164,6 +242,9 @@
         return;
       }
 
+      const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" }).catch(() => ({}));
+      const ghToken = (cfg && cfg.token) || "";
+
       const btn = el("translateLocalSrtBtn");
       btn.disabled = true;
       el("srtTransProgWrap").style.display = "flex";
@@ -171,10 +252,10 @@
       try {
         for (let fIdx = 0; fIdx < files.length; fIdx++) {
           const file = files[fIdx];
-          el("srtTransBar" in el ? "srtTransBar" : "srtTransProgBar").style.width = "5%";
-          el("srtTransStatus").textContent = "קורא ומנקה כפילויות בקובץ: " + file.name + "...";
+          el("srtTransProgBar").style.width = "5%";
+          el("srtTransStatus").textContent = "מנקה כפילויות ומאחד משפטים חצויים בקובץ: " + file.name + "...";
           const rawText = await file.text();
-          const cleanCues = parseAndDeduplicateSrt(rawText);
+          const cleanCues = parseAndStitchSrt(rawText);
           if (!cleanCues.length) {
             el("srtTransStatus").textContent = "לא נמצאו שורות כתוביות תקינות בקובץ " + file.name;
             continue;
@@ -188,15 +269,15 @@
 
           const translatedCues = new Array(batches.length);
           let completedBatches = 0;
-          const concurrency = 5;
+          const concurrency = 4;
 
           async function worker(wId) {
             for (let bIdx = wId; bIdx < batches.length; bIdx += concurrency) {
-              translatedCues[bIdx] = await translateBatchToHebrewJS(batches[bIdx]);
+              translatedCues[bIdx] = await translateBatchContextualJS(batches[bIdx], ghToken);
               completedBatches++;
               const pct = Math.round((completedBatches / batches.length) * 100);
               el("srtTransProgBar").style.width = pct + "%";
-              el("srtTransStatus").textContent = "מתרגם לעברית (" + file.name + "): " + pct + "% (" + Math.min(cleanCues.length, completedBatches * batchSize) + " / " + cleanCues.length + " שורות)...";
+              el("srtTransStatus").textContent = "מתרגם לעברית טבעית לפי הקשר (" + file.name + "): " + pct + "% (" + Math.min(cleanCues.length, completedBatches * batchSize) + " / " + cleanCues.length + " משפטים)...";
             }
           }
 
@@ -220,7 +301,7 @@
           setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
 
           el("srtTransProgBar").style.width = "100%";
-          el("srtTransStatus").textContent = "✓ התרגום לעברית הושלם ונשמר במחשב: " + outName + " (" + flatCues.length + " כתוביות נקיות)";
+          el("srtTransStatus").textContent = "✓ התרגום ההקשרי לעברית הושלם ונשמר במחשב: " + outName + " (" + flatCues.length + " משפטים מאוחדים ונקיים)";
         }
       } catch (err) {
         el("srtTransStatus").textContent = "שגיאה בתרגום הקובץ: " + err.message;
@@ -313,7 +394,7 @@
       ? { ...baseOpts, urls, mode: "list" }
       : { ...baseOpts, url: urls[0], mode: el("collectionToggle").checked ? "collection" : "video" };
 
-    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות מתורגמות לעברית (SRT)..." : "שולח בקשה ל-GitHub Actions...";
+    el("hint").textContent = forceSubsOnly ? "שולח בקשה להורדת כתוביות מתורגמות לעברית ב-AI..." : "שולח בקשה ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({ type: "START_DOWNLOAD", payload });
     if (res && res.ok) {
       el("urlInput").value = "";
