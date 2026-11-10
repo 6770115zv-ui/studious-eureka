@@ -33,7 +33,7 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends ffmpeg zip python3-cryptography python3-pip atomicparsley curl
-          python3 -m pip install --break-system-packages -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests
+          python3 -m pip install --break-system-packages -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests deep-translator
           if command -v docker >/dev/null 2>&1; then
             docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest || true
             for i in $(seq 1 15); do
@@ -64,6 +64,7 @@ jobs:
           python3 - << 'EOF'
           import os, sys, re, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
           from pathlib import Path
+          from concurrent.futures import ThreadPoolExecutor
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           ev_path = os.environ.get("GITHUB_EVENT_PATH", "")
@@ -141,11 +142,18 @@ jobs:
           height_map = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480, "360": 360}
           req_h = height_map.get(quality, 2160)
 
+          # ====================================================================
+          # מנוע ניקוי כפילויות ותרגום מקבילי חזק לעברית (Multi-Engine Hebrew SRT)
+          # ====================================================================
           def ts_to_ms(ts_str: str) -> int:
               try:
                   ts_str = ts_str.strip().replace(".", ",")
                   hms, ms = ts_str.split(",")
-                  h, m, s = [int(x) for x in hms.split(":")]
+                  parts = [int(x) for x in hms.split(":")]
+                  if len(parts) == 3:
+                      h, m, s = parts
+                  else:
+                      h, m, s = 0, parts[0], parts[1]
                   return ((h * 3600 + m * 60 + s) * 1000) + int(ms[:3].ljust(3, "0"))
               except Exception:
                   return 0
@@ -220,7 +228,100 @@ jobs:
               out = []
               for idx, (s_ms, e_ms, txt) in enumerate(cues_list, 1):
                   out.append(f"{idx}\n{ms_to_ts(s_ms)} --> {ms_to_ts(e_ms)}\n{txt}")
-              return "\n\n".join(out) + "\n"
+              # הוספת UTF-8 BOM (\ufeff) כדי ש-VLC ופנקס רשימות ב-Windows יציגו עברית תקינה תמיד
+              return "\ufeff" + "\n\n".join(out) + "\n"
+
+          HTTP_HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+              "Accept": "application/json, text/plain, */*",
+          }
+
+          def translate_text_block_to_hebrew(text_block: str) -> str:
+              if not text_block.strip():
+                  return text_block
+              # מנוע 1: Google Translate GTX עם כותרות דפדפן מלאות
+              for client_id in ("gtx", "dict-chrome-ex"):
+                  try:
+                      r = requests.post(
+                          "https://translate.googleapis.com/translate_a/single",
+                          params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t"},
+                          data={"q": text_block},
+                          headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                          timeout=15
+                      )
+                      if r.status_code == 200:
+                          data = r.json()
+                          if data and data[0]:
+                              res = "".join(p[0] for p in data[0] if p and p[0]).strip()
+                              if res:
+                                  return res
+                  except Exception:
+                      pass
+
+              # מנוע 2: ספריית deep-translator (GoogleTranslator)
+              try:
+                  from deep_translator import GoogleTranslator
+                  res = GoogleTranslator(source="auto", target="iw").translate(text_block)
+                  if res:
+                      return res.strip()
+              except Exception:
+                  pass
+
+              # מנוע 3: Google Clients5 API
+              try:
+                  r = requests.get(
+                      "https://clients5.google.com/translate_a/t",
+                      params={"client": "dict-chrome-ex", "sl": "auto", "tl": "iw", "q": text_block},
+                      headers=HTTP_HEADERS,
+                      timeout=15
+                  )
+                  if r.status_code == 200:
+                      d = r.json()
+                      if isinstance(d, list) and d:
+                          val = d[0] if isinstance(d[0], str) else (d[0][0] if isinstance(d[0], list) else "")
+                          if val:
+                              return str(val).strip()
+              except Exception:
+                  pass
+
+              return text_block
+
+          def translate_batch_worker(batch_cues):
+              if not batch_cues:
+                  return []
+              # שימוש במפריד מספרי ייחודי ⟪idx⟫ לכל שורה כך שגם אם שורות מתאחדות בתרגום, כל כתובית חוזרת למקומה המדויק!
+              tagged_lines = [f"({idx}) {c[2].replace(chr(10), ' ').strip()}" for idx, c in enumerate(batch_cues)]
+              combined = "\n".join(tagged_lines)
+              tr_combined = translate_text_block_to_hebrew(combined)
+              tr_lines = [ln.strip() for ln in tr_combined.splitlines() if ln.strip()]
+
+              out_batch = []
+              if len(tr_lines) == len(batch_cues):
+                  for (s_ms, e_ms, _), t_ln in zip(batch_cues, tr_lines):
+                      clean_t = re.sub(r"^\(\d+\)\s*", "", t_ln).strip()
+                      out_batch.append([s_ms, e_ms, clean_t or _])
+                  return out_batch
+
+              # פענוח לפי המספור (idx) אם כמות השורות השתנתה
+              mapped = {}
+              parts = re.split(r"\((\d+)\)", tr_combined)
+              if len(parts) >= 3:
+                  for k in range(1, len(parts) - 1, 2):
+                      try:
+                          b_idx = int(parts[k])
+                          b_txt = parts[k + 1].replace("\n", " ").strip()
+                          if b_txt:
+                              mapped[b_idx] = b_txt
+                      except Exception:
+                          pass
+
+              for idx, (s_ms, e_ms, orig_txt) in enumerate(batch_cues):
+                  if idx in mapped and mapped[idx]:
+                      out_batch.append([s_ms, e_ms, mapped[idx]])
+                  else:
+                      single_tr = re.sub(r"^\(\d+\)\s*", "", translate_text_block_to_hebrew(orig_txt)).strip()
+                      out_batch.append([s_ms, e_ms, single_tr or orig_txt])
+              return out_batch
 
           def translate_cues_to_hebrew(cues_list):
               if not cues_list:
@@ -229,55 +330,18 @@ jobs:
               if sum(1 for ch in sample_txt if "\u0590" <= ch <= "\u05FF") >= 5:
                   return cues_list
 
+              print(f"Translating {len(cues_list)} deduplicated subtitle cues to Hebrew in parallel...", flush=True)
+              batch_size = 22
+              batches = [cues_list[i:i + batch_size] for i in range(0, len(cues_list), batch_size)]
+
               translated_cues = []
-              batch_size = 40
-              hebrew_chars_count = 0
+              with ThreadPoolExecutor(max_workers=8) as ex:
+                  for res_batch in ex.map(translate_batch_worker, batches):
+                      translated_cues.extend(res_batch)
 
-              for i in range(0, len(cues_list), batch_size):
-                  batch = cues_list[i:i + batch_size]
-                  src_lines = [c[2].replace("\n", " ").strip() for c in batch]
-                  payload_text = "\n".join(src_lines)
-                  tr_lines = None
-                  try:
-                      r = requests.post(
-                          "https://translate.googleapis.com/translate_a/single",
-                          params={"client": "gtx", "sl": "auto", "tl": "iw", "dt": "t"},
-                          data={"q": payload_text},
-                          timeout=20
-                      )
-                      if r.status_code == 200:
-                          tr_full = "".join(p[0] for p in r.json()[0] if p and p[0])
-                          cand_lines = [ln.strip() for ln in tr_full.splitlines() if ln.strip()]
-                          if len(cand_lines) == len(src_lines):
-                              tr_lines = cand_lines
-                  except Exception:
-                      pass
-
-                  if not tr_lines:
-                      tr_lines = []
-                      for s_ln in src_lines:
-                          try:
-                              r_single = requests.post(
-                                  "https://translate.googleapis.com/translate_a/single",
-                                  params={"client": "gtx", "sl": "auto", "tl": "iw", "dt": "t"},
-                                  data={"q": s_ln},
-                                  timeout=10
-                              )
-                              if r_single.status_code == 200:
-                                  t_s = "".join(p[0] for p in r_single.json()[0] if p and p[0]).strip()
-                                  tr_lines.append(t_s or s_ln)
-                              else:
-                                  tr_lines.append(s_ln)
-                          except Exception:
-                              tr_lines.append(s_ln)
-
-                  for (s_ms, e_ms, _), t_txt in zip(batch, tr_lines):
-                      hebrew_chars_count += sum(1 for ch in t_txt if "\u0590" <= ch <= "\u05FF")
-                      translated_cues.append([s_ms, e_ms, t_txt])
-
-              if hebrew_chars_count > 0:
-                  return translated_cues
-              return None
+              hebrew_chars = sum(1 for _, _, txt in translated_cues for ch in txt if "\u0590" <= ch <= "\u05FF")
+              print(f"Translation finished: {len(translated_cues)} cues, {hebrew_chars} Hebrew characters generated.", flush=True)
+              return translated_cues if hebrew_chars > 0 else None
 
           def fetch_subtitles_for_url(video_url: str, base_stem: str = None):
               if subs_dir.exists():
@@ -289,8 +353,7 @@ jobs:
                   "python3", "-m", "yt_dlp",
                   "--ignore-config", "--force-ipv4", "--no-check-certificates",
                   "--skip-download", "--ignore-errors",
-                  "--sleep-requests", "1.5",
-                  "--sleep-subtitles", "5",
+                  "--sleep-requests", "1",
                   "--js-runtimes", "deno",
                   "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
                   "--convert-subs", "srt",
@@ -301,30 +364,24 @@ jobs:
               if has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
-              for sub_try in [
-                  ["--write-subs", "--sub-langs", "he,iw"],
-                  ["--write-auto-subs", "--sub-langs", "iw,he"],
-              ]:
-                  subprocess.run(base_sub_cmd + sub_try + [video_url], check=False)
-                  he_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
-                  if he_srts:
-                      src_f = he_srts[0]
-                      clean_cues = clean_and_deduplicate_srt(src_f.read_text(encoding="utf-8", errors="replace"))
-                      if clean_cues:
-                          clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_f.stem)
-                          final_he = subs_dir / f"{clean_stem}.he.srt"
-                          final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
-                          for p in he_srts:
-                              if p != final_he:
-                                  p.unlink(missing_ok=True)
-                          return [final_he], "כתוביות בעברית (SRT נקי)"
+              # 1. בדיקה מהירה אם יש כתוביות ידניות מוכנות בעברית
+              subprocess.run(base_sub_cmd + ["--write-subs", "--sub-langs", "he,iw", video_url], check=False)
+              he_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
+              if he_srts:
+                  src_f = he_srts[0]
+                  clean_cues = clean_and_deduplicate_srt(src_f.read_text(encoding="utf-8", errors="replace"))
+                  if clean_cues:
+                      clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_f.stem)
+                      final_he = subs_dir / f"{clean_stem}.he.srt"
+                      final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
+                      for p in he_srts:
+                          if p != final_he:
+                              p.unlink(missing_ok=True)
+                      return [final_he], "כתוביות בעברית (SRT נקי)"
 
-              for en_try in [
-                  ["--write-subs", "--sub-langs", "en-orig,en,en.*"],
-                  ["--write-auto-subs", "--sub-langs", "en-orig,en,en.*"],
-                  ["--write-subs", "--write-auto-subs"],
-              ]:
-                  subprocess.run(base_sub_cmd + en_try + [video_url], check=False)
+              # 2. הורדת קובץ מקור בודד (en-orig או en) ותרגום מקבילי מלא לעברית (מונע כפילויות ומונע שגיאת 429 של יוטיוב על iw!)
+              for lang_code in ["en-orig", "en", "en.*"]:
+                  subprocess.run(base_sub_cmd + ["--write-subs", "--write-auto-subs", "--sub-langs", lang_code, video_url], check=False)
                   en_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
                   if en_srts:
                       src_en = en_srts[0]
@@ -359,10 +416,9 @@ jobs:
 
               files = [p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0]
               if not files:
-                  raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור קישור זה")
+                  raise SystemExit("::error::לא נמצאו כתוביות עבור קישור זה")
               primary_file = files[0]
           else:
-              # מניעת הוספת ערוץ bin_data (פרקים משובשים שמנפחים את ציר הזמן ב-VLC ב-5 עד 10 דקות ריקות בסוף!)
               def get_fmt_args(strict_hd: bool, prefer_hls: bool = False):
                   if quality == "audio":
                       return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
@@ -517,7 +573,6 @@ jobs:
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
                       if att_idx > 1:
-                          print("Cooling down 3 seconds before next client attempt...", flush=True)
                           time.sleep(3)
 
                       if stage_dir.exists():
@@ -601,9 +656,6 @@ jobs:
           file_mb = round(primary_file.stat().st_size / (1024 * 1024), 2)
           print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) <<<", flush=True)
 
-          # פיצול קבצים מעל 1.85GB:
-          # תיקון קריטי: שימוש ב--map 0:v:0 -map 0:a:0? -dn -map_chapters -1 (ללא ערוץ bin_data!)
-          # ושימוש ב--segment_format_options movflags=+faststart כדי שאטום ה-moov ייכתב בתחילת כל חלק!
           MAX_SINGLE_ZIP_BYTES = 1850 * 1024 * 1024
           if primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
               num_parts = math.ceil(primary_file.stat().st_size / (1400 * 1024 * 1024))
@@ -747,7 +799,7 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 9.8,
+              "v": 10.0,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
