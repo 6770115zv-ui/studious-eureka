@@ -11,13 +11,15 @@ try { importScripts("config.js"); } catch {}
 const DEFAULTS = { ...BUILTIN_CONFIG, ...(self.DEFAULT_CONFIG || {}) };
 const API = "https://api.github.com";
 const CFG_KEY = "ytproxy_cfg";
-const CK_STATUS_KEY = "ytproxy_ck_status";
 const JOBS_KEY = "ytproxy_jobs";
 const HIST_KEY = "ytproxy_history";
 const RECS_KEY = "ytproxy_recs";
 const UPDATE_HOST = "com.rafi.ytproxy.updater";
 const ZIP_CACHE_NAME = "ytcloud-assets-v5";
 const KEEPALIVE_ALARM = "ytcloud_keepalive";
+
+// מחיקת כל התראה ישנה שנתקעה בזיכרון המקומי של הדפדפן
+chrome.storage.local.remove("ytproxy_ck_status").catch(() => {});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jobs = new Map();
@@ -32,13 +34,11 @@ async function getConfig() {
       cfg[k] = String(v).trim();
     }
   }
-  // שמירה קשיחה על הטוקן ומפתח העוגיות הקבועים מתוך config.js כך שלעולם לא יתאפסו בטעינת התוסף!
   if (self.DEFAULT_CONFIG && self.DEFAULT_CONFIG.token && !cfg.token) {
     cfg.token = self.DEFAULT_CONFIG.token;
   }
-  if (BUILTIN_CONFIG.cookieKey && (!cfg.cookieKey || cfg.cookieKey.length !== 64)) {
-    cfg.cookieKey = BUILTIN_CONFIG.cookieKey;
-  }
+  // קיבוע מוחלט של מפתח העוגיות הקבוע כך שלעולם לא ישתנה ולא ידרוש עדכון ידני!
+  cfg.cookieKey = BUILTIN_CONFIG.cookieKey;
   for (const k of Object.keys(BUILTIN_CONFIG)) cfg[k] = String(cfg[k] ?? "").trim();
   if (!cfg.workflow) cfg.workflow = "download.yml";
   if (!cfg.ref) cfg.ref = "main";
@@ -54,14 +54,9 @@ async function setConfig(patch) {
       next[k] = String(v).trim();
     }
   }
+  next.cookieKey = BUILTIN_CONFIG.cookieKey;
   await chrome.storage.local.set({ [CFG_KEY]: next });
   return getConfig();
-}
-
-async function sha256ShortHex(text) {
-  const data = new TextEncoder().encode(String(text || ""));
-  const hashBuf = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hashBuf), (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 12);
 }
 
 async function getHistory() {
@@ -335,7 +330,6 @@ async function findReleaseAssetsByTag(cfg, tag) {
   let qualityInfo = "";
   let emailStatus = "";
   let cloudTempPath = "";
-  let cookieKeyStatus = "";
   if (rel.body && String(rel.body).trim().startsWith("{")) {
     try {
       const parsed = JSON.parse(String(rel.body).trim());
@@ -343,11 +337,10 @@ async function findReleaseAssetsByTag(cfg, tag) {
       if (parsed.quality_info) qualityInfo = String(parsed.quality_info);
       if (parsed.email_status) emailStatus = String(parsed.email_status);
       if (parsed.cloud_temp_path) cloudTempPath = String(parsed.cloud_temp_path);
-      if (parsed.cookie_key_status) cookieKeyStatus = String(parsed.cookie_key_status);
     } catch {}
   }
   const assets = (rel.assets || []).filter((a) => a.url || a.browser_download_url).map((a) => ({
-    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath, cookieKeyStatus
+    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath
   }));
   return assets.length ? assets : null;
 }
@@ -560,9 +553,6 @@ async function driveJob(jobId) {
         if (assets[0].qualityInfo) detectedQuality = assets[0].qualityInfo;
         if (assets[0].emailStatus) detectedEmailStatus = assets[0].emailStatus;
         if (assets[0].cloudTempPath) patchJob(jobId, { tempPath: assets[0].cloudTempPath });
-        if (assets[0].cookieKeyStatus) {
-          await chrome.storage.local.set({ [CK_STATUS_KEY]: assets[0].cookieKeyStatus }).catch(() => {});
-        }
         if (detectedQuality) patchJob(jobId, { actualQuality: detectedQuality });
 
         const isBundle = job.mode === "collection";
@@ -636,9 +626,7 @@ async function startDownload(payload) {
   }
   const requestId = crypto.randomUUID();
   let cookiesEnc = "";
-  let ckHash = "";
   if (cfg.cookieKey && cfg.cookieKey.length === 64) {
-    ckHash = await sha256ShortHex(cfg.cookieKey);
     const cookies = await exportYoutubeCookies();
     if (cookies) {
       try { cookiesEnc = await encryptCookies(cookies, cfg.cookieKey); } catch {}
@@ -662,8 +650,7 @@ async function startDownload(payload) {
     norm: Boolean(payload.normalizeAudio),
     speed: payload.speedFactor || "1",
     send_email: Boolean(payload.sendEmail),
-    email: targetEmail,
-    ck_hash: ckHash
+    email: targetEmail
   });
 
   const effectiveQuality = (payload.subtitles === "only" || payload.quality === "subs_only") ? "subs_only" : (payload.quality || "best");
@@ -860,14 +847,11 @@ async function handle(msg) {
     }
     case "GET_PREFS": {
       const cfg = await getConfig();
-      const ckSt = (await chrome.storage.local.get(CK_STATUS_KEY))[CK_STATUS_KEY] || "unknown";
       return {
         configured: Boolean(cfg.owner && cfg.repo && cfg.token),
         owner: cfg.owner,
         repo: cfg.repo,
-        emailTo: cfg.emailTo || "",
-        cookieKey: cfg.cookieKey || "",
-        cookieKeyStatus: ckSt
+        emailTo: cfg.emailTo || ""
       };
     }
     case "GET_CONFIG": return getConfig();
