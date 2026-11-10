@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v9.6 — מרכז הורדות ענן, כתוביות וסינון AI</title>
+  <title>YouTube Cloud Ultra v10.0 — הורדה בענן ומתרגם כתוביות לעברית</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,7 +10,7 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v9.6</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v10.0</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
@@ -38,12 +38,12 @@
           <select id="formatSelect" class="input"></select>
         </div>
         <div>
-          <label class="small muted">כתוביות (עברית נקייה ללא כפילויות, או אנגלית אם אין):</label>
+          <label class="small muted">כתוביות בעברית (ניקוי כפילויות + תרגום אוטומטי לעברית):</label>
           <select id="subsSelect" class="input">
             <option value="none">ללא כתוביות</option>
-            <option value="embed">הטמע כתוביות בתוך הווידאו</option>
-            <option value="files">הורד כקובץ SRT נפרד לצד הווידאו</option>
-            <option value="only">📝 הורד כתוביות בלבד (ללא הווידאו - SRT)</option>
+            <option value="embed">הטמע כתוביות בעברית בתוך הווידאו</option>
+            <option value="files">הורד כקובץ SRT בעברית לצד הווידאו</option>
+            <option value="only">📝 הורד כתוביות בעברית בלבד (ללא הווידאו - SRT)</option>
           </select>
         </div>
       </div>
@@ -111,9 +111,38 @@
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn btn--primary" id="downloadBtn" type="button" style="flex:2;padding:11px;font-size:14px;">🚀 התחל הורדה בענן GitHub</button>
-        <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:600;border-color:var(--ok);color:var(--ok);" title="מוריד קובץ כתוביות נקי אחד בעברית (או באנגלית אם אין) ללא הווידאו">📝 הורד כתוביות בלבד (SRT)</button>
+        <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:600;border-color:var(--ok);color:var(--ok);" title="מוריד קובץ כתוביות נקי ומתורגם לעברית ללא הווידאו">📝 הורד כתוביות בעברית (SRT)</button>
       </div>
       <p id="hint" class="small muted" style="margin:0;text-align:center;"></p>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+        <div>
+          <h2 style="margin:0;font-size:15px;">🌐 מתרגם קובצי כתוביות לעברית (העלאת קובץ SRT / VTT מהמחשב)</h2>
+          <p class="small muted" style="margin:2px 0 0;">העלה קובץ כתוביות באנגלית או בכל שפה מהמחשב — המערכת תנקה שורות כפולות ותתרגם אותו לעברית חלקה</p>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <input type="file" id="localSrtInput" accept=".srt,.vtt,.txt" multiple class="input" style="flex:2;padding:7px 10px;"/>
+        <button class="btn btn--primary" id="translateLocalSrtBtn" type="button" style="flex:1;padding:10px;">🔄 תרגם קובץ לעברית ושמור</button>
+      </div>
+
+      <div id="srtTransProgWrap" style="display:none;flex-direction:column;gap:6px;">
+        <div class="progress-track">
+          <div id="srtTransProgBar" class="progress-bar" style="width:0%;"></div>
+        </div>
+        <div id="srtTransStatus" class="small muted"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (אחוז הורדה למחשב + נתיב קבצים זמניים ובנייה)</h2>
+        <button class="btn small" id="clearJobsBtn" type="button">נקה שהושלמו</button>
+      </div>
+      <div id="jobList" style="display:flex;flex-direction:column;gap:10px;"></div>
     </section>
 
     <section class="card">
@@ -155,14 +184,6 @@
       </div>
       <div id="recStatusText" class="small muted"></div>
       <div id="recList" style="display:flex;flex-direction:column;gap:10px;"></div>
-    </section>
-
-    <section class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (אחוז הורדה למחשב + נתיב קבצים זמניים ובנייה)</h2>
-        <button class="btn small" id="clearJobsBtn" type="button">נקה שהושלמו</button>
-      </div>
-      <div id="jobList" style="display:flex;flex-direction:column;gap:10px;"></div>
     </section>
 
     <section class="card">
