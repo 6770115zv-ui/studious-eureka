@@ -32,12 +32,18 @@ jobs:
       - name: Install yt-dlp + ffmpeg + curl_cffi + atomicparsley
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends ffmpeg zip python3-cryptography python3-pip atomicparsley
+          sudo apt-get install -y --no-install-recommends ffmpeg zip python3-cryptography python3-pip atomicparsley curl
           python3 -m pip install --break-system-packages -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests
           if command -v docker >/dev/null 2>&1; then
             docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest || true
+            for i in $(seq 1 15); do
+              if curl -s http://127.0.0.1:4416/ping >/dev/null 2>&1 || curl -s http://127.0.0.1:4416 >/dev/null 2>&1; then
+                echo "BgUtils PO Token Server is ready on port 4416."
+                break
+              fi
+              sleep 1
+            done
           fi
-          sleep 3
           python3 -m yt_dlp --version
 
       - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
@@ -104,10 +110,8 @@ jobs:
           out_dir.mkdir(parents=True, exist_ok=True)
           pkg_dir.mkdir(parents=True, exist_ok=True)
           lowres_backup_dir.mkdir(parents=True, exist_ok=True)
-          cookie_file = Path("/tmp/cookies.txt")
-          cookie_full_file = Path("/tmp/cookies_full.txt")
+          cookie_file = Path("/tmp/cookies_full.txt")
 
-          # בדיקת התאמת מפתח העוגיות (COOKIE_KEY) בין התוסף לבין GitHub Secrets
           secret_hash = hashlib.sha256(secret_key_env.encode("utf-8")).hexdigest()[:12] if len(secret_key_env) == 64 else ""
           cookie_key_status = "ok"
           if not secret_key_env:
@@ -119,7 +123,6 @@ jobs:
           if cookies_enc:
               raw_enc = base64.b64decode(cookies_enc)
               decrypted_txt = None
-              # מנסים תחילה עם הסוד מ-GitHub Secrets, ואם חסר/שונה מנסים עם המפתח הקבוע
               for candidate_name, candidate_hex in [("secret", secret_key_env), ("fallback", fallback_key_env)]:
                   if len(candidate_hex) == 64:
                       try:
@@ -132,19 +135,10 @@ jobs:
                           pass
 
               if decrypted_txt and ("youtube.com" in decrypted_txt or "# Netscape" in decrypted_txt):
-                  cookie_full_file.write_text(decrypted_txt, encoding="utf-8")
-                  cleaned_lines = []
-                  for line in decrypted_txt.splitlines():
-                      if line.startswith("#") or not line.strip():
-                          cleaned_lines.append(line)
-                          continue
-                      parts = line.split("\t")
-                      if len(parts) >= 7 and parts[5] in ("PREF", "VISITOR_INFO1_LIVE", "VISITOR_PRIVACY_METADATA", "YSC", "__Secure-YEC"):
-                          continue
-                      cleaned_lines.append(line)
-                  cookie_file.write_text("\n".join(cleaned_lines) + "\n", encoding="utf-8")
+                  # שומרים את כל העוגיות במלואן (כולל VISITOR_INFO1_LIVE ו-__Secure-YEC) כפי שהוכח בלוג שעובד ללא חסימה!
+                  cookie_file.write_text(decrypted_txt, encoding="utf-8")
                   has_ck = True
-                  print(f"Cookies decrypted successfully (Key status: {cookie_key_status}).", flush=True)
+                  print(f"Full cookies decrypted successfully (Key status: {cookie_key_status}).", flush=True)
               else:
                   cookie_key_status = "decrypt_failed_mismatch"
                   print("Cookie decryption failed! Key mismatch between extension and GitHub.", flush=True)
@@ -163,9 +157,6 @@ jobs:
           height_map = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480, "360": 360}
           req_h = height_map.get(quality, 2160)
 
-          # ====================================================================
-          # מנוע ניקוי, איחוד כפילויות (Rollup) ותרגום כתוביות לעברית (ללא חזרות!)
-          # ====================================================================
           def ts_to_ms(ts_str: str) -> int:
               try:
                   ts_str = ts_str.strip().replace(".", ",")
@@ -204,7 +195,6 @@ jobs:
                       continue
                   start_ms = ts_to_ms(ts_parts[0])
                   end_ms = ts_to_ms(ts_parts[1].split()[0])
-                  # דילוג על כתוביות מעבר זעירות (כמו 10ms בכתוביות אוטומטיות של יוטיוב)
                   if end_ms - start_ms < 140:
                       continue
 
@@ -219,7 +209,6 @@ jobs:
                       continue
                   parsed_cues.append([start_ms, end_ms, text_lines])
 
-              # הסרת כפילויות מתגלגלות (Rollup): אם שורה כבר הופיעה בכתובית הקודמת, משאירים רק את השורה החדשה!
               deduped = []
               recent_lines = []
               for start_ms, end_ms, t_lines in parsed_cues:
@@ -236,7 +225,6 @@ jobs:
                           deduped[-1][1] = max(deduped[-1][1], end_ms)
                       continue
                   joined_text = " ".join(new_lines).strip()
-                  # אם הכתובית הנוכחית זהה לקודמת, רק מאריכים את זמן הסיום שלה
                   if deduped and deduped[-1][2].lower() == joined_text.lower():
                       deduped[-1][1] = max(deduped[-1][1], end_ms)
                   else:
@@ -253,7 +241,6 @@ jobs:
           def translate_cues_to_hebrew(cues_list):
               if not cues_list:
                   return None
-              # אם הטקסט כבר מכיל עברית, אין צורך לתרגם
               sample_txt = " ".join(c[2] for c in cues_list[:15])
               if sum(1 for ch in sample_txt if "\u0590" <= ch <= "\u05FF") >= 5:
                   return cues_list
@@ -283,7 +270,6 @@ jobs:
                   except Exception as e:
                       print("Batch POST translate notice:", e, flush=True)
 
-                  # אם כמות השורות במנה לא תאמה בגלל ירידת שורה, מתרגמים שורות בודדות במנה
                   if not tr_lines:
                       tr_lines = []
                       for s_ln in src_lines:
@@ -307,7 +293,6 @@ jobs:
                       translated_cues.append([s_ms, e_ms, t_txt])
 
               if hebrew_chars_count > 0:
-                  print(f"Successfully translated subtitles to Hebrew ({len(translated_cues)} clean cues)!", flush=True)
                   return translated_cues
               return None
 
@@ -321,6 +306,7 @@ jobs:
                   "python3", "-m", "yt_dlp",
                   "--ignore-config", "--force-ipv4", "--no-warnings", "--no-check-certificates",
                   "--skip-download", "--ignore-errors",
+                  "--sleep-requests", "1.5",
                   "--sleep-subtitles", "5",
                   "--js-runtimes", "deno",
                   "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
@@ -332,7 +318,6 @@ jobs:
               if has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
-              # 1. ניסיון ראשון: כתוביות בעברית
               for sub_try in [
                   ["--write-subs", "--sub-langs", "he,iw"],
                   ["--write-auto-subs", "--sub-langs", "iw,he"],
@@ -351,7 +336,6 @@ jobs:
                                   p.unlink(missing_ok=True)
                           return [final_he], "כתוביות בעברית (SRT נקי)"
 
-              # 2. ניסיון שני: הורדת אנגלית, ניקוי שורות כפולות ותרגום לעברית (קובץ יחיד!)
               for en_try in [
                   ["--write-subs", "--sub-langs", "en-orig,en,en.*"],
                   ["--write-auto-subs", "--sub-langs", "en-orig,en,en.*"],
@@ -363,7 +347,6 @@ jobs:
                       src_en = en_srts[0]
                       clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_en.stem)
                       clean_en_cues = clean_and_deduplicate_srt(src_en.read_text(encoding="utf-8", errors="replace"))
-                      # מוחקים את הקבצים הגולמיים הכפולים כדי שלעולם לא ירדו 2 קבצים באנגלית!
                       for p in en_srts:
                           p.unlink(missing_ok=True)
 
@@ -396,9 +379,6 @@ jobs:
                   raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור קישור זה")
               primary_file = files[0]
           else:
-              # מנוע בחירת הפורמטים:
-              # משתמשים ב--format גמיש שתמיד כולל גיבוי (/bv*+ba/b) כך שלעולם לא תתרחש שגיאת "Requested format is not available"!
-              # ובמקביל משתמשים ב--format-sort (-S) כדי לתת עדיפות עליונה ל-1080p/4K!
               def get_fmt_args(prefer_hls: bool = False):
                   if quality == "audio":
                       return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
@@ -415,8 +395,8 @@ jobs:
                       fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
                       sort_res = f"res:{req_h}"
                   else:
-                      # במצב best: מעדיפים 1080p/4K עם גודל עד 1.8GB, אך תמיד נופלים בבטחה לכל פורמט וידאו+אודיו זמין בלי להיכשל!
-                      fmt = "bv*[height>=1080][filesize<1800M]+ba/bv*[height>=1080]+ba/bv*+ba/b"
+                      # במצב best: מחפשים קודם 1080p/4K, אם אין אז 720p, ורק בסוף כל איכות אחרת
+                      fmt = "bv*[height>=1080][filesize<1800M]+ba/bv*[height>=1080]+ba/bv*[height>=720]+ba/bv*+ba/b"
                       sort_res = "res:1080"
 
                   if prefer_hls:
@@ -468,14 +448,17 @@ jobs:
                       pass
                   return 0, 0.0, "תקין"
 
+              # השהיות מובנות בין קריאות API ובין הורדות כדי שיוטיוב לא יחסום או ישנמך איכות!
               extra_args = [
                   "--force-ipv4",
                   "--no-mtime",
                   "--no-warnings",
                   "--no-check-certificates",
                   "--js-runtimes", "deno",
+                  "--sleep-requests", "1.5",
+                  "--sleep-interval", "2",
+                  "--max-sleep-interval", "5",
                   "--socket-timeout", "25",
-                  "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
               ]
               if mode != "collection":
                   extra_args.append("--no-playlist")
@@ -492,21 +475,62 @@ jobs:
               if chapters and not is_audio:
                   extra_args += ["--split-chapters"]
 
-              # מטריצת הניסיונות המלאה (משלבת גם ניסיונות בלי עוגיות וגם ניסיונות עם עוגיות ו-PO Token בנפרד!):
-              attempts = [
-                  # 1. ניסיונות ללא עוגיות (מהירים מאוד בסרטונים רגילים ועוקפים חסימת IP של עוגיות)
-                  ("No-Cookies: Android VR + TV Embedded Pure HD", ["--concurrent-fragments", "1", "--http-chunk-size", "10M", "--extractor-args", "youtube:player_client=android_vr,tv_embedded;player_skip=webpage"], True, False),
-                  ("No-Cookies: iOS + Web Safari HLS Stream", ["--concurrent-fragments", "4", "--impersonate", "safari", "--extractor-args", "youtube:player_client=ios,web_safari"], True, True),
-                  ("No-Cookies: MWeb + Web + Chrome Impersonate + PO-Token", ["--concurrent-fragments", "1", "--http-chunk-size", "10M", "--impersonate", "chrome", "--extractor-args", "youtube:player_client=mweb,web;fetch_pot=always"], True, False),
-              ]
+              pot_ep = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+              attempts = []
+
+              # כשיש עוגיות, מתחילים מיד עם העוגיות המלאות וכל קליינט בנפרד (ללא שריפת IP בניסיונות ללא עוגיות)!
               if has_ck:
                   attempts.extend([
-                      # 2. ניסיונות מאומתים עם עוגיות (עבור סרטונים שדורשים התחברות / בדיקת בוט)
-                      ("Auth Cookies: Web + MWeb + Chrome + Chunked 10M", ["--cookies", str(cookie_file), "--concurrent-fragments", "1", "--http-chunk-size", "10M", "--impersonate", "chrome", "--extractor-args", "youtube:player_client=web,mweb;fetch_pot=always"], True, False),
-                      ("Auth Cookies: Web Safari HLS Stream", ["--cookies", str(cookie_file), "--concurrent-fragments", "4", "--impersonate", "safari", "--extractor-args", "youtube:player_client=web_safari;fetch_pot=always"], True, True),
-                      ("Auth Cookies: TV / Web Creator HD", ["--cookies", str(cookie_file), "--concurrent-fragments", "1", "--http-chunk-size", "10M", "--extractor-args", "youtube:player_client=tv,web_creator,tv_embedded;fetch_pot=always"], True, False),
-                      ("Auth Full Cookies + Geo-Bypass XFF", ["--cookies", str(cookie_full_file), "--xff", geo, "--concurrent-fragments", "1", "--http-chunk-size", "10M", "--extractor-args", "youtube:player_client=mweb,web,tv;fetch_pot=always"], False, False),
+                      # 1. Desktop Web עם עוגיות מלאות + XFF + PO Token + Chunked 10M
+                      ("Auth Full Cookies: Desktop Web + XFF + PO-Token (1080p/4K)", [
+                          "--cookies", str(cookie_file), "--xff", geo,
+                          "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
+                          "--extractor-args", f"youtube:player_client=web;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, False),
+                      # 2. Web Safari עם עוגיות מלאות + XFF (זרם HLS/MP4 עמיד בפני 403)
+                      ("Auth Full Cookies: Web Safari + XFF + PO-Token (1080p/4K)", [
+                          "--cookies", str(cookie_file), "--xff", geo,
+                          "--impersonate", "safari", "--concurrent-fragments", "3",
+                          "--extractor-args", f"youtube:player_client=web_safari;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, True),
+                      # 3. TV Client עם עוגיות מלאות + XFF (פותח 1080p בסרטונים חסומים ב-web)
+                      ("Auth Full Cookies: Smart TV Client + XFF + PO-Token (1080p/4K)", [
+                          "--cookies", str(cookie_file), "--xff", geo,
+                          "--concurrent-fragments", "1", "--http-chunk-size", "10M",
+                          "--extractor-args", f"youtube:player_client=tv;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, False),
+                      # 4. Desktop Web ללא XFF (למקרה ששרת הווידאו בודק התאמת IP של ה-Runner בארה"ב)
+                      ("Auth Full Cookies: Desktop Web Direct IP + PO-Token", [
+                          "--cookies", str(cookie_file),
+                          "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
+                          "--extractor-args", f"youtube:player_client=web,tv_embedded;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, False),
+                      # 5. MWeb עם עוגיות מלאות + XFF (השלב שעבד בלוג שלך ב-100%, כעת עם בדיקת רזולוציה!)
+                      ("Auth Full Cookies: MWeb + Geo-Bypass XFF", [
+                          "--cookies", str(cookie_file), "--xff", geo,
+                          "--concurrent-fragments", "1", "--http-chunk-size", "10M",
+                          "--extractor-args", f"youtube:player_client=mweb;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, False),
                   ])
+
+              # שלבים ללא עוגיות (עבור סרטונים פתוחים או כגיבוי נוסף)
+              attempts.extend([
+                  ("No-Cookies: Android VR + TV Embedded Direct HD", [
+                      "--concurrent-fragments", "1", "--http-chunk-size", "10M",
+                      "--extractor-args", "youtube:player_client=android_vr,tv_embedded;player_skip=webpage",
+                      "--extractor-args", pot_ep
+                  ], True, False),
+                  ("No-Cookies: iOS + Web Safari HLS Stream", [
+                      "--concurrent-fragments", "3", "--impersonate", "safari",
+                      "--extractor-args", "youtube:player_client=ios,web_safari",
+                      "--extractor-args", pot_ep
+                  ], True, True),
+              ])
 
               def get_stage_files():
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
@@ -514,10 +538,15 @@ jobs:
               for u_idx, cur_url in enumerate(target_urls, 1):
                   print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
                   downloaded_media_for_url = None
+                  best_backup_h = 0
                   for item in lowres_backup_dir.iterdir():
                       item.unlink(missing_ok=True)
 
-                  for label, args, strict_hd, prefer_hls in attempts:
+                  for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
+                      if att_idx > 1:
+                          print("Cooling down 4 seconds before next client attempt...", flush=True)
+                          time.sleep(4)
+
                       if stage_dir.exists():
                           shutil.rmtree(stage_dir, ignore_errors=True)
                       stage_dir.mkdir(parents=True, exist_ok=True)
@@ -532,7 +561,7 @@ jobs:
                           "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
                       ] + args + get_fmt_args(prefer_hls) + extra_args + [cur_url]
 
-                      print(f"=== Trying: {label} ===", flush=True)
+                      print(f"=== Trying ({att_idx}/{len(attempts)}): {label} ===", flush=True)
                       subprocess.run(cmd, check=False)
 
                       s_files = get_stage_files()
@@ -542,10 +571,14 @@ jobs:
                               heights = [inspect_media_quality(m)[0] for m in media_files]
                               max_det_h = max(heights) if heights else 0
                               print(f"Detected video resolution metric: {max_det_h}p", flush=True)
-                              if 0 < max_det_h <= 480:
-                                  print(f"Got {max_det_h}p; saving as backup and checking next client for 1080p/720p...", flush=True)
-                                  for f in s_files:
-                                      shutil.copy2(str(f), str(lowres_backup_dir / f.name))
+                              if 0 < max_det_h < 720:
+                                  print(f"Got {max_det_h}p (<720p); keeping as backup and continuing to next client for Full HD...", flush=True)
+                                  if max_det_h >= best_backup_h:
+                                      best_backup_h = max_det_h
+                                      for old_b in lowres_backup_dir.iterdir():
+                                          old_b.unlink(missing_ok=True)
+                                      for f in s_files:
+                                          shutil.copy2(str(f), str(lowres_backup_dir / f.name))
                                   continue
                           for f in s_files:
                               dest_f = out_dir / f.name
@@ -555,17 +588,17 @@ jobs:
                           print(f"=== Success with: {label} ===", flush=True)
                           break
 
-                  # אם כל לקוחות ה-HD החזירו רק איכות נמוכה (כי הסרטון עצמו קיים רק באיכות נמוכה), נשתמש בגיבוי ששמרנו!
                   if not downloaded_media_for_url:
                       backup_files = [p for p in lowres_backup_dir.iterdir() if p.is_file() and p.stat().st_size > 0]
                       if backup_files:
-                          print("Using saved compatibility fallback stream.", flush=True)
+                          print(f"All clients checked; using best available stream ({best_backup_h}p).", flush=True)
                           for bf in backup_files:
                               dest_f = out_dir / bf.name
                               shutil.move(str(bf), str(dest_f))
                               downloaded_media_for_url = dest_f
 
                   if downloaded_media_for_url and subtitles in ("embed", "files"):
+                      time.sleep(3)
                       srt_list, _ = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
                       if srt_list:
                           best_srt = srt_list[0]
@@ -757,7 +790,7 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 9.0,
+              "v": 9.5,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
