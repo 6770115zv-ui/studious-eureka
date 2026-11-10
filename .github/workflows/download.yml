@@ -104,18 +104,15 @@ jobs:
           out_dir = Path("/tmp/out")
           pkg_dir = Path("/tmp/pkg")
           stage_dir = Path("/tmp/stage")
-          lowres_backup_dir = Path("/tmp/lowres_backup")
           subs_dir = Path("/tmp/subs")
           out_dir.mkdir(parents=True, exist_ok=True)
           pkg_dir.mkdir(parents=True, exist_ok=True)
-          lowres_backup_dir.mkdir(parents=True, exist_ok=True)
           cookie_file = Path("/tmp/cookies_full.txt")
 
           has_ck = False
           if cookies_enc:
               raw_enc = base64.b64decode(cookies_enc)
               decrypted_txt = None
-              # מפענח אוטומטית עם המפתח הקבוע או הסוד ב-GitHub ללא שום הודעות שגיאה או אי-התאמה!
               for candidate_hex in (fallback_key_env, secret_key_env):
                   if len(candidate_hex) == 64:
                       try:
@@ -290,7 +287,7 @@ jobs:
               out_tmpl = f"/tmp/subs/{base_stem}.%(ext)s" if base_stem else "/tmp/subs/%(title).120B [%(id)s].%(ext)s"
               base_sub_cmd = [
                   "python3", "-m", "yt_dlp",
-                  "--ignore-config", "--force-ipv4", "--no-warnings", "--no-check-certificates",
+                  "--ignore-config", "--force-ipv4", "--no-check-certificates",
                   "--skip-download", "--ignore-errors",
                   "--sleep-requests", "1.5",
                   "--sleep-subtitles", "5",
@@ -365,7 +362,10 @@ jobs:
                   raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור קישור זה")
               primary_file = files[0]
           else:
-              def get_fmt_args(prefer_hls: bool = False):
+              # מנוע בחירת הפורמטים ב-v9.7:
+              # כאשר strict_hd=True (בשלבים הראשונים), אנו דורשים אך ורק height>=720 (עם עדיפות ל-1080p/4K)!
+              # כך אם קליינט מסוים נותן רק 480p (כמו f135), התוכנה מדלגת עליו תוך שנייה אחת (בלי להוריד 750MB של 480p!) ועוברת לקליינט הבא שמספק 1080p!
+              def get_fmt_args(strict_hd: bool, prefer_hls: bool = False):
                   if quality == "audio":
                       return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
                   if quality == "audio_m4a":
@@ -377,12 +377,28 @@ jobs:
                   if quality == "audio_wav":
                       return ["-f", "ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
 
-                  if quality in ("2160", "1440", "1080", "720", "480", "360"):
+                  if strict_hd and req_h >= 720:
+                      if quality in ("2160", "1440", "1080", "720"):
+                          min_target = 720
+                          fmt = (
+                              f"bv*[height<={req_h}][height>={min_target}][filesize<1800M]+ba/"
+                              f"bv*[height<={req_h}][height>={min_target}]+ba/"
+                              f"b[height<={req_h}][height>={min_target}]"
+                          )
+                          sort_res = f"res:{req_h}"
+                      else:
+                          # מצב best בשלבי HD: מחייב 1080p ומעלה, או לפחות 720p HD (אוסר לחלוטין הורדת 480p/360p בשלבי ה-HD!)
+                          fmt = (
+                              "bv*[height>=1080][filesize<1800M]+ba/"
+                              "bv*[height>=1080]+ba/"
+                              "bv*[height>=720]+ba/"
+                              "b[height>=720]"
+                          )
+                          sort_res = "res:1080"
+                  else:
+                      # שלב גיבוי אחרון בלבד (אם לסרטון עצמו בשרתי המקור אין בכלל 720p/1080p)
                       fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
                       sort_res = f"res:{req_h}"
-                  else:
-                      fmt = "bv*[height>=1080][filesize<1800M]+ba/bv*[height>=1080]+ba/bv*[height>=720]+ba/bv*+ba/b"
-                      sort_res = "res:1080"
 
                   if prefer_hls:
                       sort_str = f"proto:m3u8_native,{sort_res},fps,vcodec:h264:vp9:av01,ext:mp4"
@@ -436,12 +452,9 @@ jobs:
               extra_args = [
                   "--force-ipv4",
                   "--no-mtime",
-                  "--no-warnings",
                   "--no-check-certificates",
                   "--js-runtimes", "deno",
-                  "--sleep-requests", "1.5",
-                  "--sleep-interval", "2",
-                  "--max-sleep-interval", "5",
+                  "--sleep-requests", "1.2",
                   "--socket-timeout", "25",
               ]
               if mode != "collection":
@@ -464,50 +477,46 @@ jobs:
 
               if has_ck:
                   attempts.extend([
-                      ("Auth Full Cookies: Desktop Web + XFF + PO-Token (1080p/4K)", [
-                          "--cookies", str(cookie_file), "--xff", geo,
-                          "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
-                          "--extractor-args", f"youtube:player_client=web;fetch_pot=always",
-                          "--extractor-args", pot_ep
-                      ], True, False),
-                      ("Auth Full Cookies: Web Safari + XFF + PO-Token (1080p/4K)", [
-                          "--cookies", str(cookie_file), "--xff", geo,
-                          "--impersonate", "safari", "--concurrent-fragments", "3",
-                          "--extractor-args", f"youtube:player_client=web_safari;fetch_pot=always",
-                          "--extractor-args", pot_ep
-                      ], True, True),
-                      ("Auth Full Cookies: Smart TV Client + XFF + PO-Token (1080p/4K)", [
-                          "--cookies", str(cookie_file), "--xff", geo,
-                          "--concurrent-fragments", "1", "--http-chunk-size", "10M",
-                          "--extractor-args", f"youtube:player_client=tv;fetch_pot=always",
-                          "--extractor-args", pot_ep
-                      ], True, False),
-                      ("Auth Full Cookies: Desktop Web Direct IP + PO-Token", [
+                      # 1. שרשרת ברירת המחדל העדכנית של yt-dlp 2026 (web_embedded + tv_samsung + web) ללא דריסת player_client!
+                      #    זהו בדיוק השלב שפתח בלוג שלך את פורמט 399+251 (1080p Full HD)!
+                      ("Auth Native 2026 Clients (web_embedded + tv_samsung) + PO-Token", [
                           "--cookies", str(cookie_file),
-                          "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
-                          "--extractor-args", f"youtube:player_client=web,tv_embedded;fetch_pot=always",
+                          "--concurrent-fragments", "3",
                           "--extractor-args", pot_ep
                       ], True, False),
-                      ("Auth Full Cookies: MWeb + Geo-Bypass XFF", [
+                      # 2. פנייה מפורשת ללקוחות tv_samsung, web_embedded ו-web_creator עם PO-Token
+                      ("Auth TV Samsung / Web Embedded / Creator HD", [
+                          "--cookies", str(cookie_file),
+                          "--concurrent-fragments", "2",
+                          "--extractor-args", "youtube:player_client=tv_samsung,web_embedded,web_creator;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, False),
+                      # 3. לקוחות MWeb + Web Safari עם XFF ו-PO-Token (עבור סרטונים חסומים אזורית ב-HD)
+                      ("Auth MWeb / Safari HD + Geo-Bypass XFF", [
                           "--cookies", str(cookie_file), "--xff", geo,
-                          "--concurrent-fragments", "1", "--http-chunk-size", "10M",
-                          "--extractor-args", f"youtube:player_client=mweb;fetch_pot=always",
+                          "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
+                          "--extractor-args", "youtube:player_client=mweb,web_safari;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False),
                   ])
 
-              attempts.extend([
-                  ("No-Cookies: Android VR + TV Embedded Direct HD", [
+              # 4. ניסיון ללא עוגיות (עבור tv_embedded ו-android_vr שמדולגים אוטומטית כשיש עוגיות)
+              attempts.append((
+                  "No-Cookies: Android VR + TV Embedded + iOS Direct HD", [
+                      "--concurrent-fragments", "2", "--http-chunk-size", "10M",
+                      "--extractor-args", "youtube:player_client=android_vr,tv_embedded,ios;player_skip=webpage",
+                      "--extractor-args", pot_ep
+                  ], True, False
+              ))
+
+              # 5. שלב גיבוי אוניברסלי אחרון (מופעל אך ורק אם לסרטון עצמו ביוטיוב אין בכלל 720p/1080p באף קליינט!)
+              attempts.append((
+                  "Universal Fallback (When Source Video Has Only <=480p)",
+                  (["--cookies", str(cookie_file), "--xff", geo] if has_ck else []) + [
                       "--concurrent-fragments", "1", "--http-chunk-size", "10M",
-                      "--extractor-args", "youtube:player_client=android_vr,tv_embedded;player_skip=webpage",
                       "--extractor-args", pot_ep
-                  ], True, False),
-                  ("No-Cookies: iOS + Web Safari HLS Stream", [
-                      "--concurrent-fragments", "3", "--impersonate", "safari",
-                      "--extractor-args", "youtube:player_client=ios,web_safari",
-                      "--extractor-args", pot_ep
-                  ], True, True),
-              ])
+                  ], False, False
+              ))
 
               def get_stage_files():
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
@@ -515,14 +524,11 @@ jobs:
               for u_idx, cur_url in enumerate(target_urls, 1):
                   print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
                   downloaded_media_for_url = None
-                  best_backup_h = 0
-                  for item in lowres_backup_dir.iterdir():
-                      item.unlink(missing_ok=True)
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
                       if att_idx > 1:
-                          print("Cooling down 4 seconds before next client attempt...", flush=True)
-                          time.sleep(4)
+                          print("Cooling down 3 seconds before next client attempt...", flush=True)
+                          time.sleep(3)
 
                       if stage_dir.exists():
                           shutil.rmtree(stage_dir, ignore_errors=True)
@@ -536,27 +542,14 @@ jobs:
                           "--fragment-retries", "8",
                           "--file-access-retries", "5",
                           "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
-                      ] + args + get_fmt_args(prefer_hls) + extra_args + [cur_url]
+                      ] + args + get_fmt_args(strict_hd, prefer_hls) + extra_args + [cur_url]
 
-                      print(f"=== Trying ({att_idx}/{len(attempts)}): {label} ===", flush=True)
+                      print(f"=== Trying ({att_idx}/{len(attempts)}): {label} (StrictHD={strict_hd}) ===", flush=True)
                       subprocess.run(cmd, check=False)
 
                       s_files = get_stage_files()
                       media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
                       if media_files:
-                          if not is_audio and strict_hd and req_h >= 720:
-                              heights = [inspect_media_quality(m)[0] for m in media_files]
-                              max_det_h = max(heights) if heights else 0
-                              print(f"Detected video resolution metric: {max_det_h}p", flush=True)
-                              if 0 < max_det_h < 720:
-                                  print(f"Got {max_det_h}p (<720p); keeping as backup and continuing to next client for Full HD...", flush=True)
-                                  if max_det_h >= best_backup_h:
-                                      best_backup_h = max_det_h
-                                      for old_b in lowres_backup_dir.iterdir():
-                                          old_b.unlink(missing_ok=True)
-                                      for f in s_files:
-                                          shutil.copy2(str(f), str(lowres_backup_dir / f.name))
-                                  continue
                           for f in s_files:
                               dest_f = out_dir / f.name
                               shutil.move(str(f), str(dest_f))
@@ -565,17 +558,8 @@ jobs:
                           print(f"=== Success with: {label} ===", flush=True)
                           break
 
-                  if not downloaded_media_for_url:
-                      backup_files = [p for p in lowres_backup_dir.iterdir() if p.is_file() and p.stat().st_size > 0]
-                      if backup_files:
-                          print(f"All clients checked; using best available stream ({best_backup_h}p).", flush=True)
-                          for bf in backup_files:
-                              dest_f = out_dir / bf.name
-                              shutil.move(str(bf), str(dest_f))
-                              downloaded_media_for_url = dest_f
-
                   if downloaded_media_for_url and subtitles in ("embed", "files"):
-                      time.sleep(3)
+                      time.sleep(2)
                       srt_list, _ = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
                       if srt_list:
                           best_srt = srt_list[0]
@@ -767,7 +751,7 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 9.6,
+              "v": 9.7,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
