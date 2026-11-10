@@ -56,7 +56,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           python3 - << 'EOF'
-          import os, sys, re, json, time, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
+          import os, sys, re, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -133,8 +133,8 @@ jobs:
           is_subs_only = (quality == "subs_only" or subtitles == "only")
           is_audio = quality.startswith("audio")
           height_map = {"2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480, "360": 360}
-          # במצב best מכוונים ל-1080p Full HD תקני כדי שהקובץ לא יחרוג ממגבלת ה-2GB של GitHub Release!
-          req_h = height_map.get(quality, 1080)
+          # במצב best מאפשרים עד 4K (2160p) עם עדיפות ל-1080p ומעלה!
+          req_h = height_map.get(quality, 2160)
 
           def translate_srt_file_to_hebrew(src_srt: Path, dest_he_srt: Path) -> bool:
               try:
@@ -233,6 +233,7 @@ jobs:
 
           if is_subs_only:
               quality_report = "כתוביות בלבד (SRT)"
+              detected_dur = 0.0
               for u_idx, cur_url in enumerate(target_urls, 1):
                   srt_list, q_label = fetch_subtitles_for_url(cur_url)
                   quality_report = q_label
@@ -242,9 +243,13 @@ jobs:
               files = [p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0]
               if not files:
                   raise SystemExit("::error::לא נמצאו כתוביות (בעברית או באנגלית) עבור קישור זה")
+              primary_file = files[0]
           else:
-              # מנוע בחירת הפורמטים המוכח מ-v7.2:
-              # מעדיף זרמי DASH H.264 (avc1) + m4a תקניים עם filesize<1850M ו-movflags +faststart לבניית סכמת MP4 מושלמת!
+              # מנוע בחירת הפורמטים המתוקן (v8.4):
+              # 1. כאשר מבקשים best/1080/1440/2160, הענפים הראשונים מחייבים height>=1080!
+              #    כך שלעולם לא ירד 720p (f136) כאשר קיים 1080p (כמו f137, f248 או f399)!
+              # 2. בתוך 1080p ומעלה, נעדיף תחילה זרמים שגודלם עד 1800M (כגון 1080p AV1/VP9 בסרטונים ארוכים או 1080p H264 בסרטונים רגילים),
+              #    ואם כולם גדולים מ-1800M, נוריד את ה-1080p המלא ונפצל אותו בבטחה לשני קובצי ZIP תקניים!
               def get_fmt_args(strict_hd: bool, prefer_hls: bool = False):
                   if quality == "audio":
                       return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
@@ -258,24 +263,35 @@ jobs:
                       return ["-f", "ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
 
                   if prefer_hls:
-                      fmt = f"bv*[protocol*=m3u8][height<={req_h}][height>=720]+ba/b[protocol*=m3u8][height<={req_h}][height>=720]/bv*[height<={req_h}][height>=720]+ba"
-                      sort_str = f"res:{req_h},vcodec:h264:vp9,ext:mp4"
-                  elif strict_hd and req_h >= 720:
+                      min_hls = 1080 if req_h >= 1080 else 720
                       fmt = (
-                          f"bv*[vcodec^=avc1][height<={req_h}][height>=720][filesize<1800M]+ba[ext=m4a]/"
-                          f"bv*[vcodec^=avc1][height<={req_h}][height>=720]+ba[ext=m4a]/"
-                          f"bv*[height<={req_h}][height>=720][filesize<1800M]+ba/"
+                          f"bv*[protocol*=m3u8][height<={req_h}][height>={min_hls}]+ba/"
+                          f"b[protocol*=m3u8][height<={req_h}][height>={min_hls}]/"
+                          f"bv*[protocol*=m3u8][height<={req_h}][height>=720]+ba/"
+                          f"bv*[height<={req_h}][height>={min_hls}]+ba"
+                      )
+                      sort_str = f"res:{req_h},fps,vcodec:h264:vp9:av01,ext:mp4"
+                  elif strict_hd and req_h >= 1080:
+                      # קודם כל מחייבים 1080p ומעלה (ללא שום אפשרות ל-720p בענפים הראשונים!)
+                      fmt = (
+                          f"bv*[height<={req_h}][height>=1080][filesize<1800M]+ba[ext=m4a]/"
+                          f"bv*[height<={req_h}][height>=1080][filesize_approx<1800M]+ba[ext=m4a]/"
+                          f"bv*[height<={req_h}][height>=1080]+ba[ext=m4a]/"
+                          f"bv*[height<={req_h}][height>=1080]+ba/"
+                          f"bv*[height<={req_h}][height>=720]+ba[ext=m4a]/"
                           f"bv*[height<={req_h}][height>=720]+ba/"
-                          f"bv*[height<={req_h}][height>=480]+ba/"
                           f"b[height<={req_h}][height>=720]"
                       )
                       if quality in ("2160", "1440"):
-                          sort_str = f"res:{req_h},vcodec:vp9:av01:h264,acodec:m4a:aac,ext:mp4:m4a"
+                          sort_str = f"res:{req_h},fps,vcodec:vp9:av01:h264,acodec:m4a:aac:opus,ext:mp4:m4a"
                       else:
-                          sort_str = f"res:{req_h},vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
+                          sort_str = f"res:1080,fps,vcodec:h264:vp9:av01,acodec:m4a:aac:opus,ext:mp4:m4a"
+                  elif strict_hd and req_h >= 720:
+                      fmt = f"bv*[height<=720][height>=720]+ba[ext=m4a]/bv*[height<=720][height>=720]+ba/b[height<=720][height>=720]"
+                      sort_str = "res:720,fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
                   else:
                       fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
-                      sort_str = f"res:{req_h},vcodec:h264:vp9,acodec:m4a:aac,ext:mp4:m4a"
+                      sort_str = f"res:{req_h},fps,vcodec:h264:vp9:av01,acodec:m4a:aac,ext:mp4:m4a"
 
                   return [
                       "-f", fmt,
@@ -343,24 +359,20 @@ jobs:
                   extra_args += ["--split-chapters"]
 
               pot_base = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
-              # סדר הקליינטים המדויק מ-v7.2 שעבד בצורה מושלמת:
-              attempts = [
-                  ("Android VR + TV Embedded Pure HD (Chunked)", ["--extractor-args", f"youtube:player_client=android_vr,tv_embedded;player_skip=webpage;{pot_base}"], True, False),
-                  ("MWeb + Web + Chrome Impersonate + PO-Token", ["--impersonate", "chrome", "--extractor-args", f"youtube:player_client=mweb,web;fetch_pot=always;{pot_base}"], True, False),
-                  ("iOS + Web Safari HLS Segmented HD", ["--impersonate", "safari", "--extractor-args", f"youtube:player_client=ios,web_safari;{pot_base}"], True, True),
-              ]
+              attempts = []
+              # כשיש עוגיות, מריצים קודם כל את הקליינטים המאומתים שפותחים 1080p/4K מיד ללא בזבוז זמן!
               if has_ck:
                   attempts.extend([
-                      ("Authenticated Web + Chrome + Chunked 10M", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=web,mweb;fetch_pot=always;{pot_base}"], True, False),
+                      ("Authenticated Web + Chrome + Chunked 10M (1080p/4K)", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--extractor-args", f"youtube:player_client=web,mweb;fetch_pot=always;{pot_base}"], True, False),
                       ("Authenticated TV Embedded / Creator HD", ["--cookies", str(cookie_file), "--extractor-args", f"youtube:player_client=tv_embedded,web_creator,tv;{pot_base}"], True, False),
                       ("Authenticated Web Safari / iOS HLS Stream", ["--cookies", str(cookie_file), "--impersonate", "safari", "--extractor-args", f"youtube:player_client=web_safari;{pot_base}"], True, True),
                   ])
-              attempts.append((
-                  "Universal Compatibility Fallback",
-                  (["--cookies", str(cookie_file)] if has_ck else []) + ["--extractor-args", f"youtube:player_client=android_vr,ios,mweb,web;{pot_base}"],
-                  False,
-                  False
-              ))
+              attempts.extend([
+                  ("Android VR + TV Embedded Pure HD (Chunked)", ["--extractor-args", f"youtube:player_client=android_vr,tv_embedded;player_skip=webpage;{pot_base}"], True, False),
+                  ("MWeb + Web + Chrome Impersonate + PO-Token", ["--impersonate", "chrome", "--extractor-args", f"youtube:player_client=mweb,web;fetch_pot=always;{pot_base}"], True, False),
+                  ("iOS + Web Safari HLS Segmented HD", ["--impersonate", "safari", "--extractor-args", f"youtube:player_client=ios,web_safari;{pot_base}"], True, True),
+                  ("Universal Compatibility Fallback", (["--cookies", str(cookie_file)] if has_ck else []) + ["--extractor-args", f"youtube:player_client=android_vr,ios,mweb,web;{pot_base}"], False, False),
+              ])
 
               def get_stage_files():
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
@@ -404,12 +416,10 @@ jobs:
                           print(f"=== Success with: {label} ===", flush=True)
                           break
 
-                  # אם המשתמש ביקש כתוביות לצד הווידאו: שומרים את קובץ ה-SRT לצד ה-MP4 מבלי לגעת בקובץ הווידאו אם הוא גדול!
                   if downloaded_media_for_url and subtitles in ("embed", "files"):
                       srt_list, _ = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
                       if srt_list:
                           best_srt = srt_list[0]
-                          # אם הקובץ קטן מ-400MB והמשתמש ביקש embed, מטמיעים עם +faststart; אחרת מצרפים כקובץ SRT צמוד באותו שם
                           if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 400 * 1024 * 1024:
                               emb_tmp = downloaded_media_for_url.with_name("sub_" + downloaded_media_for_url.name)
                               sub_c = "mov_text" if downloaded_media_for_url.suffix.lower() == ".mp4" else "srt"
@@ -452,35 +462,69 @@ jobs:
                           tmp_p.replace(fpath)
 
               media_out = [p for p in files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
+              # תיקון הבאג: primary_file נשאר תמיד קובץ הווידאו/אודיו ולא נדרס ע"י קובץ ה-SRT!
               primary_file = media_out[0] if media_out else files[0]
               detected_h, detected_dur, quality_report = inspect_media_quality(primary_file)
-
-          primary_file = files[0]
-
-          # הגנה קריטית נגד חציית רף ה-2GB של GitHub Release ונגד באג ה-Descriptor_ERROR ב-ZIP:
-          # אם הקובץ שנוצר חורג מ-1,850MB (למשל סרטון של מספר שעות), נחתוך/נתאים אותו מתחת ל-1,850MB כדי שייכנס תמיד ל-ZIP_STORED תקני ב-32-bit!
-          MAX_SAFE_ZIP_BYTES = 1850 * 1024 * 1024
-          if primary_file.stat().st_size > MAX_SAFE_ZIP_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
-              print("File exceeds 1.85GB 32-bit ZIP limit. Trimming/optimizing to fit standard GitHub Release...", flush=True)
-              fit_mp4 = primary_file.with_name("fit_" + primary_file.name)
-              subprocess.run(["/usr/bin/ffmpeg", "-y", "-i", str(primary_file), "-c", "copy", "-movflags", "+faststart", "-fs", str(MAX_SAFE_ZIP_BYTES - 10 * 1024 * 1024), str(fit_mp4)], check=False)
-              if fit_mp4.exists() and fit_mp4.stat().st_size > 0:
-                  fit_mp4.replace(primary_file)
 
           file_mb = round(primary_file.stat().st_size / (1024 * 1024), 2)
           print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) <<<", flush=True)
 
-          tag = "dl-" + req_id
-          zip_path = pkg_dir / (tag + ".zip")
-          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
-              for f in files:
-                  zf.write(f, f.relative_to(out_dir))
+          # בניית ארכיוני ZIP_STORED תקניים ב-100% (ללא חציית מגבלת 1.85GB לארכיון בודד):
+          # אם סרטון 1080p/4K ארוך במיוחד שוקל מעל 1.85GB, מפצלים אותו ללא קידוד מחדש (-c copy) למספר חלקים תקניים
+          # ואורזים כל חלק ב-ZIP_STORED נפרד, כך שכולם יורדים במלואם באיכות 1080p ללא שום פגימת ZIP וללא עצירה ב-99%!
+          MAX_SINGLE_ZIP_BYTES = 1850 * 1024 * 1024
+          if primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
+              num_parts = math.ceil(primary_file.stat().st_size / (1400 * 1024 * 1024))
+              part_dur = max(60, int(math.ceil((detected_dur or 7200.0) / num_parts)))
+              print(f"Large 1080p/4K file ({file_mb}MB > 1850MB). Splitting losslessly into {num_parts} parts ({part_dur}s each)...", flush=True)
+              seg_pattern = str(out_dir / f"{primary_file.stem} - Part%02d{primary_file.suffix}")
+              seg_cmd = [
+                  "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
+                  "-c", "copy", "-map", "0",
+                  "-f", "segment", "-segment_time", str(part_dur),
+                  "-reset_timestamps", "1",
+                  "-movflags", "+faststart",
+                  seg_pattern
+              ]
+              if subprocess.run(seg_cmd, check=False).returncode == 0:
+                  primary_file.unlink(missing_ok=True)
+                  files = sorted([p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0])
+                  media_out = [p for p in files if p.suffix.lower() in (".mp4", ".mkv", ".webm")]
+                  if media_out:
+                      primary_file = media_out[0]
 
+          tag = "dl-" + req_id
+          zip_paths = []
+          cur_batch = []
+          cur_batch_bytes = 0
+          for f in files:
+              f_sz = f.stat().st_size
+              if cur_batch and (cur_batch_bytes + f_sz > MAX_SINGLE_ZIP_BYTES):
+                  z_idx = len(zip_paths) + 1
+                  zp = pkg_dir / f"{tag}-part{z_idx}.zip"
+                  with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
+                      for bf in cur_batch:
+                          zf.write(bf, bf.relative_to(out_dir))
+                  zip_paths.append(zp)
+                  cur_batch = [f]
+                  cur_batch_bytes = f_sz
+              else:
+                  cur_batch.append(f)
+                  cur_batch_bytes += f_sz
+
+          if cur_batch:
+              zp = pkg_dir / (f"{tag}.zip" if not zip_paths else f"{tag}-part{len(zip_paths)+1}.zip")
+              with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
+                  for bf in cur_batch:
+                      zf.write(bf, bf.relative_to(out_dir))
+              zip_paths.append(zp)
+
+          zip_path = zip_paths[0]
+          zip_size = sum(z.stat().st_size for z in zip_paths)
           repo = os.environ.get("GITHUB_REPOSITORY", "")
-          zip_size = zip_path.stat().st_size
           blob_shas = []
 
-          if zip_size <= 35 * 1024 * 1024:
+          if len(zip_paths) == 1 and zip_size <= 35 * 1024 * 1024:
               raw_bytes = zip_path.read_bytes()
               chunk_size = 12 * 1024 * 1024
               for offset in range(0, len(raw_bytes), chunk_size):
@@ -569,7 +613,7 @@ jobs:
                   email_sent_status = f"שגיאת מייל: {e}"
 
           notes = json.dumps({
-              "v": 8.3,
+              "v": 8.4,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
@@ -577,12 +621,11 @@ jobs:
               "blobs": blob_shas
           }, ensure_ascii=False)
 
-          rel_proc = subprocess.run(
-              ["gh", "release", "create", tag, str(zip_path), "--repo", repo, "--title", tag, "--notes", notes],
-              capture_output=True, text=True, check=False
-          )
+          rel_cmd = ["gh", "release", "create", tag] + [str(z) for z in zip_paths] + ["--repo", repo, "--title", tag, "--notes", notes]
+          rel_proc = subprocess.run(rel_cmd, capture_output=True, text=True, check=False)
           if rel_proc.returncode != 0:
-              subprocess.run(["gh", "release", "upload", tag, str(zip_path), "--repo", repo, "--clobber"], check=False)
+              for z in zip_paths:
+                  subprocess.run(["gh", "release", "upload", tag, str(z), "--repo", repo, "--clobber"], check=False)
           EOF
 
       - name: Upload Backup Artifact
