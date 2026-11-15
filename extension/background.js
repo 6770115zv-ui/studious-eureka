@@ -745,19 +745,26 @@ async function fetchJsonAssetWithRetry(asset, cfg) {
   return null;
 }
 
-async function driveRecommendations(requestId, query, channel, minViews) {
+async function driveRecommendations(requestId, query, channel, sortBy, minViews) {
   const cfg = await getConfig();
   const tag = "rec-" + requestId;
+  const sortLabels = {
+    views: "צפיות היסטוריות",
+    likes: "כמות לייקים",
+    date_desc: "תאריך (מהחדש לישן)",
+    date_asc: "תאריך (מהישן לחדש)"
+  };
+  const sortText = sortLabels[sortBy] || sortLabels.views;
   const labelTarget = channel ? ("הערוץ \"" + channel + "\"" + (query ? (" בנושא \"" + query + "\"") : "")) : ("\"" + query + "\"");
   if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   try {
-    await setRecsState({ status: "running", query, channel, minViews, detail: "מאתר ריצת חיפוש עבור " + labelTarget + " ב-GitHub Actions...", items: [] });
+    await setRecsState({ status: "running", query, channel, sortBy, minViews, detail: "מאתר ריצת חיפוש עבור " + labelTarget + " (מיון: " + sortText + ")...", items: [] });
     const runId = await findRunByTitle(cfg, tag, null);
-    await setRecsState({ status: "running", query, channel, minViews, detail: "סורק עשרות סרטונים מתוך " + labelTarget + " ומסנן עם AI...", items: [] });
+    await setRecsState({ status: "running", query, channel, sortBy, minViews, detail: "סורק וממיין תוצאות מתוך " + labelTarget + " לפי " + sortText + "...", items: [] });
     const conclusion = await waitForRun(cfg, runId, requestId, null, null);
     if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
 
-    await setRecsState({ status: "fetching", query, channel, minViews, detail: "מושך תוצאות מ-GitHub...", items: [] });
+    await setRecsState({ status: "fetching", query, channel, sortBy, minViews, detail: "מושך תוצאות מ-GitHub...", items: [] });
     let data = null;
     for (let a = 0; a < 8 && !data; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
@@ -775,13 +782,14 @@ async function driveRecommendations(requestId, query, channel, minViews) {
       status: "completed",
       query,
       channel: data.channel || channel,
+      sortBy,
       minViews,
-      detail: "התקבלו " + data.items.length + " תוצאות לבחירה עבור " + labelTarget + chResolved + trLabel,
+      detail: "התקבלו " + data.items.length + " תוצאות ממוינות לפי " + sortText + chResolved + trLabel,
       items: data.items,
       updatedAt: Date.now()
     });
   } catch (err) {
-    await setRecsState({ status: "failed", query, channel, minViews, detail: err.message, error: err.message, items: [] });
+    await setRecsState({ status: "failed", query, channel, sortBy, minViews, detail: err.message, error: err.message, items: [] });
   } finally {
     updateActionBadge();
   }
@@ -795,6 +803,7 @@ async function startRecommendations(payload) {
   const query = String(payload.query || "").trim();
   const channel = String(payload.channel || "").trim();
   if (!query && !channel) return { ok: false, error: "נא להזין שם ערוץ או נושא לחיפוש" };
+  const sortBy = String(payload.sortBy || "views").trim();
   const maxResults = String(payload.maxResults || "60").trim();
   const minViews = String(payload.minViews || "0").trim();
   const filterPrompt = String(payload.filterPrompt || "").trim();
@@ -812,6 +821,7 @@ async function startRecommendations(payload) {
         request_id: requestId,
         query,
         channel,
+        sort_by: sortBy,
         max_results: maxResults,
         min_views: minViews,
         exclude_ids: excludeIds,
@@ -822,7 +832,7 @@ async function startRecommendations(payload) {
   if (res.status !== 204) {
     return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ")" };
   }
-  void driveRecommendations(requestId, query, channel, minViews);
+  void driveRecommendations(requestId, query, channel, sortBy, minViews);
   return { ok: true, requestId };
 }
 
