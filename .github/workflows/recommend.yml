@@ -5,8 +5,9 @@ on:
       request_id: { required: true, type: string }
       query: { required: false, default: "", type: string }
       channel: { required: false, default: "", type: string }
+      sort_by: { required: false, default: "views", type: string }
       max_results: { required: false, default: "60", type: string }
-      min_views: { required: false, default: "100000", type: string }
+      min_views: { required: false, default: "0", type: string }
       exclude_ids: { required: false, default: "", type: string }
       filter_prompt: { required: false, default: "", type: string }
 run-name: rec-${{ inputs.request_id }}
@@ -24,11 +25,12 @@ jobs:
           deno-version: v2.x
       - name: Install yt-dlp
         run: python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests
-      - name: Search Channel or All-Time Popular Videos and Filter with Cloud AI
+      - name: Search Channel or Videos and Sort by Views / Likes / Date
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
           CHANNEL: ${{ inputs.channel }}
+          SORT_BY: ${{ inputs.sort_by }}
           MAX_RESULTS: ${{ inputs.max_results }}
           MIN_VIEWS: ${{ inputs.min_views }}
           EXCLUDE_IDS: ${{ inputs.exclude_ids }}
@@ -43,8 +45,9 @@ jobs:
 
           query = os.environ.get("QUERY", "").strip()
           channel_input = os.environ.get("CHANNEL", "").strip()
+          sort_by = os.environ.get("SORT_BY", "views").strip().lower() or "views"
           max_results = max(10, min(150, int(os.environ.get("MAX_RESULTS", "60") or 60)))
-          min_views = int(os.environ.get("MIN_VIEWS", "100000") or 100000)
+          min_views = int(os.environ.get("MIN_VIEWS", "0") or 0)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
           if not filter_prompt:
@@ -73,7 +76,6 @@ jobs:
               return items
 
           def resolve_channel_videos_url(ch_raw: str):
-              """מאתר את כתובת לשונית הווידאו של הערוץ המבוקש מתוך קישור, @handle או שם ערוץ"""
               ch = ch_raw.strip()
               if not ch:
                   return "", ""
@@ -84,7 +86,6 @@ jobs:
                   handle = ch.split("/")[0]
                   return f"https://www.youtube.com/{handle}/videos", handle
 
-              # חיפוש הערוץ ביוטיוב (sp=EgIQAg%3D%3D מסנן ערוצים בלבד)
               enc = urllib.parse.quote_plus(ch)
               ch_search_url = f"https://www.youtube.com/results?search_query={enc}&sp=EgIQAg%253D%253D"
               found_channels = fetch_yt_json(ch_search_url, "8")
@@ -104,7 +105,6 @@ jobs:
                           if ch_low in c_title.lower():
                               break
 
-              # גיבוי: שליפת כתובת הערוץ מתוך הסרטון המוביל של הערוץ
               if not best_url:
                   vids = fetch_yt_json(f"ytsearch15:{ch}", "15")
                   for v in vids:
@@ -130,38 +130,46 @@ jobs:
               except Exception:
                   pass
 
+          def yt_search_sorted_url(q_text, mode_sort):
+              enc = urllib.parse.quote_plus(q_text)
+              # sp=CAMSAhAB (View count), sp=CAI%3D (Upload date), sp=CAE%3D (Rating/Likes)
+              sp_map = {
+                  "views": "CAMSAhAB",
+                  "date_desc": "CAI%253D",
+                  "likes": "CAE%253D",
+              }
+              sp = sp_map.get(mode_sort, "CAMSAhAB")
+              return f"https://www.youtube.com/results?search_query={enc}&sp={sp}"
+
           raw = []
           resolved_channel_name = channel_input
-          fetch_cap = str(max(120, max_results * 2))
+          # אם מבקשים מהישן לחדש בערוץ, מושכים כמות גדולה יותר מעמוד הערוץ כדי להגיע לסרטונים הראשונים
+          fetch_cap = str(max(220 if sort_by == "date_asc" else 140, max_results * 2))
 
           if channel_input:
               ch_videos_url, resolved_channel_name = resolve_channel_videos_url(channel_input)
-              print(f"Channel mode active: '{channel_input}' -> URL='{ch_videos_url}', Name='{resolved_channel_name}'", flush=True)
+              print(f"Channel mode: '{channel_input}' -> URL='{ch_videos_url}', Sort='{sort_by}'", flush=True)
               tasks = []
               if ch_videos_url:
                   tasks.append((ch_videos_url, fetch_cap))
               if query:
-                  tasks.append((f"ytsearch80:{channel_input} {query}", "80"))
+                  tasks.append((yt_search_sorted_url(f"{channel_input} {query}", sort_by), "80"))
                   if en_query and en_query.lower() != query.lower():
-                      tasks.append((f"ytsearch60:{channel_input} {en_query}", "60"))
-              else:
-                  tasks.append((f"ytsearch80:{channel_input}", "80"))
+                      tasks.append((yt_search_sorted_url(f"{channel_input} {en_query}", sort_by), "60"))
+              elif sort_by in ("views", "likes"):
+                  tasks.append((yt_search_sorted_url(channel_input, sort_by), "80"))
 
               with ThreadPoolExecutor(max_workers=3) as ex:
                   for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), tasks):
                       raw.extend(batch)
           else:
-              def yt_most_viewed_url(q_text):
-                  enc = urllib.parse.quote_plus(q_text)
-                  return f"https://www.youtube.com/results?search_query={enc}&sp=CAMSAhAB"
-
               search_targets = [
-                  (yt_most_viewed_url(query), "120"),
+                  (yt_search_sorted_url(query, sort_by), "120"),
                   (f"ytsearch80:{query}", "80"),
               ]
               if en_query and en_query.lower() != query.lower():
                   search_targets.extend([
-                      (yt_most_viewed_url(en_query), "120"),
+                      (yt_search_sorted_url(en_query, sort_by), "120"),
                       (f"ytsearch80:{en_query}", "80"),
                   ])
 
@@ -204,13 +212,12 @@ jobs:
                   return True
               hay = f"{entry_channel} {entry_uploader_url}".lower()
               if not hay.strip():
-                  # סרטונים שחזרו ישירות מתוך כתובת /videos של הערוץ עצמו
                   return True
               return any(tok in hay for tok in ch_tokens)
 
           seen = set(exclude)
           cands = []
-          for e in raw:
+          for idx_pos, e in enumerate(raw):
               vid = e.get("id")
               title = (e.get("title") or "").strip()
               channel = (e.get("channel") or e.get("uploader") or resolved_channel_name or "").strip()
@@ -225,23 +232,41 @@ jobs:
               if query and not matches_topic_strictly(title, channel):
                   continue
               views = int(e.get("view_count") or 0)
+              likes = int(e.get("like_count") or 0)
+              up_date = str(e.get("upload_date") or "").strip()
               cands.append({
                   "id": vid,
                   "title": title,
                   "url": f"https://www.youtube.com/watch?v={vid}",
                   "channel": channel or resolved_channel_name,
                   "views": views,
+                  "likes": likes,
+                  "upload_date": up_date,
+                  "orig_pos": idx_pos,
                   "duration": int(e.get("duration") or 0),
                   "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          need_meta = [c for c in cands if c["views"] == 0][:80]
+          # השלמת נתוני לייקים, תאריך העלאה וצפיות עבור הסרטונים המועמדים
+          if sort_by == "likes":
+              need_meta = [c for c in cands if c["likes"] == 0][:90]
+          elif sort_by in ("date_desc", "date_asc"):
+              # בחיפוש ערוץ מהישן לחדש, נבדוק את הסרטונים שבתחתית הרשימה (הישנים ביותר) + העליונים
+              if sort_by == "date_asc" and len(cands) > 90:
+                  need_meta = [c for c in cands[-90:] if not c["upload_date"]]
+              else:
+                  need_meta = [c for c in cands[:90] if not c["upload_date"]]
+          else:
+              need_meta = [c for c in cands if c["views"] == 0][:80]
+
           def enrich(c):
               cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
               r = subprocess.run(cmd, capture_output=True, text=True)
               try:
                   d = json.loads(r.stdout.splitlines()[0])
-                  c["views"] = int(d.get("view_count") or 0)
+                  c["views"] = int(d.get("view_count") or c["views"] or 0)
+                  c["likes"] = int(d.get("like_count") or c["likes"] or 0)
+                  c["upload_date"] = str(d.get("upload_date") or c["upload_date"] or "").strip()
                   c["duration"] = int(d.get("duration") or c["duration"] or 0)
                   if not c["channel"]:
                       c["channel"] = (d.get("channel") or d.get("uploader") or resolved_channel_name).strip()
@@ -252,16 +277,27 @@ jobs:
               with ThreadPoolExecutor(max_workers=12) as ex:
                   list(ex.map(enrich, need_meta))
 
-          cands.sort(key=lambda x: x["views"], reverse=True)
+          def sort_candidates(items_list, mode_sort):
+              if mode_sort == "likes":
+                  items_list.sort(key=lambda x: (x["likes"], x["views"]), reverse=True)
+              elif mode_sort == "date_desc":
+                  # תאריך יורד (מהחדש לישן); אם אין תאריך, סדר ההופעה המקורי בערוץ (0 = הכי חדש)
+                  items_list.sort(key=lambda x: (x["upload_date"] or "00000000", -x["orig_pos"]), reverse=True)
+              elif mode_sort == "date_asc":
+                  # תאריך עולה (מהישן לחדש); אם אין תאריך, סוף הרשימה המקורית בערוץ (orig_pos גבוה = הכי ישן)
+                  items_list.sort(key=lambda x: (x["upload_date"] if x["upload_date"] else "99999999", -x["orig_pos"]), reverse=False)
+              else:
+                  items_list.sort(key=lambda x: x["views"], reverse=True)
 
-          # במצב חיפוש ערוץ ספציפי, אם סינון הצפיות משאיר מעט מדי תוצאות, נכלול גם סרטונים נוספים של הערוץ כדי להביא עשרות תוצאות
+          sort_candidates(cands, sort_by)
+
           if channel_input:
               pool = [c for c in cands if c["views"] >= min_views]
               if len(pool) < min(max_results, 25):
                   pool = cands[:]
               pool = pool[:max(max_results + 20, 100)]
           else:
-              user_asked_2026 = "2026" in query
+              user_asked_2026 = "2026" in query or sort_by == "date_desc"
               balanced_pool = []
               recent_2026_list = []
               for c in cands:
@@ -272,7 +308,7 @@ jobs:
                   else:
                       balanced_pool.append(c)
               pool = balanced_pool[:max_results + 20] + recent_2026_list[:8]
-              pool.sort(key=lambda x: x["views"], reverse=True)
+              sort_candidates(pool, sort_by)
               if len(pool) < 20:
                   pool = cands[:max_results + 20]
 
@@ -341,12 +377,15 @@ jobs:
               chunk = pool[i:i + batch_size]
               approved_all.extend(call_ai_batch(chunk, query, resolved_channel_name, filter_prompt))
 
-          approved_all.sort(key=lambda x: x["views"], reverse=True)
+          sort_candidates(approved_all, sort_by)
           filtered = approved_all[:max_results]
+          for item in filtered:
+              item.pop("orig_pos", None)
 
           payload_bytes = json.dumps({
               "query": query,
               "channel": resolved_channel_name or channel_input,
+              "sort_by": sort_by,
               "en_query": en_query,
               "filter_prompt": filter_prompt,
               "items": filtered
