@@ -908,6 +908,14 @@ async function startRecommendations(payload) {
   const excludeIds = hist.map((h) => h.videoId).filter(Boolean).slice(0, 40).join(",");
   const requestId = crypto.randomUUID();
 
+  let cookiesEnc = "";
+  if (cfg.cookieKey && cfg.cookieKey.length === 64) {
+    const cookies = await exportYoutubeCookies();
+    if (cookies) {
+      try { cookiesEnc = await encryptCookies(cookies, cfg.cookieKey); } catch {}
+    }
+  }
+
   await chrome.storage.local.set({
     [RECS_KEY]: {
       status: "running",
@@ -920,7 +928,7 @@ async function startRecommendations(payload) {
       minViews,
       detail: "שולח בקשת חיפוש ל-GitHub Actions...",
       items: [],
-      logs: ["[" + nowTimeStr() + "] Dispatching recommend.yml (request_id=" + requestId + ", channel='" + channel + "', query='" + query + "', sort=" + sortBy + ")"]
+      logs: ["[" + nowTimeStr() + "] Dispatching recommend.yml (request_id=" + requestId + ", channel='" + channel + "', query='" + query + "', sort=" + sortBy + ", cookies=" + (cookiesEnc ? "yes" : "no") + ")"]
     }
   });
   void updateActionBadge();
@@ -939,7 +947,8 @@ async function startRecommendations(payload) {
         max_results: maxResults,
         min_views: minViews,
         exclude_ids: excludeIds,
-        filter_prompt: filterPrompt
+        filter_prompt: filterPrompt,
+        cookies_enc: cookiesEnc
       }
     })
   });
@@ -999,7 +1008,6 @@ async function handle(msg) {
     case "START_RECOMMEND": return startRecommendations(msg.payload || {});
     case "GET_RECOMMENDATIONS": {
       const state = await getRecsState();
-      // התאוששות אוטומטית: אם תהליך הרקע כבה בזמן שהריצה פעלה, ממשיכים מיד לעקוב אחריה ולמשוך את התוצאות!
       if ((state.status === "running" || state.status === "fetching") && state.requestId && !drivingRecs.has(state.requestId)) {
         void driveRecommendations(state.requestId);
       }
