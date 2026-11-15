@@ -23,7 +23,13 @@ chrome.storage.local.remove("ytproxy_ck_status").catch(() => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jobs = new Map();
 const driving = new Set();
+const drivingRecs = new Set();
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+
+function nowTimeStr() {
+  const d = new Date();
+  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((v) => String(v).padStart(2, "0")).join(":");
+}
 
 async function getConfig() {
   const stored = (await chrome.storage.local.get(CFG_KEY))[CFG_KEY] || {};
@@ -81,16 +87,20 @@ async function addHistoryEntry(entry) {
   return trimmed;
 }
 
-function updateActionBadge() {
+async function updateActionBadge() {
   if (!chrome.action || !chrome.action.setBadgeText) return;
   let activeCount = 0;
   for (const job of jobs.values()) {
     if (!TERMINAL.has(job.status)) activeCount++;
   }
+  const recState = (await chrome.storage.local.get(RECS_KEY))[RECS_KEY] || {};
+  const recActive = recState.status === "running" || recState.status === "fetching";
+  if (recActive) activeCount++;
+
   if (activeCount > 0) {
     chrome.action.setBadgeBackgroundColor({ color: "#0284c7" }).catch(() => {});
     chrome.action.setBadgeText({ text: String(activeCount) }).catch(() => {});
-    if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
+    if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
   } else {
     chrome.action.setBadgeText({ text: "" }).catch(() => {});
     if (chrome.alarms) chrome.alarms.clear(KEEPALIVE_ALARM).catch(() => {});
@@ -103,6 +113,10 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
       await restoreJobs();
       for (const [id, job] of jobs) {
         if (!TERMINAL.has(job.status)) void driveJob(id);
+      }
+      const recState = (await chrome.storage.local.get(RECS_KEY))[RECS_KEY] || {};
+      if ((recState.status === "running" || recState.status === "fetching") && recState.requestId) {
+        void driveRecommendations(recState.requestId);
       }
     }
   });
@@ -205,7 +219,7 @@ async function encryptCookies(text, hexKey) {
 async function persistJobs() {
   const plain = {};
   for (const [id, job] of jobs) plain[id] = job;
-  updateActionBadge();
+  void updateActionBadge();
   try { await chrome.storage.session.set({ [JOBS_KEY]: plain }); } catch {}
   chrome.runtime.sendMessage({ type: "JOBS_CHANGED", jobs: plain }).catch(() => {});
 }
@@ -215,7 +229,7 @@ async function restoreJobs() {
   try {
     const plain = (await chrome.storage.session.get(JOBS_KEY))[JOBS_KEY] || {};
     for (const [id, job] of Object.entries(plain)) jobs.set(id, job);
-    updateActionBadge();
+    void updateActionBadge();
   } catch {}
 }
 
@@ -230,7 +244,7 @@ function patchJob(id, patch) {
   return job;
 }
 
-async function findRunByTitle(cfg, targetTitle, signal) {
+async function findRunByTitle(cfg, targetTitle, signal, logFn = null) {
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?event=workflow_dispatch&per_page=35";
   for (let i = 0; i < 120; i++) {
     if (signal && signal.cancelled) throw new Error("בוטל");
@@ -238,11 +252,19 @@ async function findRunByTitle(cfg, targetTitle, signal) {
     if (res.ok) {
       const runs = ((await res.json()).workflow_runs) || [];
       const exact = runs.find((r) => r.display_title === targetTitle || r.name === targetTitle);
-      if (exact) return exact.id;
+      if (exact) {
+        if (logFn) await logFn("Found workflow run: id=" + exact.id + ", status=" + exact.status + ", created_at=" + exact.created_at);
+        return exact.id;
+      }
+      if (logFn && i % 5 === 0) {
+        await logFn("Polling /actions/runs (attempt " + (i + 1) + ") — matching title '" + targetTitle + "' not listed yet...");
+      }
+    } else if (logFn && i % 5 === 0) {
+      await logFn("Warning: /actions/runs returned HTTP " + res.status);
     }
     await sleep(2000);
   }
-  throw new Error("לא נמצאה ריצה תואמת ב-GitHub Actions");
+  throw new Error("לא נמצאה ריצה תואמת ב-GitHub Actions (" + targetTitle + ")");
 }
 
 async function fetchLiveStepInfo(cfg, runId, tickIdx, requestId) {
@@ -287,13 +309,18 @@ async function fetchLiveStepInfo(cfg, runId, tickIdx, requestId) {
   return null;
 }
 
-async function waitForRun(cfg, runId, requestId, onTick, signal) {
+async function waitForRun(cfg, runId, requestId, onTick, signal, logFn = null) {
   let cachedStepInfo = null;
+  let lastLoggedStatus = "";
   for (let i = 0; i < 900; i++) {
     if (signal && signal.cancelled) throw new Error("בוטל");
     const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + runId, cfg);
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    if (!res.ok) throw new Error("HTTP " + res.status + " while polling run #" + runId);
     const run = await res.json();
+    if (logFn && (run.status !== lastLoggedStatus || i % 6 === 0)) {
+      lastLoggedStatus = run.status;
+      await logFn("Run #" + runId + " status='" + run.status + "' conclusion='" + (run.conclusion || "pending") + "'");
+    }
     if (run.status === "completed") return run.conclusion;
     if (run.status === "in_progress" && i % 2 === 0) {
       const latest = await fetchLiveStepInfo(cfg, runId, i, requestId);
@@ -311,16 +338,20 @@ async function waitForRun(cfg, runId, requestId, onTick, signal) {
   throw new Error("זמן ההמתנה הסתיים");
 }
 
-async function findReleaseAssetsByTag(cfg, tag) {
+async function findReleaseAssetsByTag(cfg, tag, logFn = null) {
   let rel = null;
-  const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases/tags/" + tag, cfg);
+  const tagUrl = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases/tags/" + tag;
+  const res = await ghFetch(tagUrl, cfg);
   if (res.ok) {
     rel = await res.json();
+    if (logFn) await logFn("Release found via /releases/tags/" + tag + " (id=" + rel.id + ", assets=" + (rel.assets || []).length + ")");
   } else {
+    if (logFn) await logFn("GET /releases/tags/" + tag + " -> HTTP " + res.status + "; checking /releases list...");
     const listRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases?per_page=20", cfg);
     if (listRes.ok) {
       const all = await listRes.json();
       if (Array.isArray(all)) rel = all.find((r) => r.tag_name === tag || r.name === tag) || null;
+      if (rel && logFn) await logFn("Release found in /releases list (id=" + rel.id + ", assets=" + (rel.assets || []).length + ")");
     }
   }
   if (!rel) return null;
@@ -337,6 +368,7 @@ async function findReleaseAssetsByTag(cfg, tag) {
       if (parsed.cloud_temp_path) cloudTempPath = String(parsed.cloud_temp_path);
     } catch {}
   }
+  if (logFn) await logFn("Release metadata: blobShas=" + JSON.stringify(blobShas) + ", body=" + String(rel.body || "").slice(0, 120));
   const assets = (rel.assets || []).filter((a) => a.url || a.browser_download_url).map((a) => ({
     id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath
   }));
@@ -705,80 +737,140 @@ async function startDownload(payload) {
   return { ok: true, jobId: requestId };
 }
 
-async function setRecsState(state) {
-  await chrome.storage.local.set({ [RECS_KEY]: state });
-  chrome.runtime.sendMessage({ type: "RECS_CHANGED", state }).catch(() => {});
+async function getRecsState() {
+  return (await chrome.storage.local.get(RECS_KEY))[RECS_KEY] || { status: "idle", items: [], logs: [] };
 }
 
-async function fetchJsonAssetWithRetry(asset, cfg) {
+async function patchRecsState(patch, logLine = null) {
+  const cur = await getRecsState();
+  const logs = Array.isArray(cur.logs) ? [...cur.logs] : [];
+  if (logLine) {
+    logs.push("[" + nowTimeStr() + "] " + logLine);
+  }
+  const next = { ...cur, ...patch, logs: logs.slice(-80) };
+  await chrome.storage.local.set({ [RECS_KEY]: next });
+  void updateActionBadge();
+  chrome.runtime.sendMessage({ type: "RECS_CHANGED", state: next }).catch(() => {});
+  return next;
+}
+
+async function fetchJsonAssetWithRetry(asset, cfg, logFn = null) {
   if (asset.blobShas && asset.blobShas.length) {
     try {
-      const res = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/git/blobs/" + asset.blobShas[0], cfg);
+      const blobUrl = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/git/blobs/" + asset.blobShas[0];
+      if (logFn) await logFn("Fetching JSON via Git Blob API: " + blobUrl);
+      const res = await ghFetch(blobUrl, cfg);
+      if (logFn) await logFn("Git Blob API response: HTTP " + res.status);
       if (res.ok) {
         const d = await res.json();
         if (d && d.content) {
           const text = new TextDecoder("utf-8").decode(b64ToBytes(d.content));
+          if (logFn) await logFn("Decoded Git Blob JSON (" + text.length + " chars)");
           return JSON.parse(text);
         }
       }
-    } catch {}
+    } catch (e) {
+      if (logFn) await logFn("Git Blob fetch error: " + e.message);
+    }
   }
 
   const candidates = [
-    asset.url ? { url: asset.url, headers: {} } : null,
     asset.apiUrl ? {
+      label: "Release Asset API (octet-stream)",
       url: asset.apiUrl,
       headers: cfg.token ? { Authorization: "Bearer " + cfg.token, Accept: "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28" } : { Accept: "application/octet-stream" }
     } : null,
-    asset.url && cfg.token ? { url: asset.url, headers: { Authorization: "Bearer " + cfg.token } } : null
+    asset.url ? { label: "Release browser_download_url", url: asset.url, headers: {} } : null,
+    asset.url && cfg.token ? { label: "Release browser_download_url + Bearer", url: asset.url, headers: { Authorization: "Bearer " + cfg.token } } : null
   ].filter((c) => Boolean(c && c.url));
 
   for (let attempt = 1; attempt <= 4; attempt++) {
     for (const cand of candidates) {
       try {
+        if (logFn) await logFn("Attempt " + attempt + " fetching " + cand.label + "...");
         const res = await fetch(cand.url, { headers: cand.headers, redirect: "follow", credentials: "omit", cache: "no-store" });
-        if (res.ok) return await res.json();
-      } catch {}
+        if (logFn) await logFn(cand.label + " -> HTTP " + res.status);
+        if (res.ok) {
+          const txt = await res.text();
+          if (logFn) await logFn("Received payload (" + txt.length + " chars)");
+          return JSON.parse(txt);
+        }
+      } catch (e) {
+        if (logFn) await logFn(cand.label + " fetch error: " + e.message);
+      }
     }
     if (attempt < 4) await sleep(1500 * attempt);
   }
   return null;
 }
 
-async function driveRecommendations(requestId, query, channel, sortBy, minViews) {
-  const cfg = await getConfig();
-  const tag = "rec-" + requestId;
-  const sortLabels = {
-    views: "צפיות היסטוריות",
-    likes: "כמות לייקים",
-    date_desc: "תאריך (מהחדש לישן)",
-    date_asc: "תאריך (מהישן לחדש)"
-  };
-  const sortText = sortLabels[sortBy] || sortLabels.views;
-  const labelTarget = channel ? ("הערוץ \"" + channel + "\"" + (query ? (" בנושא \"" + query + "\"") : "")) : ("\"" + query + "\"");
-  if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
-  try {
-    await setRecsState({ status: "running", query, channel, sortBy, minViews, detail: "מאתר ריצת חיפוש עבור " + labelTarget + " (מיון: " + sortText + ")...", items: [] });
-    const runId = await findRunByTitle(cfg, tag, null);
-    await setRecsState({ status: "running", query, channel, sortBy, minViews, detail: "סורק וממיין תוצאות מתוך " + labelTarget + " לפי " + sortText + "...", items: [] });
-    const conclusion = await waitForRun(cfg, runId, requestId, null, null);
-    if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
+async function driveRecommendations(requestId) {
+  if (!requestId || drivingRecs.has(requestId)) return;
+  drivingRecs.add(requestId);
+  if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 
-    await setRecsState({ status: "fetching", query, channel, sortBy, minViews, detail: "מושך תוצאות מ-GitHub...", items: [] });
+  const logFn = async (msg) => {
+    const cur = await getRecsState();
+    if (cur.requestId !== requestId) return;
+    await patchRecsState({}, msg);
+  };
+
+  try {
+    const cfg = await getConfig();
+    let cur = await getRecsState();
+    if (cur.requestId !== requestId) return;
+
+    const query = cur.query || "";
+    const channel = cur.channel || "";
+    const sortBy = cur.sortBy || "views";
+    const minViews = cur.minViews || "0";
+    const tag = "rec-" + requestId;
+    const sortLabels = {
+      views: "צפיות היסטוריות",
+      likes: "כמות לייקים",
+      date_desc: "תאריך (מהחדש לישן)",
+      date_asc: "תאריך (מהישן לחדש)"
+    };
+    const sortText = sortLabels[sortBy] || sortLabels.views;
+    const labelTarget = channel ? ("הערוץ \"" + channel + "\"" + (query ? (" בנושא \"" + query + "\"") : "")) : ("\"" + query + "\"");
+
+    let runId = cur.runId || null;
+    if (!runId) {
+      await patchRecsState({ detail: "מאתר ריצת חיפוש עבור " + labelTarget + " ב-GitHub Actions..." }, "Searching for workflow run with title '" + tag + "'...");
+      runId = await findRunByTitle(cfg, tag, null, logFn);
+      await patchRecsState({ runId }, "Locked onto Run ID #" + runId);
+    } else {
+      await logFn("Resumed tracking Run ID #" + runId + " after Service Worker wake-up.");
+    }
+
+    await patchRecsState({ detail: "סורק וממיין תוצאות מתוך " + labelTarget + " לפי " + sortText + "..." });
+    const conclusion = await waitForRun(cfg, runId, requestId, null, null, logFn);
+    if (conclusion !== "success") {
+      throw new Error("הריצה ב-GitHub הסתיימה עם סטטוס: " + conclusion);
+    }
+
+    await patchRecsState({ status: "fetching", detail: "הריצה הסתיימה! מושך קובץ תוצאות מ-GitHub..." }, "Workflow succeeded! Polling Release '" + tag + "' for recommendations.json...");
     let data = null;
     for (let a = 0; a < 8 && !data; a++) {
-      const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
+      const assets = await findReleaseAssetsByTag(cfg, tag, logFn).catch((e) => {
+        void logFn("findReleaseAssetsByTag error: " + e.message);
+        return null;
+      });
       if (assets && assets.length) {
-        data = await fetchJsonAssetWithRetry(assets[0], cfg);
+        data = await fetchJsonAssetWithRetry(assets[0], cfg, logFn);
         if (data) break;
       }
       await sleep(2000);
     }
+
     await deleteReleaseAndTagByName(cfg, tag);
-    if (!data || !Array.isArray(data.items)) throw new Error("לא התקבלו תוצאות מהענן");
+    if (!data || !Array.isArray(data.items)) {
+      throw new Error("לא התקבל קובץ תוצאות תקין מה-Release ב-GitHub (בדוק לוג למעלה)");
+    }
+
     const trLabel = data.en_query ? (" (תרגום: " + data.en_query + ")") : "";
     const chResolved = data.channel ? (" • ערוץ: " + data.channel) : "";
-    await setRecsState({
+    await patchRecsState({
       status: "completed",
       query,
       channel: data.channel || channel,
@@ -787,11 +879,16 @@ async function driveRecommendations(requestId, query, channel, sortBy, minViews)
       detail: "התקבלו " + data.items.length + " תוצאות ממוינות לפי " + sortText + chResolved + trLabel,
       items: data.items,
       updatedAt: Date.now()
-    });
+    }, "COMPLETED: Loaded " + data.items.length + " items into extension panel.");
   } catch (err) {
-    await setRecsState({ status: "failed", query, channel, sortBy, minViews, detail: err.message, error: err.message, items: [] });
+    await patchRecsState({
+      status: "failed",
+      detail: "שגיאה: " + err.message,
+      error: err.message
+    }, "FAILED: " + err.message);
   } finally {
-    updateActionBadge();
+    drivingRecs.delete(requestId);
+    void updateActionBadge();
   }
 }
 
@@ -810,6 +907,23 @@ async function startRecommendations(payload) {
   const hist = await getHistory();
   const excludeIds = hist.map((h) => h.videoId).filter(Boolean).slice(0, 40).join(",");
   const requestId = crypto.randomUUID();
+
+  await chrome.storage.local.set({
+    [RECS_KEY]: {
+      status: "running",
+      requestId,
+      runId: null,
+      startedAt: Date.now(),
+      query,
+      channel,
+      sortBy,
+      minViews,
+      detail: "שולח בקשת חיפוש ל-GitHub Actions...",
+      items: [],
+      logs: ["[" + nowTimeStr() + "] Dispatching recommend.yml (request_id=" + requestId + ", channel='" + channel + "', query='" + query + "', sort=" + sortBy + ")"]
+    }
+  });
+  void updateActionBadge();
 
   const url = API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/workflows/recommend.yml/dispatches";
   const res = await ghFetch(url, cfg, {
@@ -830,9 +944,12 @@ async function startRecommendations(payload) {
     })
   });
   if (res.status !== 204) {
+    const errTxt = await res.text().catch(() => "");
+    await patchRecsState({ status: "failed", detail: "שגיאת שיגור HTTP " + res.status }, "Dispatch failed: HTTP " + res.status + " " + errTxt);
     return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ")" };
   }
-  void driveRecommendations(requestId, query, channel, sortBy, minViews);
+  await patchRecsState({}, "Workflow dispatched successfully (HTTP 204).");
+  void driveRecommendations(requestId);
   return { ok: true, requestId };
 }
 
@@ -881,7 +998,11 @@ async function handle(msg) {
     case "START_DOWNLOAD": return startDownload(msg.payload);
     case "START_RECOMMEND": return startRecommendations(msg.payload || {});
     case "GET_RECOMMENDATIONS": {
-      const state = (await chrome.storage.local.get(RECS_KEY))[RECS_KEY] || { status: "idle", items: [] };
+      const state = await getRecsState();
+      // התאוששות אוטומטית: אם תהליך הרקע כבה בזמן שהריצה פעלה, ממשיכים מיד לעקוב אחריה ולמשוך את התוצאות!
+      if ((state.status === "running" || state.status === "fetching") && state.requestId && !drivingRecs.has(state.requestId)) {
+        void driveRecommendations(state.requestId);
+      }
       const history = await getHistory();
       return { ok: true, state, history };
     }
@@ -917,6 +1038,12 @@ async function handle(msg) {
       const job = jobs.get(msg.jobId);
       const cfg = await getConfig();
       const url = job && job.runId ? "https://github.com/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + job.runId : "https://github.com/" + cfg.owner + "/" + cfg.repo + "/actions";
+      await chrome.tabs.create({ url });
+      return { ok: true };
+    }
+    case "OPEN_REC_RUN": {
+      const cfg = await getConfig();
+      const url = msg.runId ? "https://github.com/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + msg.runId : "https://github.com/" + cfg.owner + "/" + cfg.repo + "/actions";
       await chrome.tabs.create({ url });
       return { ok: true };
     }
