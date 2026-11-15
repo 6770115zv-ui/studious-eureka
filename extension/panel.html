@@ -2,15 +2,15 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v12.0 — הורדה בענן, חיפוש לפי ערוץ ויומן אבחון חי</title>
+  <title>YouTube Cloud Ultra v14.0 — חיפושים מקבילים, עד 500 תוצאות ומתרגם כתוביות</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
-<body>
-  <main class="wrap">
+<body style="overflow-anchor:none;">
+  <main class="wrap" style="overflow-anchor:none;">
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v12.0</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v14.0</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
@@ -113,7 +113,7 @@
         <button class="btn btn--primary" id="downloadBtn" type="button" style="flex:2;padding:11px;font-size:14px;">🚀 התחל הורדה בענן GitHub</button>
         <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:600;border-color:var(--ok);color:var(--ok);" title="מוריד קובץ כתוביות נקי ומתורגם לעברית ללא הווידאו">📝 הורד כתוביות בעברית (SRT)</button>
       </div>
-      <p id="hint" class="small muted" style="margin:0;text-align:center;"></p>
+      <p id="hint" class="small muted" style="margin:0;text-align:center;height:20px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></p>
     </section>
 
     <section class="card">
@@ -129,11 +129,11 @@
         <button class="btn btn--primary" id="translateLocalSrtBtn" type="button" style="flex:1;padding:10px;">🔄 תרגם קובץ לעברית ושמור</button>
       </div>
 
-      <div id="srtTransProgWrap" style="display:none;flex-direction:column;gap:6px;">
-        <div class="progress-track">
+      <div id="srtTransProgWrap" style="display:none;flex-direction:column;gap:6px;height:36px;min-height:36px;max-height:36px;overflow:hidden;">
+        <div class="progress-track" style="flex-shrink:0;">
           <div id="srtTransProgBar" class="progress-bar" style="width:0%;"></div>
         </div>
-        <div id="srtTransStatus" class="small muted"></div>
+        <div id="srtTransStatus" class="small muted" style="height:20px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
       </div>
     </section>
 
@@ -148,9 +148,10 @@
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
         <div>
-          <h2 style="margin:0;font-size:15px;">🎯 חיפוש לפי שם ערוץ או נושא (מיון לפי צפיות / לייקים / תאריך)</h2>
-          <p class="small muted" style="margin:2px 0 0;">הזן שם ערוץ (או @handle) ו/או נושא, ובחר מיון לפי שיא צפיות היסטורי, כמות לייקים או תאריך העלאה</p>
+          <h2 style="margin:0;font-size:15px;">🎯 חיפוש במקביל לפי ערוץ או נושא (עד 500 תוצאות • פופולריים היסטורית)</h2>
+          <p class="small muted" style="margin:2px 0 0;">ניתן לשגר מספר חיפושים במקביל ללא דריסה — כל חיפוש נשמר בלשונית נפרדת עם עד 500 תוצאות</p>
         </div>
+        <button class="btn small" id="clearDoneRecsBtn" type="button" style="display:none;">🧹 נקה חיפושים שהושלמו</button>
       </div>
 
       <div id="topicChips" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
@@ -181,8 +182,9 @@
           <select id="recMaxResultsSelect" class="input">
             <option value="30">עד 30 תוצאות</option>
             <option value="60" selected>עד 60 תוצאות</option>
-            <option value="90">עד 90 תוצאות</option>
             <option value="120">עד 120 תוצאות</option>
+            <option value="250">עד 250 תוצאות</option>
+            <option value="500">עד 500 תוצאות (סריקה מלאה)</option>
           </select>
         </div>
         <div>
@@ -204,22 +206,27 @@
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 הבא תוצאות ממוינות לבחירה</button>
-        <button class="btn small" id="selectTop30RecsBtn" type="button" style="display:none;">☑ סמן 30 ראשונים</button>
+        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 שגר חיפוש חדש (במקביל)</button>
+        <button class="btn small" id="selectTop30RecsBtn" type="button" style="display:none;">☑ סמן 30</button>
+        <button class="btn small" id="selectTop100RecsBtn" type="button" style="display:none;">☑ סמן 100</button>
         <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
         <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
       </div>
+
+      <!-- סרגל לשוניות חיפושים פעילים והושלמו -->
+      <div id="recSessionsTabs" style="display:none;flex-wrap:wrap;gap:6px;padding:6px;background:rgba(0,0,0,0.22);border-radius:10px;border:1px solid var(--border);"></div>
+
       <div id="recStatusText" class="small muted" style="font-weight:600;"></div>
 
       <div id="recLogWrap" style="display:none;flex-direction:column;gap:6px;background:rgba(0,0,0,0.28);padding:10px;border-radius:10px;border:1px solid var(--border);">
         <div style="display:flex;align-items:center;justify-content:space-between;">
-          <span class="small muted" style="font-weight:600;">📋 יומן אבחון חי (מעקב אחרי הריצה ומשיכת התוצאות):</span>
+          <span class="small muted" style="font-weight:600;">📋 יומן אבחון חי לחיפוש הנבחר:</span>
           <div style="display:flex;gap:6px;">
             <button class="btn small" id="openRecRunBtn" type="button" style="display:none;padding:3px 8px;font-size:11.5px;">🔗 פתח ריצה ב-GitHub</button>
             <button class="btn small" id="copyRecLogBtn" type="button" style="padding:3px 8px;font-size:11.5px;">📋 העתק לוג</button>
           </div>
         </div>
-        <pre id="recDebugLog" dir="ltr" style="margin:0;max-height:150px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.45;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
+        <pre id="recDebugLog" dir="ltr" style="margin:0;max-height:140px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.45;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
       </div>
 
       <div id="recList" style="display:flex;flex-direction:column;gap:10px;"></div>
