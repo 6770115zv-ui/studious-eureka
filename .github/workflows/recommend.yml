@@ -25,7 +25,7 @@ jobs:
           deno-version: v2.x
       - name: Install yt-dlp
         run: python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests
-      - name: Search Channel or Videos and Sort by Views / Likes / Date
+      - name: Search Full Channel Archive or Videos and Sort by Views / Likes / Date
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
@@ -78,21 +78,24 @@ jobs:
                       pass
               return items
 
-          def resolve_channel_videos_url(ch_raw: str):
+          def resolve_channel_base_url(ch_raw: str):
+              """מחזיר (base_channel_url, display_name, clean_search_term)"""
               ch = ch_raw.strip()
               if not ch:
-                  return "", ""
+                  return "", "", ""
               if ch.startswith("http"):
                   base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", ch.rstrip("/"))
-                  return base + "/videos", ch
+                  m_handle = re.search(r"(@[a-zA-Z0-9_.-]+)", base)
+                  clean_term = m_handle.group(1) if m_handle else base.split("/")[-1]
+                  return base, clean_term, clean_term
               if ch.startswith("@"):
                   handle = ch.split("/")[0]
-                  return f"https://www.youtube.com/{handle}/videos", handle
+                  return f"https://www.youtube.com/{handle}", handle, handle
 
               enc = urllib.parse.quote_plus(ch)
               ch_search_url = f"https://www.youtube.com/results?search_query={enc}&sp=EgIQAg%253D%253D"
               found_channels = fetch_yt_json(ch_search_url, "8")
-              best_url = ""
+              best_base = ""
               best_name = ch
               ch_low = ch.lower()
 
@@ -100,28 +103,26 @@ jobs:
                   c_url = entry.get("url") or entry.get("channel_url") or ""
                   c_title = (entry.get("channel") or entry.get("title") or entry.get("uploader") or "").strip()
                   if c_url and ("/@" in c_url or "/channel/" in c_url or "/c/" in c_url):
-                      if ch_low in c_title.lower() or not best_url:
-                          base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", c_url.rstrip("/"))
-                          best_url = base + "/videos"
+                      if ch_low in c_title.lower() or not best_base:
+                          best_base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", c_url.rstrip("/"))
                           if c_title:
                               best_name = c_title
                           if ch_low in c_title.lower():
                               break
 
-              if not best_url:
+              if not best_base:
                   vids = fetch_yt_json(f"ytsearch15:{ch}", "15")
                   for v in vids:
                       v_ch = (v.get("channel") or v.get("uploader") or "").strip()
                       u_url = v.get("uploader_url") or v.get("channel_url") or ""
-                      if u_url and (ch_low in v_ch.lower() or not best_url):
-                          base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", u_url.rstrip("/"))
-                          best_url = base + "/videos"
+                      if u_url and (ch_low in v_ch.lower() or not best_base):
+                          best_base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", u_url.rstrip("/"))
                           if v_ch:
                               best_name = v_ch
                           if ch_low in v_ch.lower():
                               break
 
-              return best_url, best_name
+              return best_base, best_name, best_name
 
           en_query = ""
           if query and any("\u0590" <= ch <= "\u05FF" for ch in query):
@@ -145,40 +146,53 @@ jobs:
 
           raw = []
           resolved_channel_name = channel_input
-          fetch_cap = str(max(220 if sort_by == "date_asc" else 140, max_results * 2))
 
           if channel_input:
-              ch_videos_url, resolved_channel_name = resolve_channel_videos_url(channel_input)
-              print(f"[STEP 2] Resolved channel URL='{ch_videos_url}', Name='{resolved_channel_name}'", flush=True)
+              ch_base_url, resolved_channel_name, clean_ch_term = resolve_channel_base_url(channel_input)
+              print(f"[STEP 2] Resolved channel base='{ch_base_url}', term='{clean_ch_term}', sort='{sort_by}'", flush=True)
               tasks = []
-              if ch_videos_url:
-                  tasks.append((ch_videos_url, fetch_cap))
-              if query:
-                  tasks.append((yt_search_sorted_url(f"{channel_input} {query}", sort_by), "80"))
-                  if en_query and en_query.lower() != query.lower():
-                      tasks.append((yt_search_sorted_url(f"{channel_input} {en_query}", sort_by), "60"))
-              elif sort_by in ("views", "likes"):
-                  tasks.append((yt_search_sorted_url(channel_input, sort_by), "80"))
+              if ch_base_url:
+                  # 1. סריקת כל ההיסטוריה המלאה של הערוץ (עד 2,500 סרטונים!) כדי להגיע לשיאי הצפיות מכל הזמנים
+                  tasks.append((f"{ch_base_url}/videos", "2500"))
+                  # 2. פנייה ישירה ללשונית הפופולריים בערוץ (Popular tab)
+                  tasks.append((f"{ch_base_url}/videos?sp=EgZ2aWRlb3PyBgQKAjoA", "150"))
+                  # 3. בדיקת שידורים מלאים בערוץ (streams) למקרה שהערוץ מעלה פרקים מלאים לשם
+                  tasks.append((f"{ch_base_url}/streams", "400"))
 
-              with ThreadPoolExecutor(max_workers=3) as ex:
+              if query:
+                  tasks.append((yt_search_sorted_url(f"{clean_ch_term} {query}", sort_by), "100"))
+                  if en_query and en_query.lower() != query.lower():
+                      tasks.append((yt_search_sorted_url(f"{clean_ch_term} {en_query}", sort_by), "80"))
+              elif sort_by in ("views", "likes"):
+                  tasks.append((yt_search_sorted_url(clean_ch_term, sort_by), "120"))
+
+              with ThreadPoolExecutor(max_workers=4) as ex:
                   for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), tasks):
                       raw.extend(batch)
           else:
               search_targets = [
-                  (yt_search_sorted_url(query, sort_by), "120"),
-                  (f"ytsearch80:{query}", "80"),
+                  (yt_search_sorted_url(query, sort_by), "150"),
+                  (f"ytsearch100:{query}", "100"),
               ]
               if en_query and en_query.lower() != query.lower():
                   search_targets.extend([
-                      (yt_search_sorted_url(en_query, sort_by), "120"),
-                      (f"ytsearch80:{en_query}", "80"),
+                      (yt_search_sorted_url(en_query, sort_by), "150"),
+                      (f"ytsearch100:{en_query}", "100"),
                   ])
 
               with ThreadPoolExecutor(max_workers=4) as ex:
                   for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), search_targets):
                       raw.extend(batch)
 
-          print(f"[STEP 3] Raw entries fetched: {len(raw)}", flush=True)
+          print(f"[STEP 3] Total raw historical entries fetched: {len(raw)}", flush=True)
+
+          # חילוץ שם הערוץ האמיתי מתוך הפריטים שחזרו מהערוץ
+          if channel_input and raw:
+              for r_item in raw[:15]:
+                  real_ch = (r_item.get("channel") or r_item.get("uploader") or "").strip()
+                  if real_ch and not real_ch.startswith("http") and not real_ch.startswith("@"):
+                      resolved_channel_name = real_ch
+                      break
 
           BLOCKED_RX = re.compile(
               r"\b(movie|movies|film|trailer|cinema|netflix|hollywood|actor|actress|romance|dating|"
@@ -207,7 +221,7 @@ jobs:
 
           ch_tokens = [
               t for t in re.split(r"[^\w\u0590-\u05FF]+", f"{channel_input} {resolved_channel_name}".lower())
-              if len(t) >= 2
+              if len(t) >= 2 and t not in ("https", "http", "www", "youtube", "com", "videos", "streams")
           ]
 
           def matches_channel_strictly(entry_channel: str, entry_uploader_url: str) -> bool:
@@ -250,17 +264,19 @@ jobs:
                   "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          print(f"[STEP 4] Filtered candidates count: {len(cands)}", flush=True)
+          print(f"[STEP 4] Unique historical candidates across channel: {len(cands)}", flush=True)
 
-          if sort_by == "likes":
-              need_meta = [c for c in cands if c["likes"] == 0][:90]
-          elif sort_by in ("date_desc", "date_asc"):
-              if sort_by == "date_asc" and len(cands) > 90:
-                  need_meta = [c for c in cands[-90:] if not c["upload_date"]]
-              else:
-                  need_meta = [c for c in cands[:90] if not c["upload_date"]]
+          # שלב קריטי: ממיינים את כל 2,500 הסרטונים ההיסטוריים לפי כמות צפיות לפני בחירת המועמדים להעשרה!
+          if sort_by in ("views", "likes"):
+              cands.sort(key=lambda x: x["views"], reverse=True)
+              need_meta = cands[:max(max_results + 35, 110)]
+          elif sort_by == "date_asc":
+              # הסרטונים הישנים ביותר נמצאים בסוף הרשימה שנסרקה מלשונית הווידאו של הערוץ
+              oldest_slice = list(reversed(cands[-max(max_results + 35, 110):]))
+              need_meta = oldest_slice
           else:
-              need_meta = [c for c in cands if c["views"] == 0][:80]
+              # date_desc: החדשים ביותר נמצאים בראש הרשימה
+              need_meta = cands[:max(max_results + 35, 110)]
 
           def enrich(c):
               cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
@@ -271,13 +287,14 @@ jobs:
                   c["likes"] = int(d.get("like_count") or c["likes"] or 0)
                   c["upload_date"] = str(d.get("upload_date") or c["upload_date"] or "").strip()
                   c["duration"] = int(d.get("duration") or c["duration"] or 0)
-                  if not c["channel"]:
-                      c["channel"] = (d.get("channel") or d.get("uploader") or resolved_channel_name).strip()
+                  real_name = (d.get("channel") or d.get("uploader") or "").strip()
+                  if real_name:
+                      c["channel"] = real_name
               except Exception:
                   pass
 
           if need_meta:
-              with ThreadPoolExecutor(max_workers=12) as ex:
+              with ThreadPoolExecutor(max_workers=15) as ex:
                   list(ex.map(enrich, need_meta))
 
           def sort_candidates(items_list, mode_sort):
@@ -290,18 +307,18 @@ jobs:
               else:
                   items_list.sort(key=lambda x: x["views"], reverse=True)
 
-          sort_candidates(cands, sort_by)
+          sort_candidates(need_meta, sort_by)
 
           if channel_input:
-              pool = [c for c in cands if c["views"] >= min_views]
+              pool = [c for c in need_meta if c["views"] >= min_views]
               if len(pool) < min(max_results, 25):
-                  pool = cands[:]
-              pool = pool[:max(max_results + 20, 100)]
+                  pool = need_meta[:]
+              pool = pool[:max_results + 25]
           else:
               user_asked_2026 = "2026" in query or sort_by == "date_desc"
               balanced_pool = []
               recent_2026_list = []
-              for c in cands:
+              for c in need_meta:
                   if c["views"] < min_views:
                       continue
                   if not user_asked_2026 and re.search(r"\b2026\b", c["title"]):
@@ -311,7 +328,7 @@ jobs:
               pool = balanced_pool[:max_results + 20] + recent_2026_list[:8]
               sort_candidates(pool, sort_by)
               if len(pool) < 20:
-                  pool = cands[:max_results + 20]
+                  pool = need_meta[:max_results + 20]
 
           def call_ai_batch(batch_items, topic_str, ch_str, user_rule):
               compact = [{"id": c["id"], "title": c["title"], "channel": c["channel"]} for c in batch_items]
