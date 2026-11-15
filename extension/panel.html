@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v10.0 — הורדה בענן ומתרגם כתוביות לעברית</title>
+  <title>YouTube Cloud Ultra v11.0 — הורדה בענן, חיפוש לפי ערוץ ומתרגם כתוביות</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,7 +10,7 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v10.0</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v11.0</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
@@ -148,8 +148,8 @@
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
         <div>
-          <h2 style="margin:0;font-size:15px;">🎯 מנוע חיפוש רב-לשוני (שיא צפיות מכל הזמנים) מבוסס סינון AI</h2>
-          <p class="small muted" style="margin:2px 0 0;">מביא את התוצאות הנצפות ביותר בכל הזמנים ומסנן אותן עם AI לפי הגדרת הנקיות שלך</p>
+          <h2 style="margin:0;font-size:15px;">🎯 חיפוש לפי שם ערוץ או נושא (בחירת עשרות סרטונים להורדה מרוכזת)</h2>
+          <p class="small muted" style="margin:2px 0 0;">הזן שם ערוץ (או @handle) ו/או נושא לחיפוש — הכלי יחזיר עשרות סרטונים מאותו ערוץ לבחירה והורדה</p>
         </div>
       </div>
 
@@ -157,16 +157,33 @@
 
       <div class="grid-2">
         <div>
-          <label class="small muted">נושא קשיח לחיפוש (למשל: בנייה, נגרות, אלקטרוניקה):</label>
-          <input id="recQueryInput" class="input" placeholder="הקלד נושא בעברית או באנגלית..."/>
+          <label class="small muted" style="font-weight:600;">📺 שם ערוץ או מזהה (@handle / קישור לערוץ):</label>
+          <input id="recChannelInput" class="input" placeholder="למשל: @ChannelName או שם הערוץ..."/>
+        </div>
+        <div>
+          <label class="small muted">נושא לחיפוש (אופציונלי אם הוזן ערוץ):</label>
+          <input id="recQueryInput" class="input" placeholder="למשל: בנייה, נגרות, אלקטרוניקה..."/>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label class="small muted">כמות תוצאות להחזרה לבחירה:</label>
+          <select id="recMaxResultsSelect" class="input">
+            <option value="30">עד 30 תוצאות</option>
+            <option value="60" selected>עד 60 תוצאות (עשרות סרטונים)</option>
+            <option value="90">עד 90 תוצאות</option>
+            <option value="120">עד 120 תוצאות</option>
+          </select>
         </div>
         <div>
           <label class="small muted">סינון פופולריות מינימלי (צפיות):</label>
           <select id="recMinViewsSelect" class="input">
+            <option value="0" selected>ללא הגבלת צפיות (מומלץ בחיפוש ערוץ)</option>
             <option value="10000">מעל 10,000 צפיות</option>
             <option value="50000">מעל 50,000 צפיות</option>
-            <option value="100000" selected>מעל 100,000 צפיות (מומלץ)</option>
-            <option value="500000">מעל 500,000 צפיות (פופולרי מאוד)</option>
+            <option value="100000">מעל 100,000 צפיות</option>
+            <option value="500000">מעל 500,000 צפיות</option>
             <option value="1000000">מעל 1,000,000 צפיות</option>
           </select>
         </div>
@@ -174,11 +191,12 @@
 
       <div>
         <label class="small muted" style="font-weight:600;">🤖 הנחיית סינון ונקיות למודל הבינה המלאכותית בענן (מה לכלול ומה לפסול):</label>
-        <input id="recFilterPromptInput" class="input" value="הבא רק תוצאות מקצועיות שעוסקות ישירות בנושא המבוקש בלבד, ללא דמויות אחרות, ללא תכנים זרים וללא תכנים שאינם מתאימים למגזר שומר תורה ומצוות"/>
+        <input id="recFilterPromptInput" class="input" value="הבא רק תוצאות מקצועיות שעוסקות ישירות בנושא או בערוץ המבוקש, ללא דמויות אחרות, ללא תכנים זרים וללא תכנים שאינם מתאימים למגזר שומר תורה ומצוות"/>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 חפש (כל הזמנים) וסנן באמצעות AI</button>
+        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 הבא עשרות תוצאות מהערוץ / החיפוש</button>
+        <button class="btn small" id="selectTop30RecsBtn" type="button" style="display:none;">☑ סמן 30 ראשונים</button>
         <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
         <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
       </div>
