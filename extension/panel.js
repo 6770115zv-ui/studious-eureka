@@ -457,6 +457,14 @@
     return m + ":" + String(r).padStart(2, "0");
   }
 
+  function formatUploadDate(ymd) {
+    const str = String(ymd || "").trim();
+    if (/^\d{8}$/.test(str)) {
+      return str.slice(6, 8) + "/" + str.slice(4, 6) + "/" + str.slice(0, 4);
+    }
+    return "";
+  }
+
   function updateBatchButtons(items) {
     const hasItems = items && items.length > 0;
     if (el("selectTop30RecsBtn")) {
@@ -564,7 +572,11 @@
       tEl.textContent = item.title;
       const subEl = document.createElement("div");
       subEl.className = "small muted";
-      subEl.textContent = item.channel + " • 👁 " + formatNumber(item.views) + " צפיות" + (item.duration ? (" • ⏱ " + formatDuration(item.duration)) : "");
+      const likesPart = item.likes ? (" • 👍 " + formatNumber(item.likes)) : "";
+      const dateStr = formatUploadDate(item.upload_date);
+      const datePart = dateStr ? (" • 📅 " + dateStr) : "";
+      const durPart = item.duration ? (" • ⏱ " + formatDuration(item.duration)) : "";
+      subEl.textContent = item.channel + " • 👁 " + formatNumber(item.views) + likesPart + datePart + durPart;
       meta.append(tEl, subEl);
 
       const dlBtn = document.createElement("button");
@@ -667,14 +679,16 @@
       chrome.storage.local.set({ [FILTER_STORAGE_KEY]: filterPrompt }).catch(() => {});
     }
     selectedRecUrls.clear();
+    const sortBy = el("recSortBySelect") ? el("recSortBySelect").value : "views";
     el("recStatusText").textContent = channel
-      ? ("משגר חיפוש עבור הערוץ \"" + channel + "\" להבאת עשרות תוצאות...")
-      : "משגר חיפוש רב-לשוני וסינון AI ל-GitHub Actions...";
+      ? ("משגר חיפוש עבור הערוץ \"" + channel + "\" להבאת תוצאות ממוינות...")
+      : "משגר חיפוש ממוין וסינון AI ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
       payload: {
         query,
         channel,
+        sortBy,
         maxResults: el("recMaxResultsSelect") ? el("recMaxResultsSelect").value : "60",
         minViews: el("recMinViewsSelect").value,
         filterPrompt
