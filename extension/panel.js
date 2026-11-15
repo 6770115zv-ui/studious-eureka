@@ -38,9 +38,6 @@
     chrome.storage.local.set({ [AUTO_EMAIL_TOGGLE_KEY]: el("emailToggle").checked }).catch(() => {});
   });
 
-  // =========================================================================
-  // מתרגם קובצי כתוביות מקומיים (SRT / VTT): השלמת משפטים קטועים + תרגום מובטח לעברית
-  // =========================================================================
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const hasHebrew = (s) => /[\u0590-\u05FF]/.test(String(s || ""));
 
@@ -109,7 +106,6 @@
       if (textLines.length) parsed.push([startMs, endMs, textLines]);
     }
 
-    // 1. ניקוי כפילויות מתגלגלות (Rollup)
     const deduped = [];
     const recent = [];
     for (const [startMs, endMs, tLines] of parsed) {
@@ -136,7 +132,6 @@
       }
     }
 
-    // 2. העברת מילים קטועות בין שורות עוקבות ליצירת משפטים שלמים והגיוניים
     for (let i = 0; i < deduped.length - 1; i++) {
       const [curS, curE, curTxt] = deduped[i];
       const [nxtS, nxtE, nxtTxt] = deduped[i + 1];
@@ -161,7 +156,6 @@
       }
     }
 
-    // 3. איחוד שורות קצרות סמוכות
     const merged = [];
     let i = 0;
     while (i < deduped.length) {
@@ -238,7 +232,6 @@
       await sleep(500);
     }
 
-    // גיבוי פרטני מובטח לכל שורה במקבץ אם חלוקת השורות השתנתה
     const out = [];
     for (const c of batchCues) {
       const tr = await translateSingleCueJS(c[2]);
@@ -466,6 +459,9 @@
 
   function updateBatchButtons(items) {
     const hasItems = items && items.length > 0;
+    if (el("selectTop30RecsBtn")) {
+      el("selectTop30RecsBtn").style.display = hasItems && items.length > 10 ? "inline-flex" : "none";
+    }
     el("selectAllRecsBtn").style.display = hasItems ? "inline-flex" : "none";
     el("batchRecsBtn").style.display = hasItems ? "inline-flex" : "none";
     el("batchRecsBtn").textContent = "📦 הורד מסומנים בריצה אחת (" + selectedRecUrls.size + ")";
@@ -493,9 +489,6 @@
         };
         chipsWrap.append(chip);
       }
-      if (!el("recQueryInput").value) {
-        el("recQueryInput").value = topics[0];
-      }
     }
 
     const statusEl = el("recStatusText");
@@ -505,6 +498,14 @@
     recList.replaceChildren();
     const items = (recState && recState.items) || [];
     updateBatchButtons(items);
+
+    if (el("selectTop30RecsBtn")) {
+      el("selectTop30RecsBtn").onclick = () => {
+        selectedRecUrls.clear();
+        for (const it of items.slice(0, 30)) selectedRecUrls.add(it.url);
+        renderRecommendations(recState, historyList);
+      };
+    }
 
     el("selectAllRecsBtn").onclick = () => {
       if (selectedRecUrls.size === items.length) {
@@ -524,7 +525,7 @@
         payload: {
           ...getActiveDownloadOptions(false),
           urls,
-          title: "חבילת המלצות מסוננת (" + urls.length + " קבצים)",
+          title: "חבילת ערוץ/המלצות (" + urls.length + " קבצים)",
           mode: "list"
         }
       });
@@ -655,9 +656,10 @@
   }
 
   el("findRecsBtn").onclick = async () => {
+    const channel = el("recChannelInput") ? el("recChannelInput").value.trim() : "";
     const query = el("recQueryInput").value.trim();
-    if (!query) {
-      el("recStatusText").textContent = "נא להקליד נושא לחיפוש";
+    if (!channel && !query) {
+      el("recStatusText").textContent = "נא להזין שם ערוץ או נושא לחיפוש";
       return;
     }
     const filterPrompt = el("recFilterPromptInput") ? el("recFilterPromptInput").value.trim() : "";
@@ -665,17 +667,21 @@
       chrome.storage.local.set({ [FILTER_STORAGE_KEY]: filterPrompt }).catch(() => {});
     }
     selectedRecUrls.clear();
-    el("recStatusText").textContent = "משגר חיפוש רב-לשוני וסינון AI ל-GitHub Actions...";
+    el("recStatusText").textContent = channel
+      ? ("משגר חיפוש עבור הערוץ \"" + channel + "\" להבאת עשרות תוצאות...")
+      : "משגר חיפוש רב-לשוני וסינון AI ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
       payload: {
         query,
+        channel,
+        maxResults: el("recMaxResultsSelect") ? el("recMaxResultsSelect").value : "60",
         minViews: el("recMinViewsSelect").value,
         filterPrompt
       }
     });
     if (!res || !res.ok) {
-      el("recStatusText").textContent = (res && res.error) || "שגיאה בהפעלת מנוע ההמלצות";
+      el("recStatusText").textContent = (res && res.error) || "שגיאה בהפעלת מנוע החיפוש";
     }
   };
 
