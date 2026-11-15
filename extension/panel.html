@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v11.0 — הורדה בענן, חיפוש לפי ערוץ ומתרגם כתוביות</title>
+  <title>YouTube Cloud Ultra v11.5 — הורדה בענן, חיפוש לפי ערוץ ומיון מתקדם</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,7 +10,7 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v11.0</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v11.5</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
@@ -148,8 +148,8 @@
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
         <div>
-          <h2 style="margin:0;font-size:15px;">🎯 חיפוש לפי שם ערוץ או נושא (בחירת עשרות סרטונים להורדה מרוכזת)</h2>
-          <p class="small muted" style="margin:2px 0 0;">הזן שם ערוץ (או @handle) ו/או נושא לחיפוש — הכלי יחזיר עשרות סרטונים מאותו ערוץ לבחירה והורדה</p>
+          <h2 style="margin:0;font-size:15px;">🎯 חיפוש לפי שם ערוץ או נושא (מיון לפי צפיות / לייקים / תאריך)</h2>
+          <p class="small muted" style="margin:2px 0 0;">הזן שם ערוץ (או @handle) ו/או נושא, ובחר מיון לפי שיא צפיות היסטורי, כמות לייקים או תאריך העלאה</p>
         </div>
       </div>
 
@@ -166,25 +166,34 @@
         </div>
       </div>
 
-      <div class="grid-2">
+      <div style="display:grid;grid-template-columns:1.3fr 0.85fr 0.85fr;gap:8px;">
         <div>
-          <label class="small muted">כמות תוצאות להחזרה לבחירה:</label>
+          <label class="small muted" style="font-weight:600;">📊 אופן מיון התוצאות:</label>
+          <select id="recSortBySelect" class="input">
+            <option value="views" selected>👁 כמות צפיות היסטורית (כל הזמנים)</option>
+            <option value="likes">👍 כמות לייקים (האהובים ביותר)</option>
+            <option value="date_desc">📅 תאריך העלאה: מהחדש לישן</option>
+            <option value="date_asc">🕰 תאריך העלאה: מהישן לחדש</option>
+          </select>
+        </div>
+        <div>
+          <label class="small muted">כמות תוצאות:</label>
           <select id="recMaxResultsSelect" class="input">
             <option value="30">עד 30 תוצאות</option>
-            <option value="60" selected>עד 60 תוצאות (עשרות סרטונים)</option>
+            <option value="60" selected>עד 60 תוצאות</option>
             <option value="90">עד 90 תוצאות</option>
             <option value="120">עד 120 תוצאות</option>
           </select>
         </div>
         <div>
-          <label class="small muted">סינון פופולריות מינימלי (צפיות):</label>
+          <label class="small muted">מינימום צפיות:</label>
           <select id="recMinViewsSelect" class="input">
-            <option value="0" selected>ללא הגבלת צפיות (מומלץ בחיפוש ערוץ)</option>
-            <option value="10000">מעל 10,000 צפיות</option>
-            <option value="50000">מעל 50,000 צפיות</option>
-            <option value="100000">מעל 100,000 צפיות</option>
-            <option value="500000">מעל 500,000 צפיות</option>
-            <option value="1000000">מעל 1,000,000 צפיות</option>
+            <option value="0" selected>ללא הגבלה</option>
+            <option value="10000">מעל 10,000</option>
+            <option value="50000">מעל 50,000</option>
+            <option value="100000">מעל 100,000</option>
+            <option value="500000">מעל 500,000</option>
+            <option value="1000000">מעל 1,000,000</option>
           </select>
         </div>
       </div>
@@ -195,7 +204,7 @@
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 הבא עשרות תוצאות מהערוץ / החיפוש</button>
+        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 הבא תוצאות ממוינות לבחירה</button>
         <button class="btn small" id="selectTop30RecsBtn" type="button" style="display:none;">☑ סמן 30 ראשונים</button>
         <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
         <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
