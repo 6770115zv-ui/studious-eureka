@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v11.5 — הורדה בענן, חיפוש לפי ערוץ ומיון מתקדם</title>
+  <title>YouTube Cloud Ultra v12.0 — הורדה בענן, חיפוש לפי ערוץ ויומן אבחון חי</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body>
@@ -10,7 +10,7 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v11.5</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v12.0</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
@@ -209,7 +209,19 @@
         <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
         <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
       </div>
-      <div id="recStatusText" class="small muted"></div>
+      <div id="recStatusText" class="small muted" style="font-weight:600;"></div>
+
+      <div id="recLogWrap" style="display:none;flex-direction:column;gap:6px;background:rgba(0,0,0,0.28);padding:10px;border-radius:10px;border:1px solid var(--border);">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <span class="small muted" style="font-weight:600;">📋 יומן אבחון חי (מעקב אחרי הריצה ומשיכת התוצאות):</span>
+          <div style="display:flex;gap:6px;">
+            <button class="btn small" id="openRecRunBtn" type="button" style="display:none;padding:3px 8px;font-size:11.5px;">🔗 פתח ריצה ב-GitHub</button>
+            <button class="btn small" id="copyRecLogBtn" type="button" style="padding:3px 8px;font-size:11.5px;">📋 העתק לוג</button>
+          </div>
+        </div>
+        <pre id="recDebugLog" dir="ltr" style="margin:0;max-height:150px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.45;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
+      </div>
+
       <div id="recList" style="display:flex;flex-direction:column;gap:10px;"></div>
     </section>
 
