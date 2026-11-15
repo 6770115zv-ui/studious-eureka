@@ -12,7 +12,12 @@
   let currentPreview = null;
   let previewDebounce = null;
   const selectedRecUrls = new Set();
+  let activeSessionId = "";
   let lastHistory = [];
+  let lastRecRenderSig = "";
+  let lastHistRenderSig = "";
+  let lastJobsRenderSig = "";
+
   const FILTER_STORAGE_KEY = "ytproxy_ai_filter_prompt";
   const AUTO_EMAIL_TOGGLE_KEY = "ytproxy_send_email_enabled";
 
@@ -45,6 +50,14 @@
       navigator.clipboard.writeText(txt).catch(() => {});
       el("copyRecLogBtn").textContent = "✓ הלוג הועתק";
       setTimeout(() => { el("copyRecLogBtn").textContent = "📋 העתק לוג"; }, 1800);
+    };
+  }
+
+  if (el("clearDoneRecsBtn")) {
+    el("clearDoneRecsBtn").onclick = async () => {
+      await chrome.runtime.sendMessage({ type: "CLEAR_DONE_REC_SESSIONS" });
+      lastRecRenderSig = "";
+      void refresh();
     };
   }
 
@@ -269,11 +282,11 @@
         for (let fIdx = 0; fIdx < files.length; fIdx++) {
           const file = files[fIdx];
           el("srtTransProgBar").style.width = "5%";
-          el("srtTransStatus").textContent = "משלים משפטים קטועים ומנקה כפילויות בקובץ: " + file.name + "...";
+          el("srtTransStatus").textContent = "מכין ומשלים משפטים: " + file.name;
           const rawText = await file.text();
           const cleanCues = parseAndReconstructSrt(rawText);
           if (!cleanCues.length) {
-            el("srtTransStatus").textContent = "לא נמצאו שורות כתוביות תקינות בקובץ " + file.name;
+            el("srtTransStatus").textContent = "לא נמצאו שורות כתוביות תקינות בקובץ.";
             continue;
           }
 
@@ -292,8 +305,9 @@
               translatedCues[bIdx] = await translateBatchGuaranteedJS(batches[bIdx]);
               completedBatches++;
               const pct = Math.round((completedBatches / batches.length) * 100);
+              const doneLines = Math.min(cleanCues.length, completedBatches * batchSize);
               el("srtTransProgBar").style.width = pct + "%";
-              el("srtTransStatus").textContent = "מתרגם לעברית (" + file.name + "): " + pct + "% (" + Math.min(cleanCues.length, completedBatches * batchSize) + " / " + cleanCues.length + " משפטים שלמים)...";
+              el("srtTransStatus").textContent = "מתרגם לעברית: " + pct + "% (" + doneLines + " / " + cleanCues.length + " משפטים)";
               await sleep(220);
             }
           }
@@ -319,10 +333,10 @@
           setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
 
           el("srtTransProgBar").style.width = "100%";
-          el("srtTransStatus").textContent = "✓ התרגום לעברית הושלם ונשמר: " + outName + " (" + hebrewCount + "/" + flatCues.length + " משפטים בעברית)";
+          el("srtTransStatus").textContent = "✓ הושלם ונשמר: " + outName + " (" + hebrewCount + "/" + flatCues.length + " משפטים)";
         }
       } catch (err) {
-        el("srtTransStatus").textContent = "שגיאה בתרגום הקובץ: " + err.message;
+        el("srtTransStatus").textContent = "שגיאה בתרגום: " + err.message;
       } finally {
         btn.disabled = false;
       }
@@ -362,15 +376,18 @@
 
   el("clearJobsBtn").onclick = async () => {
     await chrome.runtime.sendMessage({ type: "CLEAR_COMPLETED_JOBS" });
+    lastJobsRenderSig = "";
     void refresh();
   };
 
   el("clearHistBtn").onclick = async () => {
     await chrome.runtime.sendMessage({ type: "CLEAR_HISTORY" });
+    lastHistRenderSig = "";
     void refresh();
   };
 
   el("histSearchInput").addEventListener("input", () => {
+    lastHistRenderSig = "";
     renderHistoryArchive(lastHistory);
   });
 
@@ -480,13 +497,86 @@
     if (el("selectTop30RecsBtn")) {
       el("selectTop30RecsBtn").style.display = hasItems && items.length > 10 ? "inline-flex" : "none";
     }
+    if (el("selectTop100RecsBtn")) {
+      el("selectTop100RecsBtn").style.display = hasItems && items.length > 40 ? "inline-flex" : "none";
+    }
     el("selectAllRecsBtn").style.display = hasItems ? "inline-flex" : "none";
     el("batchRecsBtn").style.display = hasItems ? "inline-flex" : "none";
     el("batchRecsBtn").textContent = "📦 הורד מסומנים בריצה אחת (" + selectedRecUrls.size + ")";
     el("batchRecsBtn").disabled = selectedRecUrls.size === 0;
   }
 
-  function renderRecommendations(recState, historyList) {
+  function renderRecommendations(sessionsMap, historyList, forceRender = false) {
+    const sessions = Object.values(sessionsMap || {}).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+    if (!activeSessionId || !sessionsMap[activeSessionId]) {
+      activeSessionId = sessions.length ? sessions[0].requestId : "";
+    }
+    const activeRec = activeSessionId ? sessionsMap[activeSessionId] : null;
+
+    // חישוב חתימה כדי למנוע בנייה מחדש של ה-DOM כל 2 שניות כשאין שינוי (מונע קפיצות מסך!)
+    const sig = JSON.stringify({
+      activeSessionId,
+      selCount: selectedRecUrls.size,
+      histLen: (historyList || []).length,
+      tabs: sessions.map((s) => [s.requestId, s.status, s.detail, (s.items || []).length, (s.logs || []).length])
+    });
+    if (!forceRender && sig === lastRecRenderSig) {
+      return;
+    }
+    lastRecRenderSig = sig;
+
+    // כפתור ניקוי חיפושים שהושלמו
+    if (el("clearDoneRecsBtn")) {
+      const hasDone = sessions.some((s) => s.status === "completed" || s.status === "failed");
+      el("clearDoneRecsBtn").style.display = hasDone ? "inline-flex" : "none";
+    }
+
+    // סרגל לשוניות החיפושים המקבילים
+    const tabsWrap = el("recSessionsTabs");
+    if (tabsWrap) {
+      tabsWrap.replaceChildren();
+      if (sessions.length > 0) {
+        tabsWrap.style.display = "flex";
+        for (const sess of sessions) {
+          const isSelected = sess.requestId === activeSessionId;
+          const tab = document.createElement("div");
+          tab.style.cssText =
+            "display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:8px;cursor:pointer;font-size:12px;" +
+            (isSelected
+              ? "background:var(--accent);color:#0f172a;font-weight:700;"
+              : "background:var(--surface-2);color:var(--text);border:1px solid var(--border);");
+
+          const icon = sess.status === "completed" ? ("✓ (" + (sess.items || []).length + ")")
+            : sess.status === "failed" ? "✕"
+            : "⏳";
+          const lbl = document.createElement("span");
+          lbl.textContent = icon + " " + (sess.tabTitle || sess.channel || sess.query || "חיפוש");
+          lbl.onclick = () => {
+            activeSessionId = sess.requestId;
+            selectedRecUrls.clear();
+            renderRecommendations(sessionsMap, historyList, true);
+          };
+
+          const closeBtn = document.createElement("span");
+          closeBtn.textContent = "×";
+          closeBtn.title = "סגור לשונית חיפוש זו";
+          closeBtn.style.cssText = "padding:0 4px;font-weight:700;opacity:0.75;";
+          closeBtn.onclick = async (ev) => {
+            ev.stopPropagation();
+            await chrome.runtime.sendMessage({ type: "REMOVE_REC_SESSION", requestId: sess.requestId });
+            if (activeSessionId === sess.requestId) activeSessionId = "";
+            lastRecRenderSig = "";
+            void refresh();
+          };
+
+          tab.append(lbl, closeBtn);
+          tabsWrap.append(tab);
+        }
+      } else {
+        tabsWrap.style.display = "none";
+      }
+    }
+
     const chipsWrap = el("topicChips");
     const topics = extractTopicsFromHistory(historyList);
     chipsWrap.replaceChildren();
@@ -510,36 +600,32 @@
     }
 
     const statusEl = el("recStatusText");
-    statusEl.textContent = (recState && recState.detail) || "";
-    if (recState && recState.status === "failed") {
+    statusEl.textContent = (activeRec && activeRec.detail) || "";
+    if (activeRec && activeRec.status === "failed") {
       statusEl.style.color = "var(--fail)";
-    } else if (recState && recState.status === "completed") {
+    } else if (activeRec && activeRec.status === "completed") {
       statusEl.style.color = "var(--ok)";
     } else {
       statusEl.style.color = "";
     }
 
-    // הצגת יומן האבחון החי וכפתור פתיחת הריצה ב-GitHub
     const logWrap = el("recLogWrap");
     const logPre = el("recDebugLog");
     const openRunBtn = el("openRecRunBtn");
     if (logWrap && logPre) {
-      const logs = (recState && Array.isArray(recState.logs)) ? recState.logs : [];
+      const logs = (activeRec && Array.isArray(activeRec.logs)) ? activeRec.logs : [];
       if (logs.length > 0) {
         logWrap.style.display = "flex";
-        const newText = logs.join("\n");
-        if (logPre.textContent !== newText) {
-          logPre.textContent = newText;
-          logPre.scrollTop = logPre.scrollHeight;
-        }
+        logPre.textContent = logs.join("\n");
+        logPre.scrollTop = logPre.scrollHeight;
       } else {
         logWrap.style.display = "none";
       }
     }
     if (openRunBtn) {
-      if (recState && recState.runId) {
+      if (activeRec && activeRec.runId) {
         openRunBtn.style.display = "inline-flex";
-        openRunBtn.onclick = () => chrome.runtime.sendMessage({ type: "OPEN_REC_RUN", runId: recState.runId });
+        openRunBtn.onclick = () => chrome.runtime.sendMessage({ type: "OPEN_REC_RUN", runId: activeRec.runId });
       } else {
         openRunBtn.style.display = "none";
       }
@@ -547,14 +633,22 @@
 
     const recList = el("recList");
     recList.replaceChildren();
-    const items = (recState && recState.items) || [];
+    const items = (activeRec && activeRec.items) || [];
     updateBatchButtons(items);
 
     if (el("selectTop30RecsBtn")) {
       el("selectTop30RecsBtn").onclick = () => {
         selectedRecUrls.clear();
         for (const it of items.slice(0, 30)) selectedRecUrls.add(it.url);
-        renderRecommendations(recState, historyList);
+        renderRecommendations(sessionsMap, historyList, true);
+      };
+    }
+
+    if (el("selectTop100RecsBtn")) {
+      el("selectTop100RecsBtn").onclick = () => {
+        selectedRecUrls.clear();
+        for (const it of items.slice(0, 100)) selectedRecUrls.add(it.url);
+        renderRecommendations(sessionsMap, historyList, true);
       };
     }
 
@@ -564,7 +658,7 @@
       } else {
         for (const it of items) selectedRecUrls.add(it.url);
       }
-      renderRecommendations(recState, historyList);
+      renderRecommendations(sessionsMap, historyList, true);
     };
 
     el("batchRecsBtn").onclick = async () => {
@@ -583,11 +677,12 @@
       if (res && res.ok) {
         selectedRecUrls.clear();
         el("recStatusText").textContent = "החבילה נשלחה להורדה מרוכזת בענן!";
+        lastRecRenderSig = "";
         void refresh();
       }
     };
 
-    for (const item of items) {
+    items.forEach((item, idx) => {
       const row = document.createElement("div");
       row.style.cssText = "background:var(--surface-2);padding:10px;border-radius:12px;border:1px solid var(--border);display:flex;gap:10px;align-items:center;";
 
@@ -605,6 +700,7 @@
       if (item.thumbnail) {
         const img = document.createElement("img");
         img.src = item.thumbnail;
+        img.loading = "lazy";
         img.style.cssText = "width:106px;height:60px;object-fit:cover;border-radius:8px;flex-shrink:0;";
         row.append(img);
       }
@@ -612,7 +708,7 @@
       meta.style.cssText = "flex:1;overflow:hidden;display:flex;flex-direction:column;gap:4px;";
       const tEl = document.createElement("div");
       tEl.style.cssText = "font-weight:600;font-size:13.5px;";
-      tEl.textContent = item.title;
+      tEl.textContent = "#" + (idx + 1) + " • " + item.title;
       const subEl = document.createElement("div");
       subEl.className = "small muted";
       const likesPart = item.likes ? (" • 👍 " + formatNumber(item.likes)) : "";
@@ -643,13 +739,17 @@
       };
       row.append(meta, dlBtn);
       recList.append(row);
-    }
+    });
   }
 
   function renderHistoryArchive(historyList) {
+    const filter = el("histSearchInput").value.trim().toLowerCase();
+    const sig = filter + "|" + (historyList || []).length + "|" + ((historyList && historyList[0] && historyList[0].timestamp) || 0);
+    if (sig === lastHistRenderSig) return;
+    lastHistRenderSig = sig;
+
     const wrap = el("historyList");
     wrap.replaceChildren();
-    const filter = el("histSearchInput").value.trim().toLowerCase();
     const filtered = (historyList || []).filter((h) => !filter || String(h.title || "").toLowerCase().includes(filter));
     if (!filtered.length) {
       const empty = document.createElement("div");
@@ -723,9 +823,7 @@
     }
     selectedRecUrls.clear();
     const sortBy = el("recSortBySelect") ? el("recSortBySelect").value : "views";
-    el("recStatusText").textContent = channel
-      ? ("משגר חיפוש עבור הערוץ \"" + channel + "\" להבאת תוצאות ממוינות...")
-      : "משגר חיפוש ממוין וסינון AI ל-GitHub Actions...";
+    el("recStatusText").textContent = "משגר חיפוש חדש במקביל ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
       payload: {
@@ -740,14 +838,21 @@
     if (!res || !res.ok) {
       el("recStatusText").textContent = (res && res.error) || "שגיאה בהפעלת מנוע החיפוש";
     } else {
+      activeSessionId = res.requestId;
+      lastRecRenderSig = "";
       void refresh();
     }
   };
 
   function renderJobs(jobsObj) {
+    const ids = Object.keys(jobsObj || {}).sort((a, b) => (jobsObj[b].startedAt || 0) - (jobsObj[a].startedAt || 0));
+    const hasActive = ids.some((id) => !["completed", "failed", "cancelled"].includes(jobsObj[id].status));
+    const sig = JSON.stringify(ids.map((id) => [id, jobsObj[id].status, jobsObj[id].percent, jobsObj[id].localDlPct, jobsObj[id].detail]));
+    if (!hasActive && sig === lastJobsRenderSig) return;
+    lastJobsRenderSig = sig;
+
     const list = el("jobList");
     list.replaceChildren();
-    const ids = Object.keys(jobsObj || {}).sort((a, b) => (jobsObj[b].startedAt || 0) - (jobsObj[a].startedAt || 0));
     if (!ids.length) {
       list.textContent = "אין הורדות פעילות כרגע";
       return;
@@ -852,7 +957,7 @@
     const recRes = await chrome.runtime.sendMessage({ type: "GET_RECOMMENDATIONS" });
     if (recRes && recRes.ok) {
       lastHistory = recRes.history || [];
-      renderRecommendations(recRes.state, lastHistory);
+      renderRecommendations(recRes.sessions || {}, lastHistory, false);
       renderHistoryArchive(lastHistory);
     }
   }
@@ -861,6 +966,6 @@
     if (m && m.type === "JOBS_CHANGED") renderJobs(m.jobs);
     if (m && m.type === "RECS_CHANGED") void refresh();
   });
-  setInterval(refresh, 2000);
+  setInterval(refresh, 2500);
   void refresh();
 })();
