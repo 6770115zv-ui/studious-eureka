@@ -10,6 +10,7 @@ on:
       min_views: { required: false, default: "0", type: string }
       exclude_ids: { required: false, default: "", type: string }
       filter_prompt: { required: false, default: "", type: string }
+      cookies_enc: { required: false, default: "", type: string }
 run-name: rec-${{ inputs.request_id }}
 permissions:
   contents: write
@@ -24,7 +25,9 @@ jobs:
         with:
           deno-version: v2.x
       - name: Install yt-dlp
-        run: python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends python3-cryptography
+          python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
       - name: Search Full Channel Archive or Videos and Sort by Views / Likes / Date
         env:
           REQ_ID: ${{ inputs.request_id }}
@@ -35,13 +38,18 @@ jobs:
           MIN_VIEWS: ${{ inputs.min_views }}
           EXCLUDE_IDS: ${{ inputs.exclude_ids }}
           FILTER_PROMPT: ${{ inputs.filter_prompt }}
+          COOKIES_ENC: ${{ inputs.cookies_enc }}
+          COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
+          COOKIE_KEY_FALLBACK: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3"
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - << 'EOF'
           import base64, json, os, re, subprocess, urllib.parse, requests
+          from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           req_id = os.environ.get("REQ_ID", "").strip()
           query = os.environ.get("QUERY", "").strip()
@@ -51,13 +59,26 @@ jobs:
           min_views = int(os.environ.get("MIN_VIEWS", "0") or 0)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
-          if not filter_prompt:
-              filter_prompt = (
-                  "הבא אך ורק תוצאות מקצועיות, נקיות וטהורות שעומדות בנושא המבוקש. "
-                  "סנן החוצה תכנים זרים וכל תוכן שאינו מתאים למגזר שומר תורה ומצוות."
-              )
+          cookies_enc = os.environ.get("COOKIES_ENC", "").strip()
+          secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
+          fallback_key_env = os.environ.get("COOKIE_KEY_FALLBACK", "").strip()
 
-          print(f"[STEP 1] Params: req_id={req_id}, channel='{channel_input}', query='{query}', sort_by={sort_by}, max={max_results}", flush=True)
+          cookie_file = Path("/tmp/rec_cookies.txt")
+          has_ck = False
+          if cookies_enc:
+              raw_enc = base64.b64decode(cookies_enc)
+              for candidate_hex in (fallback_key_env, secret_key_env):
+                  if len(candidate_hex) == 64:
+                      try:
+                          plain_txt = AESGCM(bytes.fromhex(candidate_hex)).decrypt(raw_enc[:12], raw_enc[12:], None).decode("utf-8", errors="replace")
+                          if "youtube.com" in plain_txt or "# Netscape" in plain_txt:
+                              cookie_file.write_text(plain_txt, encoding="utf-8")
+                              has_ck = True
+                              break
+                      except Exception:
+                          pass
+
+          print(f"[STEP 1] Params: req_id={req_id}, channel='{channel_input}', query='{query}', sort_by={sort_by}, has_ck={has_ck}", flush=True)
 
           def fetch_yt_json(target_url_or_query, limit_str):
               cmd = [
@@ -65,8 +86,11 @@ jobs:
                   "--force-ipv4", "--dump-json", "--flat-playlist",
                   "--playlist-end", str(limit_str),
                   "--ignore-errors", "--no-warnings",
-                  target_url_or_query
+                  "--js-runtimes", "deno",
               ]
+              if has_ck:
+                  cmd += ["--cookies", str(cookie_file)]
+              cmd.append(target_url_or_query)
               r = subprocess.run(cmd, capture_output=True, text=True)
               items = []
               for line in r.stdout.splitlines():
@@ -79,7 +103,6 @@ jobs:
               return items
 
           def resolve_channel_base_url(ch_raw: str):
-              """מחזיר (base_channel_url, display_name, clean_search_term)"""
               ch = ch_raw.strip()
               if not ch:
                   return "", "", ""
@@ -149,22 +172,20 @@ jobs:
 
           if channel_input:
               ch_base_url, resolved_channel_name, clean_ch_term = resolve_channel_base_url(channel_input)
-              print(f"[STEP 2] Resolved channel base='{ch_base_url}', term='{clean_ch_term}', sort='{sort_by}'", flush=True)
+              print(f"[STEP 2] Resolved channel base='{ch_base_url}', term='{clean_ch_term}'", flush=True)
               tasks = []
               if ch_base_url:
-                  # 1. סריקת כל ההיסטוריה המלאה של הערוץ (עד 2,500 סרטונים!) כדי להגיע לשיאי הצפיות מכל הזמנים
-                  tasks.append((f"{ch_base_url}/videos", "2500"))
-                  # 2. פנייה ישירה ללשונית הפופולריים בערוץ (Popular tab)
-                  tasks.append((f"{ch_base_url}/videos?sp=EgZ2aWRlb3PyBgQKAjoA", "150"))
-                  # 3. בדיקת שידורים מלאים בערוץ (streams) למקרה שהערוץ מעלה פרקים מלאים לשם
-                  tasks.append((f"{ch_base_url}/streams", "400"))
+                  # סריקה עמוקה של כל ההיסטוריה המלאה של הערוץ (עד 5,000 סרטונים כולל שנת 2022 ומטה)
+                  tasks.append((f"{ch_base_url}/videos", "5000"))
+                  tasks.append((f"{ch_base_url}/videos?sp=EgZ2aWRlb3PyBgQKAjoA", "300"))
+                  tasks.append((f"{ch_base_url}/streams", "1000"))
 
               if query:
-                  tasks.append((yt_search_sorted_url(f"{clean_ch_term} {query}", sort_by), "100"))
+                  tasks.append((yt_search_sorted_url(f"{clean_ch_term} {query}", sort_by), "120"))
                   if en_query and en_query.lower() != query.lower():
-                      tasks.append((yt_search_sorted_url(f"{clean_ch_term} {en_query}", sort_by), "80"))
-              elif sort_by in ("views", "likes"):
-                  tasks.append((yt_search_sorted_url(clean_ch_term, sort_by), "120"))
+                      tasks.append((yt_search_sorted_url(f"{clean_ch_term} {en_query}", sort_by), "100"))
+              else:
+                  tasks.append((yt_search_sorted_url(clean_ch_term, "views"), "200"))
 
               with ThreadPoolExecutor(max_workers=4) as ex:
                   for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), tasks):
@@ -186,23 +207,12 @@ jobs:
 
           print(f"[STEP 3] Total raw historical entries fetched: {len(raw)}", flush=True)
 
-          # חילוץ שם הערוץ האמיתי מתוך הפריטים שחזרו מהערוץ
           if channel_input and raw:
-              for r_item in raw[:15]:
+              for r_item in raw[:25]:
                   real_ch = (r_item.get("channel") or r_item.get("uploader") or "").strip()
                   if real_ch and not real_ch.startswith("http") and not real_ch.startswith("@"):
                       resolved_channel_name = real_ch
                       break
-
-          BLOCKED_RX = re.compile(
-              r"\b(movie|movies|film|trailer|cinema|netflix|hollywood|actor|actress|romance|dating|"
-              r"bikini|sexy|girl|girls|woman|women|lady|ladies|female|wife|girlfriend|bride|"
-              r"makeup|make-up|cosmetics|eyeshadow|lipstick|mascara|beauty|skincare|fashion|model|modeling|hairstyle|nails|"
-              r"singer|music video|official video|concert|song|lyrics|album|dance|dancing|choreography|prank|tiktok|"
-              r"סרט|סרטים|טריילר|קולנוע|סדרה|פרק מלא|שחקן|שחקנית|זמר|זמרת|קליפ|שיר|הופעה|רומנטי|"
-              r"בנות|נשים|אישה|בחורה|כלה|איפור|צללית|שפתון|טיפוח|קוסמטיקה|אופנה|דוגמנית|תסרוקת|ריקוד|מתיחה)\b",
-              re.IGNORECASE
-          )
 
           STOP_WORDS = {"איך", "מדריך", "הדרכה", "מקצועי", "של", "על", "עם", "the", "and", "for", "how", "to", "in", "of", "with"}
           topic_tokens = []
@@ -242,8 +252,6 @@ jobs:
               if not vid or vid in seen or len(vid) != 11 or not title:
                   continue
               seen.add(vid)
-              if BLOCKED_RX.search(f"{title} {channel}"):
-                  continue
               if not matches_channel_strictly(channel, up_url):
                   continue
               if query and not matches_topic_strictly(title, channel):
@@ -266,20 +274,19 @@ jobs:
 
           print(f"[STEP 4] Unique historical candidates across channel: {len(cands)}", flush=True)
 
-          # שלב קריטי: ממיינים את כל 2,500 הסרטונים ההיסטוריים לפי כמות צפיות לפני בחירת המועמדים להעשרה!
           if sort_by in ("views", "likes"):
               cands.sort(key=lambda x: x["views"], reverse=True)
               need_meta = cands[:max(max_results + 35, 110)]
           elif sort_by == "date_asc":
-              # הסרטונים הישנים ביותר נמצאים בסוף הרשימה שנסרקה מלשונית הווידאו של הערוץ
-              oldest_slice = list(reversed(cands[-max(max_results + 35, 110):]))
-              need_meta = oldest_slice
+              need_meta = list(reversed(cands[-max(max_results + 35, 110):]))
           else:
-              # date_desc: החדשים ביותר נמצאים בראש הרשימה
               need_meta = cands[:max(max_results + 35, 110)]
 
           def enrich(c):
-              cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
+              cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings"]
+              if has_ck:
+                  cmd += ["--cookies", str(cookie_file)]
+              cmd.append(c["url"])
               r = subprocess.run(cmd, capture_output=True, text=True)
               try:
                   d = json.loads(r.stdout.splitlines()[0])
@@ -315,40 +322,27 @@ jobs:
                   pool = need_meta[:]
               pool = pool[:max_results + 25]
           else:
-              user_asked_2026 = "2026" in query or sort_by == "date_desc"
-              balanced_pool = []
-              recent_2026_list = []
-              for c in need_meta:
-                  if c["views"] < min_views:
-                      continue
-                  if not user_asked_2026 and re.search(r"\b2026\b", c["title"]):
-                      recent_2026_list.append(c)
-                  else:
-                      balanced_pool.append(c)
-              pool = balanced_pool[:max_results + 20] + recent_2026_list[:8]
-              sort_candidates(pool, sort_by)
+              pool = [c for c in need_meta if c["views"] >= min_views][:max_results + 25]
               if len(pool) < 20:
-                  pool = need_meta[:max_results + 20]
+                  pool = need_meta[:max_results + 25]
 
           def call_ai_batch(batch_items, topic_str, ch_str, user_rule):
+              if not user_rule:
+                  return batch_items
               compact = [{"id": c["id"], "title": c["title"], "channel": c["channel"]} for c in batch_items]
               sys_msg = (
                   "אתה מסנן תוכן קפדני עבור ציבור שומר תורה ומצוות. "
-                  "תפקידך לבדוק את רשימת הסרטונים ולהחזיר אך ורק את המזהים (id) של סרטונים שעומדים בשני תנאים:\n"
-                  "1. הם תואמים לערוץ או לנושא המבוקש ואינם שייכים לתחום זר.\n"
-                  "2. הם עומדים ב-100% בהנחיית הסינון והנקיות של המשתמש.\n"
+                  "החזר אך ורק את המזהים (id) של סרטונים שעומדים בהנחיית הסינון והנקיות של המשתמש. "
                   "החזר אך ורק JSON תקין בפורמט: {\"approved_ids\": [\"id1\", \"id2\"]}"
               )
               usr_msg = (
-                  f"ערוץ מבוקש: {ch_str or 'כללי'}\n"
-                  f"נושא מבוקש: {topic_str or 'כל תכני הערוץ הנקיים'}\n"
-                  f"הנחיית סינון מהמשתמש: {user_rule}\n\n"
+                  f"ערוץ: {ch_str or 'כללי'} | נושא: {topic_str or 'כללי'}\n"
+                  f"הנחיית סינון: {user_rule}\n\n"
                   f"רשימת מועמדים:\n{json.dumps(compact, ensure_ascii=False)}"
               )
 
               gh_tok = os.environ.get("GH_TOKEN", "").strip()
               gem_key = os.environ.get("GEMINI_API_KEY", "").strip()
-
               endpoints = []
               if gh_tok:
                   endpoints.append((
@@ -362,11 +356,6 @@ jobs:
                       {"Content-Type": "application/json"},
                       {"contents": [{"parts": [{"text": sys_msg + "\n\n" + usr_msg}]}]}
                   ))
-              endpoints.append((
-                  "https://text.pollinations.ai/openai",
-                  {"Content-Type": "application/json"},
-                  {"model": "openai", "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": usr_msg}], "temperature": 0.0}
-              ))
 
               for url, headers, payload in endpoints:
                   try:
@@ -422,13 +411,11 @@ jobs:
               timeout=60
           )
           sha = r.json().get("sha", "") if r.status_code == 201 else ""
-          print(f"[STEP 6] Created Git Blob status={r.status_code}, sha={sha}", flush=True)
 
           tag = f"rec-{req_id}"
           notes_str = json.dumps({"blobs": [sha] if sha else [], "count": len(filtered)})
-          rel_proc = subprocess.run(
+          subprocess.run(
               ["gh", "release", "create", tag, "recommendations.json", "--repo", gh_repo, "--title", tag, "--notes", notes_str],
               capture_output=True, text=True, check=False
           )
-          print(f"[STEP 7] gh release create exit={rel_proc.returncode}, out={rel_proc.stdout.strip()}, err={rel_proc.stderr.strip()}", flush=True)
           EOF
