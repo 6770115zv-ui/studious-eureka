@@ -3,7 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       request_id: { required: true, type: string }
-      query: { required: true, type: string }
+      query: { required: false, default: "", type: string }
+      channel: { required: false, default: "", type: string }
+      max_results: { required: false, default: "60", type: string }
       min_views: { required: false, default: "100000", type: string }
       exclude_ids: { required: false, default: "", type: string }
       filter_prompt: { required: false, default: "", type: string }
@@ -22,10 +24,12 @@ jobs:
           deno-version: v2.x
       - name: Install yt-dlp
         run: python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests
-      - name: Search All-Time Popular Videos and Filter with Cloud AI
+      - name: Search Channel or All-Time Popular Videos and Filter with Cloud AI
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
+          CHANNEL: ${{ inputs.channel }}
+          MAX_RESULTS: ${{ inputs.max_results }}
           MIN_VIEWS: ${{ inputs.min_views }}
           EXCLUDE_IDS: ${{ inputs.exclude_ids }}
           FILTER_PROMPT: ${{ inputs.filter_prompt }}
@@ -38,47 +42,24 @@ jobs:
           from concurrent.futures import ThreadPoolExecutor
 
           query = os.environ.get("QUERY", "").strip()
+          channel_input = os.environ.get("CHANNEL", "").strip()
+          max_results = max(10, min(150, int(os.environ.get("MAX_RESULTS", "60") or 60)))
           min_views = int(os.environ.get("MIN_VIEWS", "100000") or 100000)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
           if not filter_prompt:
               filter_prompt = (
-                  f"הבא אך ורק תוצאות מקצועיות, נקיות וטהורות שעוסקות ישירות בנושא '{query}' בלבד. "
+                  "הבא אך ורק תוצאות מקצועיות, נקיות וטהורות שעומדות בנושא המבוקש. "
                   "סנן החוצה תכנים זרים וכל תוכן שאינו מתאים למגזר שומר תורה ומצוות."
               )
 
-          en_query = ""
-          if any("\u0590" <= ch <= "\u05FF" for ch in query):
-              try:
-                  tr_url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=iw&tl=en&dt=t&q=" + urllib.parse.quote(query)
-                  tr_res = requests.get(tr_url, timeout=10)
-                  if tr_res.status_code == 200:
-                      en_query = "".join(part[0] for part in tr_res.json()[0] if part and part[0]).strip()
-              except Exception:
-                  pass
-
-          def yt_most_viewed_url(q_text):
-              enc = urllib.parse.quote_plus(q_text)
-              return f"https://www.youtube.com/results?search_query={enc}&sp=CAMSAhAB"
-
-          search_targets = [
-              (yt_most_viewed_url(query), "120"),
-              (f"ytsearch80:{query}", "80"),
-          ]
-          if en_query and en_query.lower() != query.lower():
-              search_targets.extend([
-                  (yt_most_viewed_url(en_query), "120"),
-                  (f"ytsearch80:{en_query}", "80"),
-              ])
-
-          def fetch_search(task):
-              target, max_items = task
+          def fetch_yt_json(target_url_or_query, limit_str):
               cmd = [
                   "python3", "-m", "yt_dlp",
                   "--force-ipv4", "--dump-json", "--flat-playlist",
-                  "--playlist-end", max_items,
+                  "--playlist-end", str(limit_str),
                   "--ignore-errors", "--no-warnings",
-                  target
+                  target_url_or_query
               ]
               r = subprocess.run(cmd, capture_output=True, text=True)
               items = []
@@ -91,10 +72,102 @@ jobs:
                       pass
               return items
 
+          def resolve_channel_videos_url(ch_raw: str):
+              """מאתר את כתובת לשונית הווידאו של הערוץ המבוקש מתוך קישור, @handle או שם ערוץ"""
+              ch = ch_raw.strip()
+              if not ch:
+                  return "", ""
+              if ch.startswith("http"):
+                  base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", ch.rstrip("/"))
+                  return base + "/videos", ch
+              if ch.startswith("@"):
+                  handle = ch.split("/")[0]
+                  return f"https://www.youtube.com/{handle}/videos", handle
+
+              # חיפוש הערוץ ביוטיוב (sp=EgIQAg%3D%3D מסנן ערוצים בלבד)
+              enc = urllib.parse.quote_plus(ch)
+              ch_search_url = f"https://www.youtube.com/results?search_query={enc}&sp=EgIQAg%253D%253D"
+              found_channels = fetch_yt_json(ch_search_url, "8")
+              best_url = ""
+              best_name = ch
+              ch_low = ch.lower()
+
+              for entry in found_channels:
+                  c_url = entry.get("url") or entry.get("channel_url") or ""
+                  c_title = (entry.get("channel") or entry.get("title") or entry.get("uploader") or "").strip()
+                  if c_url and ("/@" in c_url or "/channel/" in c_url or "/c/" in c_url):
+                      if ch_low in c_title.lower() or not best_url:
+                          base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", c_url.rstrip("/"))
+                          best_url = base + "/videos"
+                          if c_title:
+                              best_name = c_title
+                          if ch_low in c_title.lower():
+                              break
+
+              # גיבוי: שליפת כתובת הערוץ מתוך הסרטון המוביל של הערוץ
+              if not best_url:
+                  vids = fetch_yt_json(f"ytsearch15:{ch}", "15")
+                  for v in vids:
+                      v_ch = (v.get("channel") or v.get("uploader") or "").strip()
+                      u_url = v.get("uploader_url") or v.get("channel_url") or ""
+                      if u_url and (ch_low in v_ch.lower() or not best_url):
+                          base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", u_url.rstrip("/"))
+                          best_url = base + "/videos"
+                          if v_ch:
+                              best_name = v_ch
+                          if ch_low in v_ch.lower():
+                              break
+
+              return best_url, best_name
+
+          en_query = ""
+          if query and any("\u0590" <= ch <= "\u05FF" for ch in query):
+              try:
+                  tr_url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=iw&tl=en&dt=t&q=" + urllib.parse.quote(query)
+                  tr_res = requests.get(tr_url, timeout=10)
+                  if tr_res.status_code == 200:
+                      en_query = "".join(part[0] for part in tr_res.json()[0] if part and part[0]).strip()
+              except Exception:
+                  pass
+
           raw = []
-          with ThreadPoolExecutor(max_workers=4) as ex:
-              for batch in ex.map(fetch_search, search_targets):
-                  raw.extend(batch)
+          resolved_channel_name = channel_input
+          fetch_cap = str(max(120, max_results * 2))
+
+          if channel_input:
+              ch_videos_url, resolved_channel_name = resolve_channel_videos_url(channel_input)
+              print(f"Channel mode active: '{channel_input}' -> URL='{ch_videos_url}', Name='{resolved_channel_name}'", flush=True)
+              tasks = []
+              if ch_videos_url:
+                  tasks.append((ch_videos_url, fetch_cap))
+              if query:
+                  tasks.append((f"ytsearch80:{channel_input} {query}", "80"))
+                  if en_query and en_query.lower() != query.lower():
+                      tasks.append((f"ytsearch60:{channel_input} {en_query}", "60"))
+              else:
+                  tasks.append((f"ytsearch80:{channel_input}", "80"))
+
+              with ThreadPoolExecutor(max_workers=3) as ex:
+                  for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), tasks):
+                      raw.extend(batch)
+          else:
+              def yt_most_viewed_url(q_text):
+                  enc = urllib.parse.quote_plus(q_text)
+                  return f"https://www.youtube.com/results?search_query={enc}&sp=CAMSAhAB"
+
+              search_targets = [
+                  (yt_most_viewed_url(query), "120"),
+                  (f"ytsearch80:{query}", "80"),
+              ]
+              if en_query and en_query.lower() != query.lower():
+                  search_targets.extend([
+                      (yt_most_viewed_url(en_query), "120"),
+                      (f"ytsearch80:{en_query}", "80"),
+                  ])
+
+              with ThreadPoolExecutor(max_workers=4) as ex:
+                  for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), search_targets):
+                      raw.extend(batch)
 
           BLOCKED_RX = re.compile(
               r"\b(movie|movies|film|trailer|cinema|netflix|hollywood|actor|actress|romance|dating|"
@@ -121,31 +194,48 @@ jobs:
               haystack = f"{title_str} {channel_str}".lower()
               return any(tok in haystack for tok in topic_tokens)
 
+          ch_tokens = [
+              t for t in re.split(r"[^\w\u0590-\u05FF]+", f"{channel_input} {resolved_channel_name}".lower())
+              if len(t) >= 2
+          ]
+
+          def matches_channel_strictly(entry_channel: str, entry_uploader_url: str) -> bool:
+              if not channel_input:
+                  return True
+              hay = f"{entry_channel} {entry_uploader_url}".lower()
+              if not hay.strip():
+                  # סרטונים שחזרו ישירות מתוך כתובת /videos של הערוץ עצמו
+                  return True
+              return any(tok in hay for tok in ch_tokens)
+
           seen = set(exclude)
           cands = []
           for e in raw:
               vid = e.get("id")
               title = (e.get("title") or "").strip()
-              channel = (e.get("channel") or e.get("uploader") or "").strip()
+              channel = (e.get("channel") or e.get("uploader") or resolved_channel_name or "").strip()
+              up_url = (e.get("uploader_url") or e.get("channel_url") or "").strip()
               if not vid or vid in seen or len(vid) != 11 or not title:
                   continue
               seen.add(vid)
               if BLOCKED_RX.search(f"{title} {channel}"):
                   continue
-              if not matches_topic_strictly(title, channel):
+              if not matches_channel_strictly(channel, up_url):
+                  continue
+              if query and not matches_topic_strictly(title, channel):
                   continue
               views = int(e.get("view_count") or 0)
               cands.append({
                   "id": vid,
                   "title": title,
                   "url": f"https://www.youtube.com/watch?v={vid}",
-                  "channel": channel,
+                  "channel": channel or resolved_channel_name,
                   "views": views,
                   "duration": int(e.get("duration") or 0),
                   "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          need_meta = [c for c in cands if c["views"] == 0][:60]
+          need_meta = [c for c in cands if c["views"] == 0][:80]
           def enrich(c):
               cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings", c["url"]]
               r = subprocess.run(cmd, capture_output=True, text=True)
@@ -153,6 +243,8 @@ jobs:
                   d = json.loads(r.stdout.splitlines()[0])
                   c["views"] = int(d.get("view_count") or 0)
                   c["duration"] = int(d.get("duration") or c["duration"] or 0)
+                  if not c["channel"]:
+                      c["channel"] = (d.get("channel") or d.get("uploader") or resolved_channel_name).strip()
               except Exception:
                   pass
 
@@ -162,33 +254,40 @@ jobs:
 
           cands.sort(key=lambda x: x["views"], reverse=True)
 
-          user_asked_2026 = "2026" in query
-          balanced_pool = []
-          recent_2026_list = []
-          for c in cands:
-              if c["views"] < min_views:
-                  continue
-              if not user_asked_2026 and re.search(r"\b2026\b", c["title"]):
-                  recent_2026_list.append(c)
-              else:
-                  balanced_pool.append(c)
+          # במצב חיפוש ערוץ ספציפי, אם סינון הצפיות משאיר מעט מדי תוצאות, נכלול גם סרטונים נוספים של הערוץ כדי להביא עשרות תוצאות
+          if channel_input:
+              pool = [c for c in cands if c["views"] >= min_views]
+              if len(pool) < min(max_results, 25):
+                  pool = cands[:]
+              pool = pool[:max(max_results + 20, 100)]
+          else:
+              user_asked_2026 = "2026" in query
+              balanced_pool = []
+              recent_2026_list = []
+              for c in cands:
+                  if c["views"] < min_views:
+                      continue
+                  if not user_asked_2026 and re.search(r"\b2026\b", c["title"]):
+                      recent_2026_list.append(c)
+                  else:
+                      balanced_pool.append(c)
+              pool = balanced_pool[:max_results + 20] + recent_2026_list[:8]
+              pool.sort(key=lambda x: x["views"], reverse=True)
+              if len(pool) < 20:
+                  pool = cands[:max_results + 20]
 
-          pool = balanced_pool[:85] + recent_2026_list[:8]
-          pool.sort(key=lambda x: x["views"], reverse=True)
-          if len(pool) < 20:
-              pool = cands[:85]
-
-          def call_ai_batch(batch_items, topic_str, en_topic_str, user_rule):
+          def call_ai_batch(batch_items, topic_str, ch_str, user_rule):
               compact = [{"id": c["id"], "title": c["title"], "channel": c["channel"]} for c in batch_items]
               sys_msg = (
                   "אתה מסנן תוכן קפדני עבור ציבור שומר תורה ומצוות. "
                   "תפקידך לבדוק את רשימת הסרטונים ולהחזיר אך ורק את המזהים (id) של סרטונים שעומדים בשני תנאים:\n"
-                  "1. הם עוסקים ישירות בנושא המבוקש ואינם שייכים לתחום זר.\n"
+                  "1. הם תואמים לערוץ או לנושא המבוקש ואינם שייכים לתחום זר.\n"
                   "2. הם עומדים ב-100% בהנחיית הסינון והנקיות של המשתמש.\n"
                   "החזר אך ורק JSON תקין בפורמט: {\"approved_ids\": [\"id1\", \"id2\"]}"
               )
               usr_msg = (
-                  f"נושא מבוקש: {topic_str} ({en_topic_str})\n"
+                  f"ערוץ מבוקש: {ch_str or 'כללי'}\n"
+                  f"נושא מבוקש: {topic_str or 'כל תכני הערוץ הנקיים'}\n"
                   f"הנחיית סינון מהמשתמש: {user_rule}\n\n"
                   f"רשימת מועמדים:\n{json.dumps(compact, ensure_ascii=False)}"
               )
@@ -237,15 +336,21 @@ jobs:
               return batch_items
 
           approved_all = []
-          batch_size = 30
+          batch_size = 35
           for i in range(0, len(pool), batch_size):
               chunk = pool[i:i + batch_size]
-              approved_all.extend(call_ai_batch(chunk, query, en_query, filter_prompt))
+              approved_all.extend(call_ai_batch(chunk, query, resolved_channel_name, filter_prompt))
 
           approved_all.sort(key=lambda x: x["views"], reverse=True)
-          filtered = approved_all[:65]
+          filtered = approved_all[:max_results]
 
-          payload_bytes = json.dumps({"query": query, "en_query": en_query, "filter_prompt": filter_prompt, "items": filtered}, ensure_ascii=False).encode("utf-8")
+          payload_bytes = json.dumps({
+              "query": query,
+              "channel": resolved_channel_name or channel_input,
+              "en_query": en_query,
+              "filter_prompt": filter_prompt,
+              "items": filtered
+          }, ensure_ascii=False).encode("utf-8")
           with open("recommendations.json", "wb") as f:
               f.write(payload_bytes)
 
