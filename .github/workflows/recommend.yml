@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update -y && sudo apt-get install -y --no-install-recommends python3-cryptography
           python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
-      - name: Search Full Channel Archive or Videos and Sort by Views / Likes / Date
+      - name: Search Full Channel Archive & Popular Tab (Up to 500 Results)
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
@@ -46,7 +46,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - << 'EOF'
-          import base64, json, os, re, subprocess, urllib.parse, requests
+          import base64, hashlib, json, os, re, subprocess, time, urllib.parse, requests
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -55,7 +55,7 @@ jobs:
           query = os.environ.get("QUERY", "").strip()
           channel_input = os.environ.get("CHANNEL", "").strip()
           sort_by = os.environ.get("SORT_BY", "views").strip().lower() or "views"
-          max_results = max(10, min(150, int(os.environ.get("MAX_RESULTS", "60") or 60)))
+          max_results = max(10, min(500, int(os.environ.get("MAX_RESULTS", "60") or 60)))
           min_views = int(os.environ.get("MIN_VIEWS", "0") or 0)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
@@ -64,6 +64,7 @@ jobs:
           fallback_key_env = os.environ.get("COOKIE_KEY_FALLBACK", "").strip()
 
           cookie_file = Path("/tmp/rec_cookies.txt")
+          cookie_dict = {}
           has_ck = False
           if cookies_enc:
               raw_enc = base64.b64decode(cookies_enc)
@@ -74,11 +75,32 @@ jobs:
                           if "youtube.com" in plain_txt or "# Netscape" in plain_txt:
                               cookie_file.write_text(plain_txt, encoding="utf-8")
                               has_ck = True
+                              for line in plain_txt.splitlines():
+                                  if not line or line.startswith("#"):
+                                      continue
+                                  parts = line.split("\t")
+                                  if len(parts) >= 7:
+                                      cookie_dict[parts[5]] = parts[6]
                               break
                       except Exception:
                           pass
 
-          print(f"[STEP 1] Params: req_id={req_id}, channel='{channel_input}', query='{query}', sort_by={sort_by}, has_ck={has_ck}", flush=True)
+          print(f"[STEP 1] Params: req_id={req_id}, channel='{channel_input}', query='{query}', sort_by={sort_by}, max={max_results}, has_ck={has_ck}", flush=True)
+
+          def parse_views_text(v_str) -> int:
+              if isinstance(v_str, (int, float)):
+                  return int(v_str)
+              s = str(v_str or "").strip().upper().replace(",", "")
+              if not s:
+                  return 0
+              m = re.search(r"([\d.]+)\s*([KMB])?", s)
+              if not m:
+                  digits = re.sub(r"\D", "", s)
+                  return int(digits) if digits else 0
+              num = float(m.group(1))
+              suf = m.group(2) or ""
+              mult = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suf, 1)
+              return int(num * mult)
 
           def fetch_yt_json(target_url_or_query, limit_str):
               cmd = [
@@ -102,50 +124,184 @@ jobs:
                       pass
               return items
 
-          def resolve_channel_base_url(ch_raw: str):
+          def resolve_channel_info(ch_raw: str):
+              """מחזיר (base_url, channel_id_UC, display_name, clean_term)"""
               ch = ch_raw.strip()
               if not ch:
-                  return "", "", ""
+                  return "", "", "", ""
+              base = ""
+              name = ch
               if ch.startswith("http"):
                   base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", ch.rstrip("/"))
                   m_handle = re.search(r"(@[a-zA-Z0-9_.-]+)", base)
-                  clean_term = m_handle.group(1) if m_handle else base.split("/")[-1]
-                  return base, clean_term, clean_term
-              if ch.startswith("@"):
+                  name = m_handle.group(1) if m_handle else base.split("/")[-1]
+              elif ch.startswith("@"):
                   handle = ch.split("/")[0]
-                  return f"https://www.youtube.com/{handle}", handle, handle
+                  base = f"https://www.youtube.com/{handle}"
+                  name = handle
+              else:
+                  enc = urllib.parse.quote_plus(ch)
+                  ch_search_url = f"https://www.youtube.com/results?search_query={enc}&sp=EgIQAg%253D%253D"
+                  found_channels = fetch_yt_json(ch_search_url, "8")
+                  ch_low = ch.lower()
+                  for entry in found_channels:
+                      c_url = entry.get("url") or entry.get("channel_url") or ""
+                      c_title = (entry.get("channel") or entry.get("title") or entry.get("uploader") or "").strip()
+                      if c_url and ("/@" in c_url or "/channel/" in c_url or "/c/" in c_url):
+                          if ch_low in c_title.lower() or not base:
+                              base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", c_url.rstrip("/"))
+                              if c_title:
+                                  name = c_title
+                              if ch_low in c_title.lower():
+                                  break
+                  if not base:
+                      vids = fetch_yt_json(f"ytsearch15:{ch}", "15")
+                      for v in vids:
+                          v_ch = (v.get("channel") or v.get("uploader") or "").strip()
+                          u_url = v.get("uploader_url") or v.get("channel_url") or ""
+                          if u_url and (ch_low in v_ch.lower() or not base):
+                              base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", u_url.rstrip("/"))
+                              if v_ch:
+                                  name = v_ch
+                              if ch_low in v_ch.lower():
+                                  break
 
-              enc = urllib.parse.quote_plus(ch)
-              ch_search_url = f"https://www.youtube.com/results?search_query={enc}&sp=EgIQAg%253D%253D"
-              found_channels = fetch_yt_json(ch_search_url, "8")
-              best_base = ""
-              best_name = ch
-              ch_low = ch.lower()
+              # חילוץ מזהה ערוץ UC... מתוך דף הערוץ לצורך פנייה ישירה ל-Innertube Popular Tab
+              uc_id = ""
+              m_uc = re.search(r"/channel/(UC[a-zA-Z0-9_-]{22})", base)
+              if m_uc:
+                  uc_id = m_uc.group(1)
+              elif base:
+                  try:
+                      hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"}
+                      resp = requests.get(f"{base}/videos", headers=hdrs, cookies=cookie_dict or None, timeout=15)
+                      if resp.status_code == 200:
+                          m_ext = re.search(r'"(?:externalId|browseId)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', resp.text)
+                          if m_ext:
+                              uc_id = m_ext.group(1)
+                          m_title = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
+                          if m_title and m_title.group(1).strip():
+                              name = m_title.group(1).strip()
+                  except Exception:
+                      pass
 
-              for entry in found_channels:
-                  c_url = entry.get("url") or entry.get("channel_url") or ""
-                  c_title = (entry.get("channel") or entry.get("title") or entry.get("uploader") or "").strip()
-                  if c_url and ("/@" in c_url or "/channel/" in c_url or "/c/" in c_url):
-                      if ch_low in c_title.lower() or not best_base:
-                          best_base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", c_url.rstrip("/"))
-                          if c_title:
-                              best_name = c_title
-                          if ch_low in c_title.lower():
-                              break
+              return base, uc_id, name, name
 
-              if not best_base:
-                  vids = fetch_yt_json(f"ytsearch15:{ch}", "15")
+          def walk_innertube_renderers(obj, out_videos, out_tokens):
+              if isinstance(obj, dict):
+                  if "videoRenderer" in obj:
+                      vr = obj["videoRenderer"]
+                      vid = vr.get("videoId")
+                      if vid and len(vid) == 11:
+                          runs = (vr.get("title") or {}).get("runs") or []
+                          title = "".join(r.get("text", "") for r in runs) or (vr.get("title") or {}).get("simpleText", "")
+                          vc_txt = (vr.get("viewCountText") or {}).get("simpleText") or "".join(
+                              r.get("text", "") for r in ((vr.get("viewCountText") or {}).get("runs") or [])
+                          )
+                          dur_txt = (vr.get("lengthText") or {}).get("simpleText") or ""
+                          dur_sec = 0
+                          if ":" in dur_txt:
+                              parts = [int(x) for x in dur_txt.split(":") if x.isdigit()]
+                              for p in parts:
+                                  dur_sec = dur_sec * 60 + p
+                          out_videos.append({
+                              "id": vid,
+                              "title": title.strip(),
+                              "view_count": parse_views_text(vc_txt),
+                              "duration": dur_sec,
+                          })
+                  elif "continuationCommand" in obj:
+                      tok = (obj["continuationCommand"] or {}).get("token")
+                      if tok and tok not in out_tokens:
+                          out_tokens.append(tok)
+                  for v in obj.values():
+                      walk_innertube_renderers(v, out_videos, out_tokens)
+              elif isinstance(obj, list):
+                  for item in obj:
+                      walk_innertube_renderers(item, out_videos, out_tokens)
+
+          def fetch_innertube_popular_tab(uc_channel_id: str, channel_title: str, target_count: int = 550):
+              """פנייה ישירה ל-Innertube Browse API של לשונית הפופולריים בערוץ (EgZ2aWRlb3PyBgQKAjoA) + המשך דפים"""
+              if not uc_channel_id:
+                  return []
+              api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
+              headers = {
+                  "Content-Type": "application/json",
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                  "Origin": "https://www.youtube.com",
+                  "Referer": f"https://www.youtube.com/channel/{uc_channel_id}/videos",
+                  "X-YouTube-Client-Name": "1",
+                  "X-YouTube-Client-Version": "2.20261101.00.00",
+              }
+              sapisid = cookie_dict.get("SAPISID") or cookie_dict.get("__Secure-3PAPISID") or cookie_dict.get("__Secure-1PAPISID")
+              if sapisid:
+                  ts = str(int(time.time()))
+                  digest = hashlib.sha1(f"{ts} {sapisid} https://www.youtube.com".encode("utf-8")).hexdigest()
+                  headers["Authorization"] = f"SAPISIDHASH {ts}_{digest}"
+
+              ctx = {
+                  "client": {
+                      "clientName": "WEB",
+                      "clientVersion": "2.20261101.00.00",
+                      "hl": "en",
+                      "gl": "US"
+                  }
+              }
+
+              collected = []
+              seen_vids = set()
+              visited_tokens = set()
+
+              try:
+                  # בקשה ראשונה ללשונית Popular של הערוץ
+                  payload = {"context": ctx, "browseId": uc_channel_id, "params": "EgZ2aWRlb3PyBgQKAjoA"}
+                  r = requests.post(api_url, headers=headers, cookies=cookie_dict or None, json=payload, timeout=20)
+                  if r.status_code != 200:
+                      print(f"[POPULAR API] Initial browse HTTP {r.status_code}", flush=True)
+                      return []
+                  data = r.json()
+                  vids = []
+                  tokens = []
+                  walk_innertube_renderers(data, vids, tokens)
                   for v in vids:
-                      v_ch = (v.get("channel") or v.get("uploader") or "").strip()
-                      u_url = v.get("uploader_url") or v.get("channel_url") or ""
-                      if u_url and (ch_low in v_ch.lower() or not best_base):
-                          best_base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", u_url.rstrip("/"))
-                          if v_ch:
-                              best_name = v_ch
-                          if ch_low in v_ch.lower():
-                              break
+                      if v["id"] not in seen_vids:
+                          seen_vids.add(v["id"])
+                          v["channel"] = channel_title
+                          collected.append(v)
 
-              return best_base, best_name, best_name
+                  # דפדוף אוטומטי בעמודי ההמשך של לשונית Popular עד להשגת מאות תוצאות
+                  pages = 0
+                  while tokens and len(collected) < target_count and pages < 20:
+                      next_tok = None
+                      while tokens:
+                          cand_tok = tokens.pop(0)
+                          if cand_tok not in visited_tokens:
+                              next_tok = cand_tok
+                              visited_tokens.add(cand_tok)
+                              break
+                      if not next_tok:
+                          break
+                      pages += 1
+                      r_next = requests.post(api_url, headers=headers, cookies=cookie_dict or None, json={"context": ctx, "continuation": next_tok}, timeout=20)
+                      if r_next.status_code != 200:
+                          break
+                      more_vids = []
+                      more_tokens = []
+                      walk_innertube_renderers(r_next.json(), more_vids, more_tokens)
+                      for v in more_vids:
+                          if v["id"] not in seen_vids:
+                              seen_vids.add(v["id"])
+                              v["channel"] = channel_title
+                              collected.append(v)
+                      for t in more_tokens:
+                          if t not in visited_tokens:
+                              tokens.append(t)
+
+                  print(f"[POPULAR API] Fetched {len(collected)} videos directly from channel Popular tab across {pages+1} pages!", flush=True)
+              except Exception as e:
+                  print(f"[POPULAR API] Notice: {e}", flush=True)
+
+              return collected
 
           en_query = ""
           if query and any("\u0590" <= ch <= "\u05FF" for ch in query):
@@ -171,48 +327,46 @@ jobs:
           resolved_channel_name = channel_input
 
           if channel_input:
-              ch_base_url, resolved_channel_name, clean_ch_term = resolve_channel_base_url(channel_input)
-              print(f"[STEP 2] Resolved channel base='{ch_base_url}', term='{clean_ch_term}'", flush=True)
+              ch_base_url, uc_id, resolved_channel_name, clean_ch_term = resolve_channel_info(channel_input)
+              print(f"[STEP 2] Resolved channel base='{ch_base_url}', uc_id='{uc_id}', name='{resolved_channel_name}'", flush=True)
+
+              # 1. סריקה ישירה של דף הפופולריים של הערוץ דרך Innertube Browse API
+              if uc_id and sort_by in ("views", "likes"):
+                  pop_items = fetch_innertube_popular_tab(uc_id, resolved_channel_name, max(max_results + 60, 550))
+                  raw.extend(pop_items)
+
               tasks = []
               if ch_base_url:
-                  # סריקה עמוקה של כל ההיסטוריה המלאה של הערוץ (עד 5,000 סרטונים כולל שנת 2022 ומטה)
                   tasks.append((f"{ch_base_url}/videos", "5000"))
-                  tasks.append((f"{ch_base_url}/videos?sp=EgZ2aWRlb3PyBgQKAjoA", "300"))
+                  tasks.append((f"{ch_base_url}/videos?view=0&sort=p&flow=grid", "400"))
                   tasks.append((f"{ch_base_url}/streams", "1000"))
 
               if query:
-                  tasks.append((yt_search_sorted_url(f"{clean_ch_term} {query}", sort_by), "120"))
+                  tasks.append((yt_search_sorted_url(f"{clean_ch_term} {query}", sort_by), "150"))
                   if en_query and en_query.lower() != query.lower():
-                      tasks.append((yt_search_sorted_url(f"{clean_ch_term} {en_query}", sort_by), "100"))
+                      tasks.append((yt_search_sorted_url(f"{clean_ch_term} {en_query}", sort_by), "120"))
               else:
-                  tasks.append((yt_search_sorted_url(clean_ch_term, "views"), "200"))
+                  tasks.append((yt_search_sorted_url(clean_ch_term, "views"), "250"))
 
               with ThreadPoolExecutor(max_workers=4) as ex:
                   for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), tasks):
                       raw.extend(batch)
           else:
               search_targets = [
-                  (yt_search_sorted_url(query, sort_by), "150"),
-                  (f"ytsearch100:{query}", "100"),
+                  (yt_search_sorted_url(query, sort_by), str(max(200, max_results))),
+                  (f"ytsearch150:{query}", "150"),
               ]
               if en_query and en_query.lower() != query.lower():
                   search_targets.extend([
-                      (yt_search_sorted_url(en_query, sort_by), "150"),
-                      (f"ytsearch100:{en_query}", "100"),
+                      (yt_search_sorted_url(en_query, sort_by), str(max(200, max_results))),
+                      (f"ytsearch150:{en_query}", "150"),
                   ])
 
               with ThreadPoolExecutor(max_workers=4) as ex:
                   for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), search_targets):
                       raw.extend(batch)
 
-          print(f"[STEP 3] Total raw historical entries fetched: {len(raw)}", flush=True)
-
-          if channel_input and raw:
-              for r_item in raw[:25]:
-                  real_ch = (r_item.get("channel") or r_item.get("uploader") or "").strip()
-                  if real_ch and not real_ch.startswith("http") and not real_ch.startswith("@"):
-                      resolved_channel_name = real_ch
-                      break
+          print(f"[STEP 3] Total raw entries combined: {len(raw)}", flush=True)
 
           STOP_WORDS = {"איך", "מדריך", "הדרכה", "מקצועי", "של", "על", "עם", "the", "and", "for", "how", "to", "in", "of", "with"}
           topic_tokens = []
@@ -242,7 +396,7 @@ jobs:
                   return True
               return any(tok in hay for tok in ch_tokens)
 
-          seen = set(exclude)
+          seen = set() if channel_input else set(exclude)
           cands = []
           for idx_pos, e in enumerate(raw):
               vid = e.get("id")
@@ -256,7 +410,7 @@ jobs:
                   continue
               if query and not matches_topic_strictly(title, channel):
                   continue
-              views = int(e.get("view_count") or 0)
+              views = parse_views_text(e.get("view_count") or e.get("view_count_text") or 0)
               likes = int(e.get("like_count") or 0)
               up_date = str(e.get("upload_date") or "").strip()
               cands.append({
@@ -274,13 +428,23 @@ jobs:
 
           print(f"[STEP 4] Unique historical candidates across channel: {len(cands)}", flush=True)
 
+          # בחירת קבוצת המועמדים לפי שיטת המיון שנבחרה (תומך עד 500 תוצאות)
+          cap_pool = max_results + 40
           if sort_by in ("views", "likes"):
               cands.sort(key=lambda x: x["views"], reverse=True)
-              need_meta = cands[:max(max_results + 35, 110)]
+              selected_pool = cands[:cap_pool]
           elif sort_by == "date_asc":
-              need_meta = list(reversed(cands[-max(max_results + 35, 110):]))
+              selected_pool = list(reversed(cands[-cap_pool:]))
           else:
-              need_meta = cands[:max(max_results + 35, 110)]
+              selected_pool = cands[:cap_pool]
+
+          # העשרת מטא-דאטה חכמה ומהירה: שולפים פרטים מלאים רק עבור פריטים שחסר להם הנתון המבוקש
+          if sort_by == "likes":
+              need_meta = [c for c in selected_pool if c["likes"] == 0][:220]
+          elif sort_by in ("date_desc", "date_asc"):
+              need_meta = [c for c in selected_pool if not c["upload_date"]][:220]
+          else:
+              need_meta = [c for c in selected_pool if c["views"] == 0][:150]
 
           def enrich(c):
               cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--no-playlist", "--skip-download", "--no-warnings"]
@@ -301,7 +465,7 @@ jobs:
                   pass
 
           if need_meta:
-              with ThreadPoolExecutor(max_workers=15) as ex:
+              with ThreadPoolExecutor(max_workers=20) as ex:
                   list(ex.map(enrich, need_meta))
 
           def sort_candidates(items_list, mode_sort):
@@ -314,20 +478,15 @@ jobs:
               else:
                   items_list.sort(key=lambda x: x["views"], reverse=True)
 
-          sort_candidates(need_meta, sort_by)
+          sort_candidates(selected_pool, sort_by)
 
-          if channel_input:
-              pool = [c for c in need_meta if c["views"] >= min_views]
-              if len(pool) < min(max_results, 25):
-                  pool = need_meta[:]
-              pool = pool[:max_results + 25]
-          else:
-              pool = [c for c in need_meta if c["views"] >= min_views][:max_results + 25]
-              if len(pool) < 20:
-                  pool = need_meta[:max_results + 25]
+          pool = [c for c in selected_pool if c["views"] >= min_views]
+          if len(pool) < min(max_results, 25):
+              pool = selected_pool[:]
+          pool = pool[:max_results + 30]
 
-          def call_ai_batch(batch_items, topic_str, ch_str, user_rule):
-              if not user_rule:
+          def call_ai_batch(batch_items):
+              if not filter_prompt:
                   return batch_items
               compact = [{"id": c["id"], "title": c["title"], "channel": c["channel"]} for c in batch_items]
               sys_msg = (
@@ -336,8 +495,8 @@ jobs:
                   "החזר אך ורק JSON תקין בפורמט: {\"approved_ids\": [\"id1\", \"id2\"]}"
               )
               usr_msg = (
-                  f"ערוץ: {ch_str or 'כללי'} | נושא: {topic_str or 'כללי'}\n"
-                  f"הנחיית סינון: {user_rule}\n\n"
+                  f"ערוץ: {resolved_channel_name or 'כללי'} | נושא: {query or 'כללי'}\n"
+                  f"הנחיית סינון: {filter_prompt}\n\n"
                   f"רשימת מועמדים:\n{json.dumps(compact, ensure_ascii=False)}"
               )
 
@@ -378,11 +537,11 @@ jobs:
                       pass
               return batch_items
 
+          batches = [pool[i:i + 60] for i in range(0, len(pool), 60)]
           approved_all = []
-          batch_size = 35
-          for i in range(0, len(pool), batch_size):
-              chunk = pool[i:i + batch_size]
-              approved_all.extend(call_ai_batch(chunk, query, resolved_channel_name, filter_prompt))
+          with ThreadPoolExecutor(max_workers=4) as ex:
+              for res_chunk in ex.map(call_ai_batch, batches):
+                  approved_all.extend(res_chunk)
 
           sort_candidates(approved_all, sort_by)
           filtered = approved_all[:max_results]
