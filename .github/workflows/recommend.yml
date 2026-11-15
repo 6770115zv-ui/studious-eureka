@@ -43,6 +43,7 @@ jobs:
           import base64, json, os, re, subprocess, urllib.parse, requests
           from concurrent.futures import ThreadPoolExecutor
 
+          req_id = os.environ.get("REQ_ID", "").strip()
           query = os.environ.get("QUERY", "").strip()
           channel_input = os.environ.get("CHANNEL", "").strip()
           sort_by = os.environ.get("SORT_BY", "views").strip().lower() or "views"
@@ -55,6 +56,8 @@ jobs:
                   "הבא אך ורק תוצאות מקצועיות, נקיות וטהורות שעומדות בנושא המבוקש. "
                   "סנן החוצה תכנים זרים וכל תוכן שאינו מתאים למגזר שומר תורה ומצוות."
               )
+
+          print(f"[STEP 1] Params: req_id={req_id}, channel='{channel_input}', query='{query}', sort_by={sort_by}, max={max_results}", flush=True)
 
           def fetch_yt_json(target_url_or_query, limit_str):
               cmd = [
@@ -132,7 +135,6 @@ jobs:
 
           def yt_search_sorted_url(q_text, mode_sort):
               enc = urllib.parse.quote_plus(q_text)
-              # sp=CAMSAhAB (View count), sp=CAI%3D (Upload date), sp=CAE%3D (Rating/Likes)
               sp_map = {
                   "views": "CAMSAhAB",
                   "date_desc": "CAI%253D",
@@ -143,12 +145,11 @@ jobs:
 
           raw = []
           resolved_channel_name = channel_input
-          # אם מבקשים מהישן לחדש בערוץ, מושכים כמות גדולה יותר מעמוד הערוץ כדי להגיע לסרטונים הראשונים
           fetch_cap = str(max(220 if sort_by == "date_asc" else 140, max_results * 2))
 
           if channel_input:
               ch_videos_url, resolved_channel_name = resolve_channel_videos_url(channel_input)
-              print(f"Channel mode: '{channel_input}' -> URL='{ch_videos_url}', Sort='{sort_by}'", flush=True)
+              print(f"[STEP 2] Resolved channel URL='{ch_videos_url}', Name='{resolved_channel_name}'", flush=True)
               tasks = []
               if ch_videos_url:
                   tasks.append((ch_videos_url, fetch_cap))
@@ -176,6 +177,8 @@ jobs:
               with ThreadPoolExecutor(max_workers=4) as ex:
                   for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), search_targets):
                       raw.extend(batch)
+
+          print(f"[STEP 3] Raw entries fetched: {len(raw)}", flush=True)
 
           BLOCKED_RX = re.compile(
               r"\b(movie|movies|film|trailer|cinema|netflix|hollywood|actor|actress|romance|dating|"
@@ -247,11 +250,11 @@ jobs:
                   "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          # השלמת נתוני לייקים, תאריך העלאה וצפיות עבור הסרטונים המועמדים
+          print(f"[STEP 4] Filtered candidates count: {len(cands)}", flush=True)
+
           if sort_by == "likes":
               need_meta = [c for c in cands if c["likes"] == 0][:90]
           elif sort_by in ("date_desc", "date_asc"):
-              # בחיפוש ערוץ מהישן לחדש, נבדוק את הסרטונים שבתחתית הרשימה (הישנים ביותר) + העליונים
               if sort_by == "date_asc" and len(cands) > 90:
                   need_meta = [c for c in cands[-90:] if not c["upload_date"]]
               else:
@@ -281,10 +284,8 @@ jobs:
               if mode_sort == "likes":
                   items_list.sort(key=lambda x: (x["likes"], x["views"]), reverse=True)
               elif mode_sort == "date_desc":
-                  # תאריך יורד (מהחדש לישן); אם אין תאריך, סדר ההופעה המקורי בערוץ (0 = הכי חדש)
                   items_list.sort(key=lambda x: (x["upload_date"] or "00000000", -x["orig_pos"]), reverse=True)
               elif mode_sort == "date_asc":
-                  # תאריך עולה (מהישן לחדש); אם אין תאריך, סוף הרשימה המקורית בערוץ (orig_pos גבוה = הכי ישן)
                   items_list.sort(key=lambda x: (x["upload_date"] if x["upload_date"] else "99999999", -x["orig_pos"]), reverse=False)
               else:
                   items_list.sort(key=lambda x: x["views"], reverse=True)
@@ -382,6 +383,8 @@ jobs:
           for item in filtered:
               item.pop("orig_pos", None)
 
+          print(f"[STEP 5] Final approved items: {len(filtered)}", flush=True)
+
           payload_bytes = json.dumps({
               "query": query,
               "channel": resolved_channel_name or channel_input,
@@ -402,9 +405,13 @@ jobs:
               timeout=60
           )
           sha = r.json().get("sha", "") if r.status_code == 201 else ""
-          with open("rec_notes.txt", "w", encoding="utf-8") as nf:
-              nf.write(json.dumps({"blobs": [sha] if sha else []}))
-          EOF
+          print(f"[STEP 6] Created Git Blob status={r.status_code}, sha={sha}", flush=True)
 
-          TAG="rec-${REQ_ID}"
-          gh release create "$TAG" recommendations.json --repo "$GH_REPO" --title "$TAG" --notes-file rec_notes.txt
+          tag = f"rec-{req_id}"
+          notes_str = json.dumps({"blobs": [sha] if sha else [], "count": len(filtered)})
+          rel_proc = subprocess.run(
+              ["gh", "release", "create", tag, "recommendations.json", "--repo", gh_repo, "--title", tag, "--notes", notes_str],
+              capture_output=True, text=True, check=False
+          )
+          print(f"[STEP 7] gh release create exit={rel_proc.returncode}, out={rel_proc.stdout.strip()}, err={rel_proc.stderr.strip()}", flush=True)
+          EOF
