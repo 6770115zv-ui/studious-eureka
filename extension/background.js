@@ -18,7 +18,6 @@ const UPDATE_HOST = "com.rafi.ytproxy.updater";
 const ZIP_CACHE_NAME = "ytcloud-assets-v5";
 const KEEPALIVE_ALARM = "ytcloud_keepalive";
 
-// מחיקת כל התראה ישנה שנתקעה בזיכרון המקומי של הדפדפן
 chrome.storage.local.remove("ytproxy_ck_status").catch(() => {});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,7 +36,6 @@ async function getConfig() {
   if (self.DEFAULT_CONFIG && self.DEFAULT_CONFIG.token && !cfg.token) {
     cfg.token = self.DEFAULT_CONFIG.token;
   }
-  // קיבוע מוחלט של מפתח העוגיות הקבוע כך שלעולם לא ישתנה ולא ידרוש עדכון ידני!
   cfg.cookieKey = BUILTIN_CONFIG.cookieKey;
   for (const k of Object.keys(BUILTIN_CONFIG)) cfg[k] = String(cfg[k] ?? "").trim();
   if (!cfg.workflow) cfg.workflow = "download.yml";
@@ -747,18 +745,19 @@ async function fetchJsonAssetWithRetry(asset, cfg) {
   return null;
 }
 
-async function driveRecommendations(requestId, query, minViews) {
+async function driveRecommendations(requestId, query, channel, minViews) {
   const cfg = await getConfig();
   const tag = "rec-" + requestId;
+  const labelTarget = channel ? ("הערוץ \"" + channel + "\"" + (query ? (" בנושא \"" + query + "\"") : "")) : ("\"" + query + "\"");
   if (chrome.alarms) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
   try {
-    await setRecsState({ status: "running", query, minViews, detail: "מאתר ריצת חיפוש רב-לשוני וסינון AI ב-GitHub Actions...", items: [] });
+    await setRecsState({ status: "running", query, channel, minViews, detail: "מאתר ריצת חיפוש עבור " + labelTarget + " ב-GitHub Actions...", items: [] });
     const runId = await findRunByTitle(cfg, tag, null);
-    await setRecsState({ status: "running", query, minViews, detail: "סורק תוצאות מכל הזמנים ומסנן עם AI בענן...", items: [] });
+    await setRecsState({ status: "running", query, channel, minViews, detail: "סורק עשרות סרטונים מתוך " + labelTarget + " ומסנן עם AI...", items: [] });
     const conclusion = await waitForRun(cfg, runId, requestId, null, null);
     if (conclusion !== "success") throw new Error("החיפוש הסתיים עם סטטוס: " + conclusion);
 
-    await setRecsState({ status: "fetching", query, minViews, detail: "מושך תוצאות מסוננות מ-GitHub...", items: [] });
+    await setRecsState({ status: "fetching", query, channel, minViews, detail: "מושך תוצאות מ-GitHub...", items: [] });
     let data = null;
     for (let a = 0; a < 8 && !data; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
@@ -770,17 +769,19 @@ async function driveRecommendations(requestId, query, minViews) {
     }
     await deleteReleaseAndTagByName(cfg, tag);
     if (!data || !Array.isArray(data.items)) throw new Error("לא התקבלו תוצאות מהענן");
-    const trLabel = data.en_query ? (" (כולל תרגום: " + data.en_query + ")") : "";
+    const trLabel = data.en_query ? (" (תרגום: " + data.en_query + ")") : "";
+    const chResolved = data.channel ? (" • ערוץ: " + data.channel) : "";
     await setRecsState({
       status: "completed",
       query,
+      channel: data.channel || channel,
       minViews,
-      detail: "נמצאו ואושרו ע\"י ה-AI " + data.items.length + " תוצאות נקיות בנושא \"" + query + "\"" + trLabel,
+      detail: "התקבלו " + data.items.length + " תוצאות לבחירה עבור " + labelTarget + chResolved + trLabel,
       items: data.items,
       updatedAt: Date.now()
     });
   } catch (err) {
-    await setRecsState({ status: "failed", query, minViews, detail: err.message, error: err.message, items: [] });
+    await setRecsState({ status: "failed", query, channel, minViews, detail: err.message, error: err.message, items: [] });
   } finally {
     updateActionBadge();
   }
@@ -792,8 +793,10 @@ async function startRecommendations(payload) {
     return { ok: false, error: "חסרות הגדרות מאגר (owner/repo/token)" };
   }
   const query = String(payload.query || "").trim();
-  if (!query) return { ok: false, error: "נא להזין או לבחור נושא לחיפוש" };
-  const minViews = String(payload.minViews || "100000").trim();
+  const channel = String(payload.channel || "").trim();
+  if (!query && !channel) return { ok: false, error: "נא להזין שם ערוץ או נושא לחיפוש" };
+  const maxResults = String(payload.maxResults || "60").trim();
+  const minViews = String(payload.minViews || "0").trim();
   const filterPrompt = String(payload.filterPrompt || "").trim();
   const hist = await getHistory();
   const excludeIds = hist.map((h) => h.videoId).filter(Boolean).slice(0, 40).join(",");
@@ -808,6 +811,8 @@ async function startRecommendations(payload) {
       inputs: {
         request_id: requestId,
         query,
+        channel,
+        max_results: maxResults,
         min_views: minViews,
         exclude_ids: excludeIds,
         filter_prompt: filterPrompt
@@ -817,7 +822,7 @@ async function startRecommendations(payload) {
   if (res.status !== 204) {
     return { ok: false, error: "שגיאה מ-GitHub (HTTP " + res.status + ")" };
   }
-  void driveRecommendations(requestId, query, minViews);
+  void driveRecommendations(requestId, query, channel, minViews);
   return { ok: true, requestId };
 }
 
