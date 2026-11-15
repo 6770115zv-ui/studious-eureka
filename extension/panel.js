@@ -38,6 +38,16 @@
     chrome.storage.local.set({ [AUTO_EMAIL_TOGGLE_KEY]: el("emailToggle").checked }).catch(() => {});
   });
 
+  if (el("copyRecLogBtn")) {
+    el("copyRecLogBtn").onclick = () => {
+      const txt = el("recDebugLog") ? el("recDebugLog").textContent : "";
+      if (!txt) return;
+      navigator.clipboard.writeText(txt).catch(() => {});
+      el("copyRecLogBtn").textContent = "✓ הלוג הועתק";
+      setTimeout(() => { el("copyRecLogBtn").textContent = "📋 העתק לוג"; }, 1800);
+    };
+  }
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const hasHebrew = (s) => /[\u0590-\u05FF]/.test(String(s || ""));
 
@@ -501,6 +511,39 @@
 
     const statusEl = el("recStatusText");
     statusEl.textContent = (recState && recState.detail) || "";
+    if (recState && recState.status === "failed") {
+      statusEl.style.color = "var(--fail)";
+    } else if (recState && recState.status === "completed") {
+      statusEl.style.color = "var(--ok)";
+    } else {
+      statusEl.style.color = "";
+    }
+
+    // הצגת יומן האבחון החי וכפתור פתיחת הריצה ב-GitHub
+    const logWrap = el("recLogWrap");
+    const logPre = el("recDebugLog");
+    const openRunBtn = el("openRecRunBtn");
+    if (logWrap && logPre) {
+      const logs = (recState && Array.isArray(recState.logs)) ? recState.logs : [];
+      if (logs.length > 0) {
+        logWrap.style.display = "flex";
+        const newText = logs.join("\n");
+        if (logPre.textContent !== newText) {
+          logPre.textContent = newText;
+          logPre.scrollTop = logPre.scrollHeight;
+        }
+      } else {
+        logWrap.style.display = "none";
+      }
+    }
+    if (openRunBtn) {
+      if (recState && recState.runId) {
+        openRunBtn.style.display = "inline-flex";
+        openRunBtn.onclick = () => chrome.runtime.sendMessage({ type: "OPEN_REC_RUN", runId: recState.runId });
+      } else {
+        openRunBtn.style.display = "none";
+      }
+    }
 
     const recList = el("recList");
     recList.replaceChildren();
@@ -696,6 +739,8 @@
     });
     if (!res || !res.ok) {
       el("recStatusText").textContent = (res && res.error) || "שגיאה בהפעלת מנוע החיפוש";
+    } else {
+      void refresh();
     }
   };
 
