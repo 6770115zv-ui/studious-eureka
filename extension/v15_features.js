@@ -56,7 +56,6 @@
   }
 
   function injectV15Controls() {
-    // 1. סרגל כלים עליון: מחיקת כל הריצות והשחרורים + העתקת טוקן ועוגיות
     const hd = document.querySelector("header.hd");
     if (hd && !$("v15QuickBar")) {
       const bar = document.createElement("div");
@@ -73,7 +72,6 @@
       hd.insertAdjacentElement("afterend", bar);
     }
 
-    // 2. תיבת סימון לתרגום שם הקובץ לעברית בהורדה + רמז למזהה 11 תווים
     const urlInput = $("urlInput");
     if (urlInput) {
       urlInput.placeholder = "https://www.youtube.com/watch?v=... או מזהה 11 תווים בלבד (למשל BwSMOsc_J3A)";
@@ -99,10 +97,15 @@
         lbl.className = "small";
         lbl.innerHTML = `<input type="checkbox" id="translateTitleDlToggle" class="switch"/><span>🔤 תרגם שם לעברית</span>`;
         gridWrap.appendChild(lbl);
+        chrome.storage.local.get("ytcloud_tr_dl_title", (d) => {
+          if (d && d.ytcloud_tr_dl_title) $("translateTitleDlToggle").checked = true;
+        });
+        $("translateTitleDlToggle").addEventListener("change", (e) => {
+          chrome.storage.local.set({ ytcloud_tr_dl_title: Boolean(e.target.checked) });
+        });
       }
     }
 
-    // 3. אופציות חדשות בכרטיס החיפוש: "איכותיים מאוד בלבד" + "תרגום שמות לעברית"
     const recSortSelect = $("recSortBySelect");
     if (recSortSelect && !recSortSelect.querySelector('option[value="quality_score"]')) {
       const opt = document.createElement("option");
@@ -139,7 +142,6 @@
       recFilterInput.parentElement.insertAdjacentElement("afterend", wrap);
     }
 
-    // 4. כפתור תרגום כל ההיסטוריה לעברית
     const clearHistBtn = $("clearHistBtn");
     if (clearHistBtn && !$("translateHistAllBtn")) {
       const btn = document.createElement("button");
@@ -162,7 +164,6 @@
       showBannerStatus(txt, isErr);
     };
 
-    // א. מחיקת כל הריצות והשחרורים מהמאגר
     const purgeHandler = async () => {
       const btn = $("purgeAllRepoBtn");
       if (btn) btn.disabled = true;
@@ -183,7 +184,6 @@
     if ($("purgeAllRepoBtn")) $("purgeAllRepoBtn").addEventListener("click", purgeHandler);
     if ($("cleanCloudBtn")) $("cleanCloudBtn").addEventListener("click", purgeHandler);
 
-    // ב. העתקת טוקן
     if ($("copyGhTokenBtn")) {
       $("copyGhTokenBtn").addEventListener("click", async () => {
         const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
@@ -197,7 +197,6 @@
       });
     }
 
-    // ג. העתקת עוגיות (Netscape + מוצפנות)
     if ($("copyYtCookiesBtn")) {
       $("copyYtCookiesBtn").addEventListener("click", async () => {
         qStatus("⏳ מייצא עוגיות YouTube...");
@@ -224,7 +223,6 @@
       });
     }
 
-    // ד. הזרקת דגלי איכות ותרגום לפני שיגור חיפוש
     const findRecsBtn = $("findRecsBtn");
     if (findRecsBtn) {
       findRecsBtn.addEventListener("click", () => {
@@ -243,7 +241,6 @@
       }, true);
     }
 
-    // ה. תרגום שם קובץ לעברית לפני הורדה + נרמול מזהה 11 תווים
     for (const btnId of ["downloadBtn", "subsOnlyBtn"]) {
       const b = $(btnId);
       if (b) {
@@ -253,17 +250,11 @@
             uIn.value = normalizeYtInputValue(uIn.value);
           }
           const trToggle = $("translateTitleDlToggle");
-          const prevTitle = $("previewTitle");
-          if (trToggle && trToggle.checked && prevTitle && prevTitle.textContent) {
-            translateBatchToHebrew([prevTitle.textContent.trim()]).then(([tr]) => {
-              if (tr) prevTitle.textContent = tr;
-            }).catch(() => {});
-          }
+          chrome.storage.local.set({ ytcloud_tr_dl_title: Boolean(trToggle && trToggle.checked) });
         }, true);
       }
     }
 
-    // ו. תרגום חי של תוצאות החיפוש המוצגות על המסך
     if ($("translateVisibleRecsBtn")) {
       $("translateVisibleRecsBtn").addEventListener("click", async () => {
         const recList = $("recList");
@@ -276,9 +267,8 @@
         qStatus(`⏳ מתרגם ${titleEls.length} כותרות לעברית...`);
         const rawList = titleEls.map((el) => el.textContent.replace(/^#(\d+)\s*•\s*/, "").trim());
         const prefixes = titleEls.map((el) => (el.textContent.match(/^#\d+\s*•\s*/) || [""])[0]);
-        const batchSize = 25;
-        for (let i = 0; i < rawList.length; i += batchSize) {
-          const chunk = rawList.slice(i, i + batchSize);
+        for (let i = 0; i < rawList.length; i += 25) {
+          const chunk = rawList.slice(i, i + 25);
           try {
             const trChunk = await translateBatchToHebrew(chunk);
             for (let j = 0; j < chunk.length; j++) {
@@ -293,17 +283,13 @@
       });
     }
 
-    // ז. תרגום כל שמות הקבצים בארכיון ההיסטוריה לעברית
     if ($("translateHistAllBtn")) {
       $("translateHistAllBtn").addEventListener("click", async () => {
-        const histList = $("historyList");
-        if (!histList) return;
         qStatus("⏳ מתרגם שמות בהיסטוריה לעברית...");
         const res = await chrome.runtime.sendMessage({ type: "TRANSLATE_HISTORY_HE" });
         if (res && res.ok) {
-          qStatus(`✅ תורגמו ${res.count || 0} שמות בהיסטוריה לעברית! רענן או הקלד בתיבת הסינון לעדכון.`);
-          const histInput = $("histSearchInput");
-          if (histInput) histInput.dispatchEvent(new Event("input", { bubbles: true }));
+          qStatus(`✅ תורגמו ${res.count || 0} שמות בהיסטוריה לעברית!`);
+          setTimeout(() => location.reload(), 600);
         } else {
           qStatus("❌ שגיאה בתרגום ההיסטוריה", true);
         }
@@ -311,16 +297,14 @@
     }
   }
 
-  // הוספת כפתור העתקת מזהה 11 תווים על פריטי חיפוש והיסטוריה
   function observeAndEnhanceItems() {
     const enhanceContainer = (containerId) => {
       const box = $(containerId);
       if (!box) return;
-      const cards = box.children;
-      for (const card of cards) {
+      for (const card of box.children) {
         if (card.dataset.v15Enhanced) continue;
         const txt = card.innerHTML || "";
-        const mId = txt.match(/(?:watch\?v=|\[)([a-zA-Z0-9_-]{11})(?:["'&\]\s]|$)/);
+        const mId = txt.match(/(?:watch\?v=|\[)([a-zA-Z0-9_-]{11})(?:["'&\]\s.]|$)/);
         if (mId && mId[1]) {
           card.dataset.v15Enhanced = "1";
           const vid11 = mId[1];
