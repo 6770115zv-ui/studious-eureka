@@ -1111,6 +1111,83 @@ chrome.action.onClicked.addListener(async () => {
 });
 
 // === V15_SAFE_FUNCTIONS ===
+function v15CleanWindowsFilename(rawName) {
+  let s = String(rawName || "download.mp4").trim();
+  // חילוץ סיומת הקובץ (.mp4, .he.srt, .srt, .mp3, .zip וכו')
+  let ext = ".mp4";
+  const mExt = s.match(/(\.he\.srt|\.[a-zA-Z0-9]{2,5})$/i);
+  if (mExt) {
+    ext = mExt[1].toLowerCase();
+    if (ext === ".txt" && /\.he\.txt$/i.test(s)) ext = ".he.srt";
+    s = s.slice(0, -mExt[1].length);
+  }
+  // חילוץ מזהה 11 תווים אם קיים
+  let idPart = "";
+  const mId = s.match(/\[([a-zA-Z0-9_-]{11})\]/);
+  if (mId) {
+    idPart = " [" + mId[1] + "]";
+    s = s.replace(mId[0], "");
+  }
+  // הסרת רצפי \uXXXX שבורים (כגון \ud83e\udd2f), האשטאגים, אימוג'ים, נקודות כפולות ותווים אסורים ב-Windows
+  s = s
+    .replace(/\\u[0-9a-fA-F]{4}/g, " ")
+    .replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, " ")
+    .replace(/[\uD800-\uDFFF]/g, "")
+    .replace(/[\u2000-\u206F\u2190-\u2BFF\u3000-\u303F\uFE00-\uFEFF]/g, " ")
+    .replace(/[<>:"/\\|?*\x00-\x1f#~%&{}^`!@$+=;]+/g, " ")
+    .replace(/\.{2,}/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[.\s\-_]+|[.\s\-_]+$/g, "")
+    .slice(0, 75)
+    .replace(/^[.\s\-_]+|[.\s\-_]+$/g, "");
+
+  if (!s) s = "youtube-media";
+  return s + idPart + ext;
+}
+
+function v15FallbackAsciiFilename(rawName) {
+  const s = String(rawName || "");
+  let ext = ".mp4";
+  const mExt = s.match(/(\.he\.srt|\.[a-zA-Z0-9]{2,5})$/i);
+  if (mExt) ext = mExt[1].toLowerCase();
+  const mId = s.match(/\[([a-zA-Z0-9_-]{11})\]/);
+  const idStr = mId ? mId[1] : String(Date.now()).slice(-8);
+  return "youtube-video-[" + idStr + "]" + ext;
+}
+
+// עטיפת chrome.downloads.download לניקוי אוטומטי של שם הקובץ + גיבוי אוטומטי במקרה ש-Windows דוחה את השם
+if (chrome.downloads && chrome.downloads.download && !self._v15DownloadWrapped) {
+  self._v15DownloadWrapped = true;
+  const _origDl = chrome.downloads.download.bind(chrome.downloads);
+  chrome.downloads.download = function (options, callback) {
+    if (options && typeof options === "object" && options.filename) {
+      const cleaned = v15CleanWindowsFilename(options.filename);
+      options = { ...options, filename: cleaned };
+      if (typeof pendingNames !== "undefined" && options.url) {
+        pendingNames.set(options.url, cleaned);
+      }
+    }
+    return _origDl(options, (downloadId) => {
+      if ((chrome.runtime.lastError || downloadId === undefined) && options && options.url) {
+        const safeName = v15FallbackAsciiFilename(options.filename || "");
+        if (typeof pendingNames !== "undefined") {
+          pendingNames.set(options.url, safeName);
+        }
+        _origDl({ ...options, filename: safeName }, (retryId) => {
+          if ((chrome.runtime.lastError || retryId === undefined) && options.url) {
+            if (typeof pendingNames !== "undefined") pendingNames.delete(options.url);
+            _origDl({ url: options.url, saveAs: false }, callback);
+            return;
+          }
+          if (callback) callback(retryId);
+        });
+        return;
+      }
+      if (callback) callback(downloadId);
+    });
+  };
+}
+
 async function v15PurgeAllCloud() {
   const cfg = await getConfig();
   if (!cfg.owner || !cfg.repo || !cfg.token) return { ok: false, error: "חסרות הגדרות מאגר או טוקן" };
