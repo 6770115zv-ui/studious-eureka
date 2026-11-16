@@ -73,11 +73,9 @@ async function addHistoryEntry(entry) {
   const idTailRx = new RegExp("\\s*\\[[a-zA-Z0-9_-]{11}\\]\\.[a-z0-9]+\\x24", "i");
   const cleanTitle = String(entry.title || "").replace(idTailRx, "").trim();
   if (!cleanTitle || cleanTitle.startsWith("http")) return list;
-  const isSubEntry = /\.srt$/i.test(String(entry.title || "")) || String(entry.quality || "").includes("SRT");
-  const entryKey = vid ? (isSubEntry ? vid + "_srt" : vid) : "";
-  const filtered = list.filter((x) => (entryKey ? x.videoId !== entryKey : x.title !== cleanTitle));
+  const filtered = list.filter((x) => (vid ? x.videoId !== vid : x.title !== cleanTitle));
   filtered.unshift({
-    videoId: entryKey || vid || "",
+    videoId: vid || "",
     title: cleanTitle,
     url: entry.url || "",
     quality: entry.quality || "best",
@@ -623,7 +621,7 @@ async function driveJob(jobId) {
     patchJob(jobId, { status: "saving", localDlPct: 100, detail: "שומר קובץ בתיקיית ההורדות במחשב...", percent: 94 });
     const saved = [];
     for (const f of files) {
-      const name = await v15MaybeTranslateFilename(sanitizeFilename(f.name));
+      const name = sanitizeFilename(f.name);
       await saveBlob(f.blobUrl || f.url, name, jobId);
       saved.push(name);
     }
@@ -658,13 +656,6 @@ async function driveJob(jobId) {
 }
 
 async function startDownload(payload) {
-  if (payload && payload.url && /^[a-zA-Z0-9_-]{11}$/.test(String(payload.url).trim())) {
-    payload.url = "https://www.youtube.com/watch?v=" + String(payload.url).trim();
-  }
-  if (payload && Array.isArray(payload.urls)) {
-    payload.urls = payload.urls.map((u) => /^[a-zA-Z0-9_-]{11}$/.test(String(u).trim()) ? "https://www.youtube.com/watch?v=" + String(u).trim() : u);
-  }
-
   const cfg = await getConfig();
   if (!cfg.owner || !cfg.repo || !cfg.token) {
     return { ok: false, error: "חסרות הגדרות חיבור (owner/repo/token)" };
@@ -988,6 +979,9 @@ async function runCloudCleanup() {
 async function handle(msg) {
   await restoreJobs();
   switch (msg.type) {
+    case "PURGE_ALL_CLOUD": return v15PurgeAllCloud();
+    case "EXPORT_COOKIES": return v15ExportCookies();
+    case "TRANSLATE_HISTORY_HE": return v15TranslateHistoryToHebrew();
     case "OFFSCREEN_PROGRESS": {
       if (msg.jobId && jobs.has(msg.jobId)) {
         const patch = {};
@@ -1116,38 +1110,14 @@ chrome.action.onClicked.addListener(async () => {
   else await chrome.tabs.create({ url });
 });
 
-// === V15_CLOUD_ULTRA_HANDLERS ===
-async function v15MaybeTranslateFilename(filename) {
-  try {
-    const st = await chrome.storage.local.get("ytcloud_tr_dl_title");
-    if (!st || !st.ytcloud_tr_dl_title) return filename;
-    const m = String(filename || "").match(/^(.*?)(\s*\[[a-zA-Z0-9_-]{11}\])(\.[a-z0-9.]+)$/i);
-    const baseTitle = m ? m[1].trim() : filename.replace(/(\.[a-z0-9.]+)$/i, "").trim();
-    const idPart = m ? m[2] : "";
-    const extPart = m ? m[3] : ((filename.match(/(\.[a-z0-9.]+)$/i) || [""])[0]);
-    if (!baseTitle) return filename;
-    const hebChars = (baseTitle.match(/[\u0590-\u05FF]/g) || []).length;
-    const latChars = (baseTitle.match(/[a-zA-Z]/g) || []).length;
-    if (hebChars >= latChars && latChars < 4) return filename;
-    const u = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=iw&dt=t&q=" + encodeURIComponent(baseTitle);
-    const res = await fetch(u);
-    if (!res.ok) return filename;
-    const data = await res.json();
-    const tr = ((data[0] || []).map((x) => (x && x[0]) || "").join("") || "").trim();
-    if (!tr) return filename;
-    return sanitizeFilename(tr + idPart + extPart);
-  } catch {
-    return filename;
-  }
-}
-
+// === V15_SAFE_FUNCTIONS ===
 async function v15PurgeAllCloud() {
   const cfg = await getConfig();
   if (!cfg.owner || !cfg.repo || !cfg.token) return { ok: false, error: "חסרות הגדרות מאגר או טוקן" };
   let deletedReleases = 0;
   let deletedRuns = 0;
   try {
-    for (let page = 1; page <= 6; page++) {
+    for (let page = 1; page <= 5; page++) {
       const rRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases?per_page=100", cfg);
       if (!rRes.ok) break;
       const rels = await rRes.json();
@@ -1162,7 +1132,7 @@ async function v15PurgeAllCloud() {
         } catch {}
       }));
     }
-    for (let page = 1; page <= 8; page++) {
+    for (let page = 1; page <= 6; page++) {
       const wRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?per_page=100", cfg);
       if (!wRes.ok) break;
       const data = await wRes.json();
@@ -1235,31 +1205,4 @@ async function v15TranslateHistoryToHebrew() {
   }
   await chrome.storage.local.set({ [HIST_KEY]: list });
   return { ok: true, count: translatedCount };
-}
-
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg) return undefined;
-  if (msg.type === "PURGE_ALL_CLOUD") {
-    v15PurgeAllCloud().then(sendResponse);
-    return true;
-  }
-  if (msg.type === "EXPORT_COOKIES") {
-    v15ExportCookies().then(sendResponse);
-    return true;
-  }
-  if (msg.type === "TRANSLATE_HISTORY_HE") {
-    v15TranslateHistoryToHebrew().then(sendResponse);
-    return true;
-  }
-  return undefined;
-});
-
-if (chrome.downloads && chrome.downloads.onDeterminingFilename && !self._v15SrtGuardInstalled) {
-  self._v15SrtGuardInstalled = true;
-  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-    if (item && item.filename && /\.he\.txt$/i.test(item.filename)) {
-      suggest({ filename: item.filename.replace(/\.he\.txt$/i, ".he.srt"), conflictAction: "uniquify" });
-      return true;
-    }
-  });
 }
