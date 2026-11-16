@@ -49,7 +49,6 @@ jobs:
           import base64, json, os, re, subprocess, time, threading, urllib.parse, requests
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
-          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           req_id = os.environ.get("REQ_ID", "").strip()
           query = os.environ.get("QUERY", "").strip()
@@ -108,7 +107,6 @@ jobs:
 
           def walk_innertube_items(obj, out_videos, out_grid_tokens, out_chip_tokens):
               if isinstance(obj, dict):
-                  # שליפת כרטיסיות המיון (Latest=0, Popular=1, Oldest=2) מתוך feedFilterChipBarRenderer
                   if "feedFilterChipBarRenderer" in obj:
                       chips = (obj["feedFilterChipBarRenderer"] or {}).get("contents") or []
                       for idx, ch_wrap in enumerate(chips):
@@ -299,21 +297,13 @@ jobs:
               return base, uc_id, name, name
 
           def fetch_channel_videos_properly(uc_channel_id: str, channel_title: str, sort_mode: str, target_count: int = 600):
-              """
-              שליפת סרטוני ערוץ אמיתיים לפי המיון המבוקש:
-              1. עבור צפיות/לייקים/איכות: שולף את פלייליסט הפופולריים הרשמי של כל הזמנים (VLUULP...) + לוחץ על כרטיסיית Popular (Chip #1) ומדלג על סרטוני ה-Latest הראשוניים!
-              2. עבור מהישן לחדש (date_asc): לוחץ על כרטיסיית Oldest (Chip #2) ומדלג על סרטוני ה-Latest!
-              3. עבור מהחדש לישן (date_desc): שולף את כרטיסיית ה-Latest או פלייליסט VLUU...
-              """
               if not uc_channel_id or not uc_channel_id.startswith("UC"):
                   return []
               api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
               headers = build_innertube_headers(f"https://www.youtube.com/channel/{uc_channel_id}/videos")
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
-
               collected, seen_vids, visited_tokens = [], set(), set()
 
-              # שלב א': אם המשתמש ביקש פופולריים היסטורית (views / likes / quality_score), נשלוף קודם את פלייליסט הפופולריים הרשמי של כל הזמנים (UULP)!
               if sort_mode in ("views", "likes", "quality_score"):
                   uulp_browse_id = "VLUULP" + uc_channel_id[2:]
                   try:
@@ -346,38 +336,24 @@ jobs:
                               for t in mt:
                                   if t not in visited_tokens:
                                       ptoks.append(t)
-                          print(f"[UULP ALL-TIME POPULAR PLAYLIST] Loaded {len(collected)} all-time popular videos!", flush=True)
-                  except Exception as e:
-                      print(f"[UULP Notice] {e}", flush=True)
+                  except Exception:
+                      pass
 
               if len(collected) >= target_count:
                   return collected
 
-              # שלב ב': שליפת לשונית /videos ובחירה מפורשת של ה-Chip המתאים (Popular=1, Oldest=2, Latest=0)
               try:
                   r = requests.post(api_url, headers=headers, json={"context": ctx, "browseId": uc_channel_id, "params": "EgZ2aWRlb3PyBgQKAjoA"}, timeout=20)
                   if r.status_code == 200:
                       init_vids, init_grid_toks, chip_toks = [], [], []
                       walk_innertube_items(r.json(), init_vids, init_grid_toks, chip_toks)
-                      print(f"[CHANNEL CHIPS FOUND] {[(i, lbl) for i, lbl, _ in chip_toks]}", flush=True)
-
                       active_grid_tokens = []
                       if sort_mode in ("views", "likes", "quality_score") and chip_toks:
-                          # בוחר את כרטיסיית Popular (ולא שומר את 30 סרטוני ה-Latest מהעמוד הראשון!)
-                          pop_tok = None
-                          for idx, lbl, tok in chip_toks:
-                              if "popular" in lbl or "פופולר" in lbl or idx == 1:
-                                  pop_tok = tok
-                                  break
+                          pop_tok = next((tok for idx, lbl, tok in chip_toks if "popular" in lbl or "פופולר" in lbl or idx == 1), None)
                           if pop_tok:
                               active_grid_tokens = [pop_tok]
                       elif sort_mode == "date_asc" and chip_toks:
-                          # בוחר את כרטיסיית Oldest (ולא שומר את 30 סרטוני ה-Latest!)
-                          old_tok = None
-                          for idx, lbl, tok in chip_toks:
-                              if "oldest" in lbl or "ישנ" in lbl or idx == 2:
-                                  old_tok = tok
-                                  break
+                          old_tok = next((tok for idx, lbl, tok in chip_toks if "oldest" in lbl or "ישנ" in lbl or idx == 2), None)
                           if old_tok:
                               active_grid_tokens = [old_tok]
                       else:
@@ -408,10 +384,8 @@ jobs:
                           for t in more_tokens:
                               if t not in visited_tokens:
                                   active_grid_tokens.append(t)
-                      print(f"[CHANNEL TAB PAGINATION] Total collected: {len(collected)} videos across {pages} pages", flush=True)
-              except Exception as e:
-                  print(f"[CHANNEL TAB Notice] {e}", flush=True)
-
+              except Exception:
+                  pass
               return collected
 
           clean_q = re.sub(r"[!?\u05be]+", " ", query).strip()
@@ -455,13 +429,11 @@ jobs:
                       raw.extend(batch)
 
           STOP_WORDS = {"איך", "מדריך", "הדרכה", "מקצועי", "של", "על", "עם", "כדי", "את", "אני", "the", "and", "for", "how", "to", "in", "of", "with"}
-          topic_tokens = []
-          for src_q in (clean_q, en_query):
-              if not src_q:
-                  continue
-              for tok in re.split(r"[^\w\u0590-\u05FF]+", src_q.lower()):
-                  if len(tok) >= 2 and tok not in STOP_WORDS:
-                      topic_tokens.append(tok)
+          topic_tokens = [
+              tok for src_q in (clean_q, en_query) if src_q
+              for tok in re.split(r"[^\w\u0590-\u05FF]+", src_q.lower())
+              if len(tok) >= 2 and tok not in STOP_WORDS
+          ]
 
           def matches_topic(title_str: str, channel_str: str) -> bool:
               if not topic_tokens:
