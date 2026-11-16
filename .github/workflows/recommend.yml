@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update -y && sudo apt-get install -y --no-install-recommends python3-cryptography
           python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
-      - name: Search, Probe HD Quality & Translate Titles
+      - name: Search All-Time Popular Channel Archive & Enrich Metadata
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
@@ -46,7 +46,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - << 'EOF'
-          import base64, hashlib, json, os, re, subprocess, time, threading, urllib.parse, requests
+          import base64, json, os, re, subprocess, time, threading, urllib.parse, requests
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -59,9 +59,6 @@ jobs:
           min_views = int(os.environ.get("MIN_VIEWS", "0") or 0)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
-          cookies_enc = os.environ.get("COOKIES_ENC", "").strip()
-          secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
-          fallback_key_env = os.environ.get("COOKIE_KEY_FALLBACK", "").strip()
 
           high_quality_only = False
           translate_titles = False
@@ -72,31 +69,6 @@ jobs:
               translate_titles = True
           sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_by).strip() or "views"
           filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE)\]", "", filter_prompt, flags=re.IGNORECASE).strip()
-
-          cookie_file = Path("/tmp/rec_cookies.txt")
-          cookie_dict = {}
-          has_ck = False
-          if cookies_enc:
-              try:
-                  raw_enc = base64.b64decode(cookies_enc)
-                  for candidate_hex in (fallback_key_env, secret_key_env):
-                      if len(candidate_hex) == 64:
-                          try:
-                              plain_txt = AESGCM(bytes.fromhex(candidate_hex)).decrypt(raw_enc[:12], raw_enc[12:], None).decode("utf-8", errors="replace")
-                              if "youtube.com" in plain_txt or "# Netscape" in plain_txt:
-                                  cookie_file.write_text(plain_txt, encoding="utf-8")
-                                  has_ck = True
-                                  for line in plain_txt.splitlines():
-                                      if not line or line.startswith("#"):
-                                          continue
-                                      parts = line.split("\t")
-                                      if len(parts) >= 7:
-                                          cookie_dict[parts[5]] = parts[6]
-                                  break
-                          except Exception:
-                              pass
-              except Exception:
-                  pass
 
           UA_STR = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -134,20 +106,38 @@ jobs:
               m_u = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/)([a-zA-Z0-9_-]{11})", s)
               return m_u.group(1) if m_u else ""
 
-          def walk_innertube_renderers(obj, out_videos, out_tokens):
+          def walk_innertube_items(obj, out_videos, out_grid_tokens, out_chip_tokens):
               if isinstance(obj, dict):
-                  if "videoRenderer" in obj:
-                      vr = obj["videoRenderer"]
+                  # שליפת כרטיסיות המיון (Latest=0, Popular=1, Oldest=2) מתוך feedFilterChipBarRenderer
+                  if "feedFilterChipBarRenderer" in obj:
+                      chips = (obj["feedFilterChipBarRenderer"] or {}).get("contents") or []
+                      for idx, ch_wrap in enumerate(chips):
+                          cr = ch_wrap.get("chipCloudChipRenderer") or {}
+                          txt_runs = (cr.get("text") or {}).get("runs") or []
+                          label = "".join(r.get("text", "") for r in txt_runs).strip().lower() or (cr.get("text") or {}).get("simpleText", "").strip().lower()
+                          tok = (
+                              ((cr.get("navigationEndpoint") or {}).get("continuationCommand") or {}).get("token")
+                              or ((cr.get("continuationEndpoint") or {}).get("continuationCommand") or {}).get("token")
+                          )
+                          if tok:
+                              out_chip_tokens.append((idx, label, tok))
+                      return
+
+                  vr = obj.get("videoRenderer") or obj.get("playlistVideoRenderer")
+                  if isinstance(vr, dict):
                       vid = vr.get("videoId")
                       if vid and len(vid) == 11:
                           runs = (vr.get("title") or {}).get("runs") or []
                           title = "".join(r.get("text", "") for r in runs) or (vr.get("title") or {}).get("simpleText", "")
-                          vc_txt = (vr.get("viewCountText") or {}).get("simpleText") or "".join(
-                              r.get("text", "") for r in ((vr.get("viewCountText") or {}).get("runs") or [])
+                          vc_txt = (
+                              (vr.get("viewCountText") or {}).get("simpleText")
+                              or "".join(r.get("text", "") for r in ((vr.get("viewCountText") or {}).get("runs") or []))
+                              or (vr.get("videoInfo") or {}).get("simpleText")
+                              or "".join(r.get("text", "") for r in ((vr.get("videoInfo") or {}).get("runs") or []))
                           )
                           dur_txt = (vr.get("lengthText") or {}).get("simpleText") or ""
-                          dur_sec = 0
-                          if ":" in dur_txt:
+                          dur_sec = int(vr.get("lengthSeconds") or 0)
+                          if not dur_sec and ":" in dur_txt:
                               for p in [int(x) for x in dur_txt.split(":") if x.isdigit()]:
                                   dur_sec = dur_sec * 60 + p
                           ch_runs = ((vr.get("ownerText") or vr.get("longBylineText") or vr.get("shortBylineText") or {}).get("runs") or [])
@@ -159,22 +149,29 @@ jobs:
                               "view_count": parse_views_text(vc_txt),
                               "duration": dur_sec,
                           })
-                  elif "continuationCommand" in obj:
-                      tok = (obj["continuationCommand"] or {}).get("token")
-                      if tok and tok not in out_tokens:
-                          out_tokens.append(tok)
-                  for v in obj.values():
-                      walk_innertube_renderers(v, out_videos, out_tokens)
+
+                  if "continuationItemRenderer" in obj:
+                      cir = obj["continuationItemRenderer"]
+                      tok = (
+                          (((cir.get("continuationEndpoint") or {}).get("continuationCommand") or {}).get("token"))
+                          or (((((cir.get("continuationEndpoint") or {}).get("commandExecutorCommand") or {}).get("commands") or [{}])[-1].get("continuationCommand") or {}).get("token"))
+                      )
+                      if tok and tok not in out_grid_tokens:
+                          out_grid_tokens.append(tok)
+
+                  for k, v in obj.items():
+                      if k != "feedFilterChipBarRenderer":
+                          walk_innertube_items(v, out_videos, out_grid_tokens, out_chip_tokens)
               elif isinstance(obj, list):
                   for item in obj:
-                      walk_innertube_renderers(item, out_videos, out_tokens)
+                      walk_innertube_items(item, out_videos, out_grid_tokens, out_chip_tokens)
 
           def fetch_innertube_search(q_str: str, sp_param: str = "", target_count: int = 160):
               if not q_str:
                   return []
               api_url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false"
               headers = build_innertube_headers()
-              ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
+              ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
               payload = {"context": ctx, "query": q_str}
               if sp_param:
                   payload["params"] = sp_param
@@ -183,29 +180,24 @@ jobs:
                   r = requests.post(api_url, headers=headers, json=payload, timeout=15)
                   if r.status_code != 200:
                       return []
-                  vids, tokens = [], []
-                  walk_innertube_renderers(r.json(), vids, tokens)
+                  vids, tokens, _ = [], [], []
+                  walk_innertube_items(r.json(), vids, tokens, _)
                   for v in vids:
                       if v["id"] not in seen_vids:
                           seen_vids.add(v["id"])
                           collected.append(v)
                   pages = 0
-                  while tokens and len(collected) < target_count and pages < 7:
-                      next_tok = None
-                      while tokens:
-                          cand_tok = tokens.pop(0)
-                          if cand_tok not in visited_tokens:
-                              next_tok = cand_tok
-                              visited_tokens.add(cand_tok)
-                              break
-                      if not next_tok:
-                          break
+                  while tokens and len(collected) < target_count and pages < 8:
+                      next_tok = tokens.pop(0)
+                      if next_tok in visited_tokens:
+                          continue
+                      visited_tokens.add(next_tok)
                       pages += 1
                       r_next = requests.post(api_url, headers=headers, json={"context": ctx, "continuation": next_tok}, timeout=15)
                       if r_next.status_code != 200:
                           break
-                      more_vids, more_tokens = [], []
-                      walk_innertube_renderers(r_next.json(), more_vids, more_tokens)
+                      more_vids, more_tokens, _ = [], [], []
+                      walk_innertube_items(r_next.json(), more_vids, more_tokens, _)
                       for v in more_vids:
                           if v["id"] not in seen_vids:
                               seen_vids.add(v["id"])
@@ -236,7 +228,6 @@ jobs:
                       pass
               return items
 
-          # תמיכה בהזנת מזהה 11 תווים בלבד בשדה הנושא או הערוץ
           direct_vid = extract_11char_id(channel_input) or extract_11char_id(query)
           seed_video = None
           if direct_vid:
@@ -289,22 +280,6 @@ jobs:
                                   name = c_title
                               if ch_low in c_title.lower():
                                   break
-                  if not base:
-                      vids = fetch_innertube_search(ch, "", 10)
-                      if vids and vids[0].get("id"):
-                          try:
-                              pr = requests.post(
-                                  "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                                  headers=build_innertube_headers(),
-                                  json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": vids[0]["id"]},
-                                  timeout=10
-                              )
-                              vd = pr.json().get("videoDetails") or {}
-                              if vd.get("channelId"):
-                                  base = f"https://www.youtube.com/channel/{vd['channelId']}"
-                                  name = vd.get("author") or name
-                          except Exception:
-                              pass
               uc_id = ""
               m_uc = re.search(r"/channel/(UC[a-zA-Z0-9_-]{22})", base)
               if m_uc:
@@ -323,51 +298,120 @@ jobs:
                       pass
               return base, uc_id, name, name
 
-          def fetch_innertube_channel_tab(uc_channel_id: str, channel_title: str, browse_params: str, target_count: int = 1200):
-              if not uc_channel_id:
+          def fetch_channel_videos_properly(uc_channel_id: str, channel_title: str, sort_mode: str, target_count: int = 600):
+              """
+              שליפת סרטוני ערוץ אמיתיים לפי המיון המבוקש:
+              1. עבור צפיות/לייקים/איכות: שולף את פלייליסט הפופולריים הרשמי של כל הזמנים (VLUULP...) + לוחץ על כרטיסיית Popular (Chip #1) ומדלג על סרטוני ה-Latest הראשוניים!
+              2. עבור מהישן לחדש (date_asc): לוחץ על כרטיסיית Oldest (Chip #2) ומדלג על סרטוני ה-Latest!
+              3. עבור מהחדש לישן (date_desc): שולף את כרטיסיית ה-Latest או פלייליסט VLUU...
+              """
+              if not uc_channel_id or not uc_channel_id.startswith("UC"):
                   return []
               api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
               headers = build_innertube_headers(f"https://www.youtube.com/channel/{uc_channel_id}/videos")
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
+
               collected, seen_vids, visited_tokens = [], set(), set()
+
+              # שלב א': אם המשתמש ביקש פופולריים היסטורית (views / likes / quality_score), נשלוף קודם את פלייליסט הפופולריים הרשמי של כל הזמנים (UULP)!
+              if sort_mode in ("views", "likes", "quality_score"):
+                  uulp_browse_id = "VLUULP" + uc_channel_id[2:]
+                  try:
+                      rp = requests.post(api_url, headers=headers, json={"context": ctx, "browseId": uulp_browse_id}, timeout=20)
+                      if rp.status_code == 200:
+                          pvids, ptoks, _ = [], [], []
+                          walk_innertube_items(rp.json(), pvids, ptoks, _)
+                          for v in pvids:
+                              if v["id"] not in seen_vids:
+                                  seen_vids.add(v["id"])
+                                  v["channel"] = channel_title
+                                  collected.append(v)
+                          p_pages = 0
+                          while ptoks and len(collected) < target_count and p_pages < 15:
+                              nt = ptoks.pop(0)
+                              if nt in visited_tokens:
+                                  continue
+                              visited_tokens.add(nt)
+                              p_pages += 1
+                              r_next = requests.post(api_url, headers=headers, json={"context": ctx, "continuation": nt}, timeout=20)
+                              if r_next.status_code != 200:
+                                  break
+                              mv, mt, _ = [], [], []
+                              walk_innertube_items(r_next.json(), mv, mt, _)
+                              for v in mv:
+                                  if v["id"] not in seen_vids:
+                                      seen_vids.add(v["id"])
+                                      v["channel"] = channel_title
+                                      collected.append(v)
+                              for t in mt:
+                                  if t not in visited_tokens:
+                                      ptoks.append(t)
+                          print(f"[UULP ALL-TIME POPULAR PLAYLIST] Loaded {len(collected)} all-time popular videos!", flush=True)
+                  except Exception as e:
+                      print(f"[UULP Notice] {e}", flush=True)
+
+              if len(collected) >= target_count:
+                  return collected
+
+              # שלב ב': שליפת לשונית /videos ובחירה מפורשת של ה-Chip המתאים (Popular=1, Oldest=2, Latest=0)
               try:
-                  r = requests.post(api_url, headers=headers, json={"context": ctx, "browseId": uc_channel_id, "params": browse_params}, timeout=20)
-                  if r.status_code != 200:
-                      return []
-                  vids, tokens = [], []
-                  walk_innertube_renderers(r.json(), vids, tokens)
-                  for v in vids:
-                      if v["id"] not in seen_vids:
-                          seen_vids.add(v["id"])
-                          v["channel"] = channel_title
-                          collected.append(v)
-                  pages = 0
-                  while tokens and len(collected) < target_count and pages < 45:
-                      next_tok = None
-                      while tokens:
-                          cand_tok = tokens.pop(0)
-                          if cand_tok not in visited_tokens:
-                              next_tok = cand_tok
-                              visited_tokens.add(cand_tok)
+                  r = requests.post(api_url, headers=headers, json={"context": ctx, "browseId": uc_channel_id, "params": "EgZ2aWRlb3PyBgQKAjoA"}, timeout=20)
+                  if r.status_code == 200:
+                      init_vids, init_grid_toks, chip_toks = [], [], []
+                      walk_innertube_items(r.json(), init_vids, init_grid_toks, chip_toks)
+                      print(f"[CHANNEL CHIPS FOUND] {[(i, lbl) for i, lbl, _ in chip_toks]}", flush=True)
+
+                      active_grid_tokens = []
+                      if sort_mode in ("views", "likes", "quality_score") and chip_toks:
+                          # בוחר את כרטיסיית Popular (ולא שומר את 30 סרטוני ה-Latest מהעמוד הראשון!)
+                          pop_tok = None
+                          for idx, lbl, tok in chip_toks:
+                              if "popular" in lbl or "פופולר" in lbl or idx == 1:
+                                  pop_tok = tok
+                                  break
+                          if pop_tok:
+                              active_grid_tokens = [pop_tok]
+                      elif sort_mode == "date_asc" and chip_toks:
+                          # בוחר את כרטיסיית Oldest (ולא שומר את 30 סרטוני ה-Latest!)
+                          old_tok = None
+                          for idx, lbl, tok in chip_toks:
+                              if "oldest" in lbl or "ישנ" in lbl or idx == 2:
+                                  old_tok = tok
+                                  break
+                          if old_tok:
+                              active_grid_tokens = [old_tok]
+                      else:
+                          for v in init_vids:
+                              if v["id"] not in seen_vids:
+                                  seen_vids.add(v["id"])
+                                  v["channel"] = channel_title
+                                  collected.append(v)
+                          active_grid_tokens = init_grid_toks[:]
+
+                      pages = 0
+                      while active_grid_tokens and len(collected) < target_count and pages < 25:
+                          next_tok = active_grid_tokens.pop(0)
+                          if next_tok in visited_tokens:
+                              continue
+                          visited_tokens.add(next_tok)
+                          pages += 1
+                          r_next = requests.post(api_url, headers=headers, json={"context": ctx, "continuation": next_tok}, timeout=20)
+                          if r_next.status_code != 200:
                               break
-                      if not next_tok:
-                          break
-                      pages += 1
-                      r_next = requests.post(api_url, headers=headers, json={"context": ctx, "continuation": next_tok}, timeout=20)
-                      if r_next.status_code != 200:
-                          break
-                      more_vids, more_tokens = [], []
-                      walk_innertube_renderers(r_next.json(), more_vids, more_tokens)
-                      for v in more_vids:
-                          if v["id"] not in seen_vids:
-                              seen_vids.add(v["id"])
-                              v["channel"] = channel_title
-                              collected.append(v)
-                      for t in more_tokens:
-                          if t not in visited_tokens:
-                              tokens.append(t)
-              except Exception:
-                  pass
+                          more_vids, more_tokens, _ = [], [], []
+                          walk_innertube_items(r_next.json(), more_vids, more_tokens, _)
+                          for v in more_vids:
+                              if v["id"] not in seen_vids:
+                                  seen_vids.add(v["id"])
+                                  v["channel"] = channel_title
+                                  collected.append(v)
+                          for t in more_tokens:
+                              if t not in visited_tokens:
+                                  active_grid_tokens.append(t)
+                      print(f"[CHANNEL TAB PAGINATION] Total collected: {len(collected)} videos across {pages} pages", flush=True)
+              except Exception as e:
+                  print(f"[CHANNEL TAB Notice] {e}", flush=True)
+
               return collected
 
           clean_q = re.sub(r"[!?\u05be]+", " ", query).strip()
@@ -391,34 +435,24 @@ jobs:
 
           if channel_input:
               ch_base_url, uc_id, resolved_channel_name, clean_ch_term = resolve_channel_info(channel_input)
-              scan_depth = max(max_results + 120, 1200) if query else max(max_results + 80, 750)
+              scan_depth = max(max_results + 100, 600) if query else max(max_results + 60, 400)
               if uc_id:
-                  tab_p = "EgZ2aWRlb3PyBgQKAjIA" if sort_by == "date_desc" else ("EgZ2aWRlb3PyBgQKAjEA" if sort_by == "date_asc" else "EgZ2aWRlb3PyBgQKAjoA")
-                  raw.extend(fetch_innertube_channel_tab(uc_id, resolved_channel_name, tab_p, scan_depth))
+                  raw.extend(fetch_channel_videos_properly(uc_id, resolved_channel_name, sort_by, scan_depth))
               if query:
-                  raw.extend(fetch_innertube_search(f"{clean_ch_term} {clean_q}", "", 140))
+                  raw.extend(fetch_innertube_search(f"{clean_ch_term} {clean_q}", sp_code, 140))
                   if en_query:
-                      raw.extend(fetch_innertube_search(f"{clean_ch_term} {en_query}", "", 140))
-              if len(raw) < max_results and ch_base_url:
-                  raw.extend(fetch_yt_json(f"{ch_base_url}/videos", str(scan_depth)))
+                      raw.extend(fetch_innertube_search(f"{clean_ch_term} {en_query}", sp_code, 140))
+              if len(raw) < 20 and uc_id and sort_by in ("views", "likes", "quality_score"):
+                  raw.extend(fetch_yt_json(f"https://www.youtube.com/playlist?list=UULP{uc_id[2:]}", str(max_results + 50)))
           else:
-              search_jobs = [
-                  (query, ""),
-                  (query, sp_code),
-              ]
+              search_jobs = [(query, ""), (query, sp_code)]
               if clean_q and clean_q != query:
                   search_jobs.append((clean_q, ""))
               if en_query and en_query.lower() != query.lower():
-                  search_jobs.append((en_query, ""))
-                  search_jobs.append((en_query, sp_code))
-
+                  search_jobs.extend([(en_query, ""), (en_query, sp_code)])
               with ThreadPoolExecutor(max_workers=5) as ex:
                   for batch in ex.map(lambda j: fetch_innertube_search(j[0], j[1], max(180, max_results + 60)), search_jobs):
                       raw.extend(batch)
-
-              if len(raw) < 15:
-                  for q_cand in filter(None, [query, en_query]):
-                      raw.extend(fetch_yt_json(f"ytsearch80:{q_cand}", "80"))
 
           STOP_WORDS = {"איך", "מדריך", "הדרכה", "מקצועי", "של", "על", "עם", "כדי", "את", "אני", "the", "and", "for", "how", "to", "in", "of", "with"}
           topic_tokens = []
@@ -435,17 +469,6 @@ jobs:
               hay = f"{title_str} {channel_str}".lower()
               return any(tok in hay for tok in topic_tokens)
 
-          ch_tokens = [
-              t for t in re.split(r"[^\w\u0590-\u05FF]+", f"{channel_input} {resolved_channel_name}".lower())
-              if len(t) >= 2 and t not in ("https", "http", "www", "youtube", "com", "videos", "streams", "channel")
-          ]
-
-          def matches_channel(entry_ch: str) -> bool:
-              if not channel_input or not entry_ch:
-                  return True
-              hay = entry_ch.lower()
-              return any(tok in hay for tok in ch_tokens) if ch_tokens else True
-
           def build_candidates(require_topic_match: bool):
               seen_ids = set() if (channel_input or direct_vid) else set(exclude)
               out_c = []
@@ -454,8 +477,6 @@ jobs:
                   title = (e.get("title") or "").strip()
                   ch_name = (e.get("channel") or e.get("uploader") or resolved_channel_name or "").strip()
                   if not vid or vid in seen_ids or len(vid) != 11 or not title:
-                      continue
-                  if channel_input and not matches_channel(ch_name):
                       continue
                   if require_topic_match and query and not matches_topic(title, ch_name):
                       continue
@@ -479,12 +500,10 @@ jobs:
           if len(cands) < 10 and not channel_input:
               cands = build_candidates(require_topic_match=False)
 
-          cap_pool = max_results + 45 if high_quality_only else max_results + 25
+          cap_pool = max_results + 40 if high_quality_only else max_results + 25
           if sort_by in ("views", "likes", "quality_score"):
               cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
               selected_pool = cands[:cap_pool]
-          elif sort_by == "date_asc":
-              selected_pool = cands[:cap_pool] if channel_input else list(reversed(cands[-cap_pool:]))
           else:
               selected_pool = cands[:cap_pool]
 
@@ -527,8 +546,7 @@ jobs:
                       p_vr = {"context": {"client": {"clientName": "ANDROID_VR", "clientVersion": "1.60.19", "androidSdkVersion": 32, "hl": "en", "gl": "US"}}, "videoId": vid}
                       rv = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json=p_vr, timeout=10)
                       if rv.status_code == 200:
-                          vdata = rv.json()
-                          fmts = (vdata.get("streamingData") or {}).get("adaptiveFormats") or []
+                          fmts = (rv.json().get("streamingData") or {}).get("adaptiveFormats") or []
                           if fmts:
                               c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
                   except Exception:
@@ -554,7 +572,6 @@ jobs:
               with ThreadPoolExecutor(max_workers=24) as ex:
                   list(ex.map(fast_enrich_item, selected_pool))
 
-          # סינון "איכותיים מאוד בלבד" (Full HD 1080p/4K + ללא Shorts + יחס לייקים וצפיות גבוה)
           if high_quality_only:
               hq_strict = [
                   c for c in selected_pool
@@ -564,14 +581,6 @@ jobs:
               ]
               if len(hq_strict) >= 8:
                   selected_pool = hq_strict
-              else:
-                  hq_720 = [
-                      c for c in selected_pool
-                      if (c.get("duration") == 0 or c.get("duration", 0) >= 50)
-                      and (c.get("max_height", 0) >= 720 or c.get("max_height", 0) == 0)
-                  ]
-                  if hq_720:
-                      selected_pool = hq_720
 
           def sort_candidates(items_list, mode_sort):
               if mode_sort == "likes":
@@ -591,15 +600,8 @@ jobs:
               pool = selected_pool[:]
           pool = pool[:max_results]
 
-          # תרגום כותרות לעברית בענן + הוספת תגית רזולוציה ומזהה
           def batch_translate_titles_he(items_arr):
-              need_tr = []
-              for it in items_arr:
-                  t = it["title"]
-                  heb_c = sum(1 for ch in t if "\u0590" <= ch <= "\u05FF")
-                  lat_c = sum(1 for ch in t if "a" <= ch.lower() <= "z")
-                  if lat_c > 3 and heb_c < lat_c:
-                      need_tr.append(it)
+              need_tr = [it for it in items_arr if sum(1 for ch in it["title"] if "a" <= ch.lower() <= "z") > 3]
               for i in range(0, len(need_tr), 25):
                   chunk = need_tr[i:i + 25]
                   joined = "\n ||| \n".join(x["title"] for x in chunk)
