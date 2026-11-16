@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update -y && sudo apt-get install -y --no-install-recommends python3-cryptography
           python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
-      - name: Search Full Channel Archive & Sort All Results Accurately
+      - name: Search, Probe HD Quality & Translate Titles
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
@@ -54,7 +54,7 @@ jobs:
           req_id = os.environ.get("REQ_ID", "").strip()
           query = os.environ.get("QUERY", "").strip()
           channel_input = os.environ.get("CHANNEL", "").strip()
-          sort_by = os.environ.get("SORT_BY", "views").strip().lower() or "views"
+          sort_raw = os.environ.get("SORT_BY", "views").strip()
           max_results = max(10, min(500, int(os.environ.get("MAX_RESULTS", "60") or 60)))
           min_views = int(os.environ.get("MIN_VIEWS", "0") or 0)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
@@ -63,34 +63,45 @@ jobs:
           secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
           fallback_key_env = os.environ.get("COOKIE_KEY_FALLBACK", "").strip()
 
+          high_quality_only = False
+          translate_titles = False
+          sort_by = sort_raw.lower()
+          if "[hq_only]" in filter_prompt.lower() or "|hq" in sort_by or sort_by == "quality_score":
+              high_quality_only = True
+          if "[tr_he]" in filter_prompt.lower() or "|tr" in sort_by:
+              translate_titles = True
+          sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_by).strip() or "views"
+          filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE)\]", "", filter_prompt, flags=re.IGNORECASE).strip()
+
           cookie_file = Path("/tmp/rec_cookies.txt")
           cookie_dict = {}
           has_ck = False
           if cookies_enc:
-              raw_enc = base64.b64decode(cookies_enc)
-              for candidate_hex in (fallback_key_env, secret_key_env):
-                  if len(candidate_hex) == 64:
-                      try:
-                          plain_txt = AESGCM(bytes.fromhex(candidate_hex)).decrypt(raw_enc[:12], raw_enc[12:], None).decode("utf-8", errors="replace")
-                          if "youtube.com" in plain_txt or "# Netscape" in plain_txt:
-                              cookie_file.write_text(plain_txt, encoding="utf-8")
-                              has_ck = True
-                              for line in plain_txt.splitlines():
-                                  if not line or line.startswith("#"):
-                                      continue
-                                  parts = line.split("\t")
-                                  if len(parts) >= 7:
-                                      cookie_dict[parts[5]] = parts[6]
-                              break
-                      except Exception:
-                          pass
-
-          print(f"[STEP 1] Params: req_id={req_id}, channel='{channel_input}', query='{query}', sort_by={sort_by}, max={max_results}, has_ck={has_ck}", flush=True)
+              try:
+                  raw_enc = base64.b64decode(cookies_enc)
+                  for candidate_hex in (fallback_key_env, secret_key_env):
+                      if len(candidate_hex) == 64:
+                          try:
+                              plain_txt = AESGCM(bytes.fromhex(candidate_hex)).decrypt(raw_enc[:12], raw_enc[12:], None).decode("utf-8", errors="replace")
+                              if "youtube.com" in plain_txt or "# Netscape" in plain_txt:
+                                  cookie_file.write_text(plain_txt, encoding="utf-8")
+                                  has_ck = True
+                                  for line in plain_txt.splitlines():
+                                      if not line or line.startswith("#"):
+                                          continue
+                                      parts = line.split("\t")
+                                      if len(parts) >= 7:
+                                          cookie_dict[parts[5]] = parts[6]
+                                  break
+                          except Exception:
+                              pass
+              except Exception:
+                  pass
 
           UA_STR = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
           def build_innertube_headers(referer="https://www.youtube.com/"):
-              hdrs = {
+              return {
                   "Content-Type": "application/json",
                   "User-Agent": UA_STR,
                   "Origin": "https://www.youtube.com",
@@ -98,12 +109,6 @@ jobs:
                   "X-YouTube-Client-Name": "1",
                   "X-YouTube-Client-Version": "2.20261101.00.00",
               }
-              sapisid = cookie_dict.get("SAPISID") or cookie_dict.get("__Secure-3PAPISID") or cookie_dict.get("__Secure-1PAPISID")
-              if sapisid:
-                  ts = str(int(time.time()))
-                  digest = hashlib.sha1(f"{ts} {sapisid} https://www.youtube.com".encode("utf-8")).hexdigest()
-                  hdrs["Authorization"] = f"SAPISIDHASH {ts}_{digest}"
-              return hdrs
 
           def parse_views_text(v_str) -> int:
               if isinstance(v_str, (int, float)):
@@ -116,91 +121,18 @@ jobs:
                   digits = re.sub(r"\D", "", s)
                   return int(digits) if digits else 0
               num = float(m.group(1))
-              suf = m.group(2) or ""
-              mult = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suf, 1)
+              mult = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(m.group(2) or "", 1)
               return int(num * mult)
 
-          def fetch_yt_json(target_url_or_query, limit_str):
-              cmd = [
-                  "python3", "-m", "yt_dlp",
-                  "--force-ipv4", "--dump-json", "--flat-playlist",
-                  "--playlist-end", str(limit_str),
-                  "--ignore-errors", "--no-warnings",
-                  "--js-runtimes", "deno",
-              ]
-              if has_ck:
-                  cmd += ["--cookies", str(cookie_file)]
-              cmd.append(target_url_or_query)
-              r = subprocess.run(cmd, capture_output=True, text=True)
-              items = []
-              for line in r.stdout.splitlines():
-                  try:
-                      d = json.loads(line)
-                      if d.get("id"):
-                          items.append(d)
-                  except Exception:
-                      pass
-              return items
-
-          def resolve_channel_info(ch_raw: str):
-              ch = ch_raw.strip()
-              if not ch:
-                  return "", "", "", ""
-              base = ""
-              name = ch
-              if ch.startswith("http"):
-                  base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", ch.rstrip("/"))
-                  m_handle = re.search(r"(@[a-zA-Z0-9_.-]+)", base)
-                  name = m_handle.group(1) if m_handle else base.split("/")[-1]
-              elif ch.startswith("@"):
-                  handle = ch.split("/")[0]
-                  base = f"https://www.youtube.com/{handle}"
-                  name = handle
-              else:
-                  enc = urllib.parse.quote_plus(ch)
-                  ch_search_url = f"https://www.youtube.com/results?search_query={enc}&sp=EgIQAg%253D%253D"
-                  found_channels = fetch_yt_json(ch_search_url, "8")
-                  ch_low = ch.lower()
-                  for entry in found_channels:
-                      c_url = entry.get("url") or entry.get("channel_url") or ""
-                      c_title = (entry.get("channel") or entry.get("title") or entry.get("uploader") or "").strip()
-                      if c_url and ("/@" in c_url or "/channel/" in c_url or "/c/" in c_url):
-                          if ch_low in c_title.lower() or not base:
-                              base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", c_url.rstrip("/"))
-                              if c_title:
-                                  name = c_title
-                              if ch_low in c_title.lower():
-                                  break
-                  if not base:
-                      vids = fetch_yt_json(f"ytsearch15:{ch}", "15")
-                      for v in vids:
-                          v_ch = (v.get("channel") or v.get("uploader") or "").strip()
-                          u_url = v.get("uploader_url") or v.get("channel_url") or ""
-                          if u_url and (ch_low in v_ch.lower() or not base):
-                              base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", u_url.rstrip("/"))
-                              if v_ch:
-                                  name = v_ch
-                              if ch_low in v_ch.lower():
-                                  break
-
-              uc_id = ""
-              m_uc = re.search(r"/channel/(UC[a-zA-Z0-9_-]{22})", base)
-              if m_uc:
-                  uc_id = m_uc.group(1)
-              elif base:
-                  try:
-                      resp = requests.get(f"{base}/videos", headers={"User-Agent": UA_STR}, cookies=cookie_dict or None, timeout=15)
-                      if resp.status_code == 200:
-                          m_ext = re.search(r'"(?:externalId|browseId)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', resp.text)
-                          if m_ext:
-                              uc_id = m_ext.group(1)
-                          m_title = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
-                          if m_title and m_title.group(1).strip():
-                              name = m_title.group(1).strip()
-                  except Exception:
-                      pass
-
-              return base, uc_id, name, name
+          def extract_11char_id(s: str) -> str:
+              s = str(s or "").strip()
+              if re.match(r"^[a-zA-Z0-9_-]{11}$", s):
+                  return s
+              m_br = re.search(r"\[([a-zA-Z0-9_-]{11})\]", s)
+              if m_br:
+                  return m_br.group(1)
+              m_u = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/)([a-zA-Z0-9_-]{11})", s)
+              return m_u.group(1) if m_u else ""
 
           def walk_innertube_renderers(obj, out_videos, out_tokens):
               if isinstance(obj, dict):
@@ -216,12 +148,14 @@ jobs:
                           dur_txt = (vr.get("lengthText") or {}).get("simpleText") or ""
                           dur_sec = 0
                           if ":" in dur_txt:
-                              parts = [int(x) for x in dur_txt.split(":") if x.isdigit()]
-                              for p in parts:
+                              for p in [int(x) for x in dur_txt.split(":") if x.isdigit()]:
                                   dur_sec = dur_sec * 60 + p
+                          ch_runs = ((vr.get("ownerText") or vr.get("longBylineText") or vr.get("shortBylineText") or {}).get("runs") or [])
+                          ch_name = "".join(r.get("text", "") for r in ch_runs).strip()
                           out_videos.append({
                               "id": vid,
                               "title": title.strip(),
+                              "channel": ch_name,
                               "view_count": parse_views_text(vc_txt),
                               "duration": dur_sec,
                           })
@@ -235,32 +169,178 @@ jobs:
                   for item in obj:
                       walk_innertube_renderers(item, out_videos, out_tokens)
 
+          def fetch_innertube_search(q_str: str, sp_param: str = "", target_count: int = 160):
+              if not q_str:
+                  return []
+              api_url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false"
+              headers = build_innertube_headers()
+              ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
+              payload = {"context": ctx, "query": q_str}
+              if sp_param:
+                  payload["params"] = sp_param
+              collected, seen_vids, visited_tokens = [], set(), set()
+              try:
+                  r = requests.post(api_url, headers=headers, json=payload, timeout=15)
+                  if r.status_code != 200:
+                      return []
+                  vids, tokens = [], []
+                  walk_innertube_renderers(r.json(), vids, tokens)
+                  for v in vids:
+                      if v["id"] not in seen_vids:
+                          seen_vids.add(v["id"])
+                          collected.append(v)
+                  pages = 0
+                  while tokens and len(collected) < target_count and pages < 7:
+                      next_tok = None
+                      while tokens:
+                          cand_tok = tokens.pop(0)
+                          if cand_tok not in visited_tokens:
+                              next_tok = cand_tok
+                              visited_tokens.add(cand_tok)
+                              break
+                      if not next_tok:
+                          break
+                      pages += 1
+                      r_next = requests.post(api_url, headers=headers, json={"context": ctx, "continuation": next_tok}, timeout=15)
+                      if r_next.status_code != 200:
+                          break
+                      more_vids, more_tokens = [], []
+                      walk_innertube_renderers(r_next.json(), more_vids, more_tokens)
+                      for v in more_vids:
+                          if v["id"] not in seen_vids:
+                              seen_vids.add(v["id"])
+                              collected.append(v)
+                      for t in more_tokens:
+                          if t not in visited_tokens:
+                              tokens.append(t)
+              except Exception:
+                  pass
+              return collected
+
+          def fetch_yt_json(target_url_or_query, limit_str):
+              cmd = [
+                  "python3", "-m", "yt_dlp",
+                  "--force-ipv4", "--dump-json", "--flat-playlist",
+                  "--playlist-end", str(limit_str),
+                  "--ignore-errors", "--no-warnings", "--js-runtimes", "deno",
+                  target_url_or_query
+              ]
+              r = subprocess.run(cmd, capture_output=True, text=True)
+              items = []
+              for line in r.stdout.splitlines():
+                  try:
+                      d = json.loads(line)
+                      if d.get("id"):
+                          items.append(d)
+                  except Exception:
+                      pass
+              return items
+
+          # תמיכה בהזנת מזהה 11 תווים בלבד בשדה הנושא או הערוץ
+          direct_vid = extract_11char_id(channel_input) or extract_11char_id(query)
+          seed_video = None
+          if direct_vid:
+              try:
+                  pr = requests.post(
+                      "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                      headers=build_innertube_headers(),
+                      json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": direct_vid},
+                      timeout=12
+                  )
+                  vd = (pr.json().get("videoDetails") or {}) if pr.status_code == 200 else {}
+                  if vd.get("videoId"):
+                      seed_video = {
+                          "id": vd["videoId"],
+                          "title": vd.get("title") or direct_vid,
+                          "channel": vd.get("author") or "",
+                          "view_count": int(vd.get("viewCount") or 0),
+                          "duration": int(vd.get("lengthSeconds") or 0),
+                      }
+                      if not channel_input and vd.get("channelId"):
+                          channel_input = f"https://www.youtube.com/channel/{vd['channelId']}"
+                      if query == direct_vid or f"[{direct_vid}]" in query:
+                          query = ""
+              except Exception:
+                  pass
+
+          def resolve_channel_info(ch_raw: str):
+              ch = ch_raw.strip()
+              if not ch:
+                  return "", "", "", ""
+              base, name = "", ch
+              if ch.startswith("http"):
+                  base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", ch.rstrip("/"))
+                  m_h = re.search(r"(@[a-zA-Z0-9_.-]+)", base)
+                  name = m_h.group(1) if m_h else base.split("/")[-1]
+              elif ch.startswith("@"):
+                  handle = ch.split("/")[0]
+                  base, name = f"https://www.youtube.com/{handle}", handle
+              else:
+                  enc = urllib.parse.quote_plus(ch)
+                  found = fetch_yt_json(f"https://www.youtube.com/results?search_query={enc}&sp=EgIQAg%253D%253D", "8")
+                  ch_low = ch.lower()
+                  for entry in found:
+                      c_url = entry.get("url") or entry.get("channel_url") or ""
+                      c_title = (entry.get("channel") or entry.get("title") or entry.get("uploader") or "").strip()
+                      if c_url and ("/@" in c_url or "/channel/" in c_url or "/c/" in c_url):
+                          if ch_low in c_title.lower() or not base:
+                              base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", c_url.rstrip("/"))
+                              if c_title:
+                                  name = c_title
+                              if ch_low in c_title.lower():
+                                  break
+                  if not base:
+                      vids = fetch_innertube_search(ch, "", 10)
+                      if vids and vids[0].get("id"):
+                          try:
+                              pr = requests.post(
+                                  "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                                  headers=build_innertube_headers(),
+                                  json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": vids[0]["id"]},
+                                  timeout=10
+                              )
+                              vd = pr.json().get("videoDetails") or {}
+                              if vd.get("channelId"):
+                                  base = f"https://www.youtube.com/channel/{vd['channelId']}"
+                                  name = vd.get("author") or name
+                          except Exception:
+                              pass
+              uc_id = ""
+              m_uc = re.search(r"/channel/(UC[a-zA-Z0-9_-]{22})", base)
+              if m_uc:
+                  uc_id = m_uc.group(1)
+              elif base:
+                  try:
+                      resp = requests.get(f"{base}/videos", headers={"User-Agent": UA_STR}, timeout=15)
+                      if resp.status_code == 200:
+                          m_ext = re.search(r'"(?:externalId|browseId)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', resp.text)
+                          if m_ext:
+                              uc_id = m_ext.group(1)
+                          m_t = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
+                          if m_t and m_t.group(1).strip():
+                              name = m_t.group(1).strip()
+                  except Exception:
+                      pass
+              return base, uc_id, name, name
+
           def fetch_innertube_channel_tab(uc_channel_id: str, channel_title: str, browse_params: str, target_count: int = 1200):
-              """פנייה ישירה ל-Innertube Browse API של הערוץ (Latest / Popular / Oldest)"""
               if not uc_channel_id:
                   return []
               api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
               headers = build_innertube_headers(f"https://www.youtube.com/channel/{uc_channel_id}/videos")
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
-
-              collected = []
-              seen_vids = set()
-              visited_tokens = set()
-
+              collected, seen_vids, visited_tokens = [], set(), set()
               try:
-                  payload = {"context": ctx, "browseId": uc_channel_id, "params": browse_params}
-                  r = requests.post(api_url, headers=headers, cookies=cookie_dict or None, json=payload, timeout=20)
+                  r = requests.post(api_url, headers=headers, json={"context": ctx, "browseId": uc_channel_id, "params": browse_params}, timeout=20)
                   if r.status_code != 200:
                       return []
-                  vids = []
-                  tokens = []
+                  vids, tokens = [], []
                   walk_innertube_renderers(r.json(), vids, tokens)
                   for v in vids:
                       if v["id"] not in seen_vids:
                           seen_vids.add(v["id"])
                           v["channel"] = channel_title
                           collected.append(v)
-
                   pages = 0
                   while tokens and len(collected) < target_count and pages < 45:
                       next_tok = None
@@ -273,11 +353,10 @@ jobs:
                       if not next_tok:
                           break
                       pages += 1
-                      r_next = requests.post(api_url, headers=headers, cookies=cookie_dict or None, json={"context": ctx, "continuation": next_tok}, timeout=20)
+                      r_next = requests.post(api_url, headers=headers, json={"context": ctx, "continuation": next_tok}, timeout=20)
                       if r_next.status_code != 200:
                           break
-                      more_vids = []
-                      more_tokens = []
+                      more_vids, more_tokens = [], []
                       walk_innertube_renderers(r_next.json(), more_vids, more_tokens)
                       for v in more_vids:
                           if v["id"] not in seen_vids:
@@ -287,206 +366,142 @@ jobs:
                       for t in more_tokens:
                           if t not in visited_tokens:
                               tokens.append(t)
-
-                  print(f"[INNERTUBE TAB {browse_params}] Fetched {len(collected)} videos across {pages+1} pages!", flush=True)
-              except Exception as e:
-                  print(f"[INNERTUBE TAB] Notice: {e}", flush=True)
-
+              except Exception:
+                  pass
               return collected
 
+          clean_q = re.sub(r"[!?\u05be]+", " ", query).strip()
           en_query = ""
-          if query and any("\u0590" <= ch <= "\u05FF" for ch in query):
+          if clean_q and any("\u0590" <= ch <= "\u05FF" for ch in clean_q):
               try:
-                  tr_url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=iw&tl=en&dt=t&q=" + urllib.parse.quote(query)
-                  tr_res = requests.get(tr_url, timeout=10)
-                  if tr_res.status_code == 200:
-                      en_query = "".join(part[0] for part in tr_res.json()[0] if part and part[0]).strip()
+                  tr_u = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=iw&tl=en&dt=t&q=" + urllib.parse.quote(clean_q)
+                  tr_r = requests.get(tr_u, timeout=10)
+                  if tr_r.status_code == 200:
+                      en_query = "".join(p[0] for p in tr_r.json()[0] if p and p[0]).strip()
               except Exception:
                   pass
 
-          def yt_search_sorted_url(q_text, mode_sort):
-              enc = urllib.parse.quote_plus(q_text)
-              sp_map = {
-                  "views": "CAMSAhAB",
-                  "date_desc": "CAI%253D",
-                  "likes": "CAE%253D",
-              }
-              sp = sp_map.get(mode_sort, "CAMSAhAB")
-              return f"https://www.youtube.com/results?search_query={enc}&sp={sp}"
+          sp_map = {"views": "CAMSAhAB", "date_desc": "CAI%3D", "likes": "CAE%3D"}
+          sp_code = sp_map.get(sort_by, "CAMSAhAB")
 
           raw = []
+          if seed_video:
+              raw.append(seed_video)
           resolved_channel_name = channel_input
 
           if channel_input:
               ch_base_url, uc_id, resolved_channel_name, clean_ch_term = resolve_channel_info(channel_input)
-              print(f"[STEP 2] Resolved channel base='{ch_base_url}', uc_id='{uc_id}', name='{resolved_channel_name}', sort='{sort_by}'", flush=True)
-
-              # בחירת כרטיסיית המיון המקורית של הערוץ ב-YouTube:
-              # Popular = EgZ2aWRlb3PyBgQKAjoA | Latest = EgZ2aWRlb3PyBgQKAjIA | Oldest = EgZ2aWRlb3PyBgQKAjEA
               scan_depth = max(max_results + 120, 1200) if query else max(max_results + 80, 750)
               if uc_id:
-                  if sort_by == "date_desc":
-                      raw.extend(fetch_innertube_channel_tab(uc_id, resolved_channel_name, "EgZ2aWRlb3PyBgQKAjIA", scan_depth))
-                  elif sort_by == "date_asc":
-                      raw.extend(fetch_innertube_channel_tab(uc_id, resolved_channel_name, "EgZ2aWRlb3PyBgQKAjEA", scan_depth))
-                  else:
-                      raw.extend(fetch_innertube_channel_tab(uc_id, resolved_channel_name, "EgZ2aWRlb3PyBgQKAjoA", scan_depth))
-
-              # גיבוי והשלמה דרך yt-dlp
-              tasks = []
-              if ch_base_url:
-                  if sort_by == "date_desc":
-                      tasks.append((f"{ch_base_url}/videos", str(scan_depth)))
-                  elif sort_by == "date_asc":
-                      tasks.append((f"{ch_base_url}/videos", "4000"))
-                  else:
-                      tasks.append((f"{ch_base_url}/videos?view=0&sort=p&flow=grid", str(scan_depth)))
-                      if len(raw) < max_results:
-                          tasks.append((f"{ch_base_url}/videos", "3500"))
-
+                  tab_p = "EgZ2aWRlb3PyBgQKAjIA" if sort_by == "date_desc" else ("EgZ2aWRlb3PyBgQKAjEA" if sort_by == "date_asc" else "EgZ2aWRlb3PyBgQKAjoA")
+                  raw.extend(fetch_innertube_channel_tab(uc_id, resolved_channel_name, tab_p, scan_depth))
               if query:
-                  tasks.append((yt_search_sorted_url(f"{clean_ch_term} {query}", sort_by), "180"))
-                  if en_query and en_query.lower() != query.lower():
-                      tasks.append((yt_search_sorted_url(f"{clean_ch_term} {en_query}", sort_by), "140"))
-
-              if tasks:
-                  with ThreadPoolExecutor(max_workers=3) as ex:
-                      for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), tasks):
-                          raw.extend(batch)
+                  raw.extend(fetch_innertube_search(f"{clean_ch_term} {clean_q}", "", 140))
+                  if en_query:
+                      raw.extend(fetch_innertube_search(f"{clean_ch_term} {en_query}", "", 140))
+              if len(raw) < max_results and ch_base_url:
+                  raw.extend(fetch_yt_json(f"{ch_base_url}/videos", str(scan_depth)))
           else:
-              search_targets = [
-                  (yt_search_sorted_url(query, sort_by), str(max(250, max_results + 50))),
-                  (f"ytsearch180:{query}", "180"),
+              search_jobs = [
+                  (query, ""),
+                  (query, sp_code),
               ]
+              if clean_q and clean_q != query:
+                  search_jobs.append((clean_q, ""))
               if en_query and en_query.lower() != query.lower():
-                  search_targets.extend([
-                      (yt_search_sorted_url(en_query, sort_by), str(max(250, max_results + 50))),
-                      (f"ytsearch180:{en_query}", "180"),
-                  ])
+                  search_jobs.append((en_query, ""))
+                  search_jobs.append((en_query, sp_code))
 
-              with ThreadPoolExecutor(max_workers=4) as ex:
-                  for batch in ex.map(lambda t: fetch_yt_json(t[0], t[1]), search_targets):
+              with ThreadPoolExecutor(max_workers=5) as ex:
+                  for batch in ex.map(lambda j: fetch_innertube_search(j[0], j[1], max(180, max_results + 60)), search_jobs):
                       raw.extend(batch)
 
-          print(f"[STEP 3] Total raw entries combined: {len(raw)}", flush=True)
+              if len(raw) < 15:
+                  for q_cand in filter(None, [query, en_query]):
+                      raw.extend(fetch_yt_json(f"ytsearch80:{q_cand}", "80"))
 
-          STOP_WORDS = {"איך", "מדריך", "הדרכה", "מקצועי", "של", "על", "עם", "the", "and", "for", "how", "to", "in", "of", "with"}
+          STOP_WORDS = {"איך", "מדריך", "הדרכה", "מקצועי", "של", "על", "עם", "כדי", "את", "אני", "the", "and", "for", "how", "to", "in", "of", "with"}
           topic_tokens = []
-          for src_q in (query, en_query):
+          for src_q in (clean_q, en_query):
               if not src_q:
                   continue
               for tok in re.split(r"[^\w\u0590-\u05FF]+", src_q.lower()):
                   if len(tok) >= 2 and tok not in STOP_WORDS:
                       topic_tokens.append(tok)
 
-          def matches_topic_strictly(title_str: str, channel_str: str) -> bool:
+          def matches_topic(title_str: str, channel_str: str) -> bool:
               if not topic_tokens:
                   return True
-              haystack = f"{title_str} {channel_str}".lower()
-              return any(tok in haystack for tok in topic_tokens)
+              hay = f"{title_str} {channel_str}".lower()
+              return any(tok in hay for tok in topic_tokens)
 
           ch_tokens = [
               t for t in re.split(r"[^\w\u0590-\u05FF]+", f"{channel_input} {resolved_channel_name}".lower())
-              if len(t) >= 2 and t not in ("https", "http", "www", "youtube", "com", "videos", "streams")
+              if len(t) >= 2 and t not in ("https", "http", "www", "youtube", "com", "videos", "streams", "channel")
           ]
 
-          def matches_channel_strictly(entry_channel: str, entry_uploader_url: str) -> bool:
-              if not channel_input:
+          def matches_channel(entry_ch: str) -> bool:
+              if not channel_input or not entry_ch:
                   return True
-              hay = f"{entry_channel} {entry_uploader_url}".lower()
-              if not hay.strip():
-                  return True
-              return any(tok in hay for tok in ch_tokens)
+              hay = entry_ch.lower()
+              return any(tok in hay for tok in ch_tokens) if ch_tokens else True
 
-          seen = set() if channel_input else set(exclude)
-          cands = []
-          for idx_pos, e in enumerate(raw):
-              vid = e.get("id")
-              title = (e.get("title") or "").strip()
-              channel = (e.get("channel") or e.get("uploader") or resolved_channel_name or "").strip()
-              up_url = (e.get("uploader_url") or e.get("channel_url") or "").strip()
-              if not vid or vid in seen or len(vid) != 11 or not title:
-                  continue
-              seen.add(vid)
-              if not matches_channel_strictly(channel, up_url):
-                  continue
-              if query and not matches_topic_strictly(title, channel):
-                  continue
-              views = parse_views_text(e.get("view_count") or e.get("view_count_text") or 0)
-              likes = int(e.get("like_count") or 0)
-              up_date = str(e.get("upload_date") or "").strip().replace("-", "")
-              cands.append({
-                  "id": vid,
-                  "title": title,
-                  "url": f"https://www.youtube.com/watch?v={vid}",
-                  "channel": channel or resolved_channel_name,
-                  "views": views,
-                  "likes": likes,
-                  "upload_date": up_date,
-                  "orig_pos": idx_pos,
-                  "duration": int(e.get("duration") or 0),
-                  "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
-              })
+          def build_candidates(require_topic_match: bool):
+              seen_ids = set() if (channel_input or direct_vid) else set(exclude)
+              out_c = []
+              for idx_pos, e in enumerate(raw):
+                  vid = e.get("id")
+                  title = (e.get("title") or "").strip()
+                  ch_name = (e.get("channel") or e.get("uploader") or resolved_channel_name or "").strip()
+                  if not vid or vid in seen_ids or len(vid) != 11 or not title:
+                      continue
+                  if channel_input and not matches_channel(ch_name):
+                      continue
+                  if require_topic_match and query and not matches_topic(title, ch_name):
+                      continue
+                  seen_ids.add(vid)
+                  out_c.append({
+                      "id": vid,
+                      "title": title,
+                      "url": f"https://www.youtube.com/watch?v={vid}",
+                      "channel": ch_name or resolved_channel_name,
+                      "views": parse_views_text(e.get("view_count") or e.get("view_count_text") or 0),
+                      "likes": int(e.get("like_count") or 0),
+                      "upload_date": str(e.get("upload_date") or "").strip().replace("-", ""),
+                      "max_height": 0,
+                      "orig_pos": idx_pos,
+                      "duration": int(e.get("duration") or 0),
+                      "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+                  })
+              return out_c
 
-          print(f"[STEP 4] Unique matching candidates: {len(cands)}", flush=True)
+          cands = build_candidates(require_topic_match=True)
+          if len(cands) < 10 and not channel_input:
+              cands = build_candidates(require_topic_match=False)
 
-          # בחירת קבוצת המועמדים להשלמת נתונים (ללא תקרת 220! כל הפריטים עד cap_pool מקבלים תאריך, צפיות ולייקים מלאים)
-          cap_pool = max_results + 25
-          if sort_by in ("views", "likes"):
+          cap_pool = max_results + 45 if high_quality_only else max_results + 25
+          if sort_by in ("views", "likes", "quality_score"):
               cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
               selected_pool = cands[:cap_pool]
           elif sort_by == "date_asc":
-              # אם הגיעו מכרטיסיית Oldest של Innertube הם כבר ממוינים מהישן לחדש בראש הרשימה; אחרת מסוף רשימת yt-dlp
-              if uc_id and any(c["orig_pos"] < 50 for c in cands[:50]):
-                  selected_pool = cands[:cap_pool]
-              else:
-                  selected_pool = list(reversed(cands[-cap_pool:]))
+              selected_pool = cands[:cap_pool] if channel_input else list(reversed(cands[-cap_pool:]))
           else:
               selected_pool = cands[:cap_pool]
 
-          # מנוע העשרת נתונים מהיר ב-Innertube API (ללא תת-תהליכי yt-dlp איטיים, וללא שום חיתוך ב-220!)
           thread_local = threading.local()
           def get_session():
               if not hasattr(thread_local, "sess"):
                   s = requests.Session()
                   s.headers.update(build_innertube_headers())
-                  if cookie_dict:
-                      s.cookies.update(cookie_dict)
                   thread_local.sess = s
               return thread_local.sess
-
-          def extract_likes_recursive(obj) -> int:
-              if isinstance(obj, dict):
-                  for k in ("likeCount", "defaultText", "accessibilityText"):
-                      if k == "likeCount" and isinstance(obj.get(k), int):
-                          return int(obj[k])
-                  toggled = obj.get("toggledButton") or obj.get("defaultButton")
-                  if isinstance(toggled, dict):
-                      res = extract_likes_recursive(toggled)
-                      if res > 0:
-                          return res
-                  for v in obj.values():
-                      if isinstance(v, (dict, list)):
-                          res = extract_likes_recursive(v)
-                          if res > 0:
-                              return res
-              elif isinstance(obj, list):
-                  for it in obj:
-                      res = extract_likes_recursive(it)
-                      if res > 0:
-                          return res
-              return 0
 
           def fast_enrich_item(c):
               sess = get_session()
               vid = c["id"]
               try:
-                  # 1. שליפת תאריך פרסום מדויק (YYYY-MM-DD) ומספר צפיות מדויק מ-/youtubei/v1/player
-                  p_payload = {
-                      "context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}},
-                      "videoId": vid
-                  }
-                  r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json=p_payload, timeout=12)
+                  p_web = {"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}
+                  r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json=p_web, timeout=10)
                   if r.status_code == 200:
                       pdata = r.json()
                       vd = pdata.get("videoDetails") or {}
@@ -501,38 +516,68 @@ jobs:
                       m_dt = re.match(r"^(\d{4})-(\d{2})-(\d{2})", pub_date)
                       if m_dt:
                           c["upload_date"] = f"{m_dt.group(1)}{m_dt.group(2)}{m_dt.group(3)}"
+                      fmts = (pdata.get("streamingData") or {}).get("adaptiveFormats") or []
+                      if fmts:
+                          c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
               except Exception:
                   pass
 
-              # 2. שליפת לייקים מדויקת אם נדרש מיון לפי לייקים או עבור התוצאות המובילות
-              if sort_by == "likes" or c["likes"] == 0:
+              if c["max_height"] == 0 and (high_quality_only or len(selected_pool) <= 150):
                   try:
-                      n_payload = {
-                          "context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}},
-                          "videoId": vid
-                      }
-                      rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json=n_payload, timeout=12)
+                      p_vr = {"context": {"client": {"clientName": "ANDROID_VR", "clientVersion": "1.60.19", "androidSdkVersion": 32, "hl": "en", "gl": "US"}}, "videoId": vid}
+                      rv = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json=p_vr, timeout=10)
+                      if rv.status_code == 200:
+                          vdata = rv.json()
+                          fmts = (vdata.get("streamingData") or {}).get("adaptiveFormats") or []
+                          if fmts:
+                              c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
+                  except Exception:
+                      pass
+
+              if sort_by in ("likes", "quality_score") or high_quality_only or c["likes"] == 0:
+                  try:
+                      n_payload = {"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}
+                      rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json=n_payload, timeout=10)
                       if rn.status_code == 200:
                           raw_txt = rn.text
                           m_lk = re.search(r'"likeCount"\s*:\s*(\d+)', raw_txt)
                           if m_lk:
                               c["likes"] = int(m_lk.group(1))
                           else:
-                              m_fact = re.search(r'"factoidRenderer"\s*:\s*\{\s*"value"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"\s*\}\s*,\s*"label"\s*:\s*\{\s*"simpleText"\s*:\s*"Likes"', raw_txt)
-                              if m_fact:
-                                  c["likes"] = parse_views_text(m_fact.group(1))
+                              m_f = re.search(r'"factoidRenderer"\s*:\s*\{\s*"value"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"\s*\}\s*,\s*"label"\s*:\s*\{\s*"simpleText"\s*:\s*"Likes"', raw_txt)
+                              if m_f:
+                                  c["likes"] = parse_views_text(m_f.group(1))
                   except Exception:
                       pass
 
-          print(f"[STEP 4.5] Enriching ALL {len(selected_pool)} items via fast Innertube API (no 220 cap)...", flush=True)
           if selected_pool:
               with ThreadPoolExecutor(max_workers=24) as ex:
                   list(ex.map(fast_enrich_item, selected_pool))
 
-          # מיון קשיח ומאומת לאחר שכל הפריטים קיבלו תאריך, צפיות ולייקים מלאים!
+          # סינון "איכותיים מאוד בלבד" (Full HD 1080p/4K + ללא Shorts + יחס לייקים וצפיות גבוה)
+          if high_quality_only:
+              hq_strict = [
+                  c for c in selected_pool
+                  if (c.get("duration") == 0 or c.get("duration", 0) >= 60)
+                  and "#shorts" not in c["title"].lower()
+                  and (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)
+              ]
+              if len(hq_strict) >= 8:
+                  selected_pool = hq_strict
+              else:
+                  hq_720 = [
+                      c for c in selected_pool
+                      if (c.get("duration") == 0 or c.get("duration", 0) >= 50)
+                      and (c.get("max_height", 0) >= 720 or c.get("max_height", 0) == 0)
+                  ]
+                  if hq_720:
+                      selected_pool = hq_720
+
           def sort_candidates(items_list, mode_sort):
               if mode_sort == "likes":
                   items_list.sort(key=lambda x: (int(x.get("likes") or 0), int(x.get("views") or 0)), reverse=True)
+              elif mode_sort == "quality_score":
+                  items_list.sort(key=lambda x: (int(x.get("max_height") or 0) >= 1080, int(x.get("likes") or 0) * 25 + int(x.get("views") or 0)), reverse=True)
               elif mode_sort == "date_desc":
                   items_list.sort(key=lambda x: (str(x.get("upload_date") or "00000000"), -int(x.get("orig_pos") or 0)), reverse=True)
               elif mode_sort == "date_asc":
@@ -541,85 +586,57 @@ jobs:
                   items_list.sort(key=lambda x: (int(x.get("views") or 0), int(x.get("likes") or 0)), reverse=True)
 
           sort_candidates(selected_pool, sort_by)
-
           pool = [c for c in selected_pool if c["views"] >= min_views]
-          if len(pool) < min(max_results, 25):
+          if len(pool) < min(max_results, 15):
               pool = selected_pool[:]
-          pool = pool[:max_results + 20]
+          pool = pool[:max_results]
 
-          def call_ai_batch(batch_items):
-              if not filter_prompt:
-                  return batch_items
-              compact = [{"id": c["id"], "title": c["title"], "channel": c["channel"]} for c in batch_items]
-              sys_msg = (
-                  "אתה מסנן תוכן קפדני עבור ציבור שומר תורה ומצוות. "
-                  "החזר אך ורק את המזהים (id) של סרטונים שעומדים בהנחיית הסינון והנקיות של המשתמש. "
-                  "החזר אך ורק JSON תקין בפורמט: {\"approved_ids\": [\"id1\", \"id2\"]}"
-              )
-              usr_msg = (
-                  f"ערוץ: {resolved_channel_name or 'כללי'} | נושא: {query or 'כללי'}\n"
-                  f"הנחיית סינון: {filter_prompt}\n\n"
-                  f"רשימת מועמדים:\n{json.dumps(compact, ensure_ascii=False)}"
-              )
-
-              gh_tok = os.environ.get("GH_TOKEN", "").strip()
-              gem_key = os.environ.get("GEMINI_API_KEY", "").strip()
-              endpoints = []
-              if gh_tok:
-                  endpoints.append((
-                      "https://models.inference.ai.azure.com/chat/completions",
-                      {"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"},
-                      {"model": "gpt-4o-mini", "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": usr_msg}], "temperature": 0.0}
-                  ))
-              if gem_key:
-                  endpoints.append((
-                      f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gem_key}",
-                      {"Content-Type": "application/json"},
-                      {"contents": [{"parts": [{"text": sys_msg + "\n\n" + usr_msg}]}]}
-                  ))
-
-              for url, headers, payload in endpoints:
+          # תרגום כותרות לעברית בענן + הוספת תגית רזולוציה ומזהה
+          def batch_translate_titles_he(items_arr):
+              need_tr = []
+              for it in items_arr:
+                  t = it["title"]
+                  heb_c = sum(1 for ch in t if "\u0590" <= ch <= "\u05FF")
+                  lat_c = sum(1 for ch in t if "a" <= ch.lower() <= "z")
+                  if lat_c > 3 and heb_c < lat_c:
+                      need_tr.append(it)
+              for i in range(0, len(need_tr), 25):
+                  chunk = need_tr[i:i + 25]
+                  joined = "\n ||| \n".join(x["title"] for x in chunk)
                   try:
-                      resp = requests.post(url, headers=headers, json=payload, timeout=30)
-                      if resp.status_code == 200:
-                          data = resp.json()
-                          text = ""
-                          if "choices" in data and data["choices"]:
-                              text = data["choices"][0].get("message", {}).get("content", "")
-                          elif "candidates" in data and data["candidates"]:
-                              text = data["candidates"][0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                          clean_txt = re.sub(r"```(?:json)?|```", "", text).strip()
-                          m = re.search(r"\{.*\"approved_ids\"\s*:\s*\[.*?\].*\}", clean_txt, re.DOTALL)
-                          if m:
-                              parsed = json.loads(m.group(0))
-                              approved = set(parsed.get("approved_ids") or [])
-                              if approved:
-                                  return [c for c in batch_items if c["id"] in approved]
+                      u = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=iw&dt=t&q=" + urllib.parse.quote(joined)
+                      r = requests.get(u, timeout=12)
+                      if r.status_code == 200:
+                          tr_full = "".join(seg[0] for seg in (r.json()[0] or []) if seg and seg[0]).strip()
+                          parts = [p.strip() for p in re.split(r"\|\|\|", tr_full)]
+                          if len(parts) == len(chunk):
+                              for obj_it, tr_t in zip(chunk, parts):
+                                  if tr_t:
+                                      obj_it["title_he"] = tr_t
                   except Exception:
                       pass
-              return batch_items
 
-          batches = [pool[i:i + 65] for i in range(0, len(pool), 65)]
-          approved_all = []
-          with ThreadPoolExecutor(max_workers=4) as ex:
-              for res_chunk in ex.map(call_ai_batch, batches):
-                  approved_all.extend(res_chunk)
+          batch_translate_titles_he(pool)
 
-          sort_candidates(approved_all, sort_by)
-          filtered = approved_all[:max_results]
-          dated_count = sum(1 for x in filtered if x.get("upload_date"))
-          for item in filtered:
+          for item in pool:
               item.pop("orig_pos", None)
-
-          print(f"[STEP 5] Final approved items: {len(filtered)} (with exact dates: {dated_count}/{len(filtered)})", flush=True)
+              mh = int(item.get("max_height") or 0)
+              q_badge = "4K" if mh >= 2160 else ("1440p" if mh >= 1440 else ("1080p HD" if mh >= 1080 else ("720p" if mh >= 720 else (f"{mh}p" if mh > 0 else ""))))
+              item["quality_badge"] = q_badge
+              if q_badge and q_badge not in item["channel"]:
+                  item["channel"] = f"{item['channel']} • 🎬 {q_badge}"
+              if translate_titles and item.get("title_he") and item["title_he"] != item["title"]:
+                  item["orig_title"] = item["title"]
+                  item["title"] = f"{item['title_he']} ({item['orig_title']})"
 
           payload_bytes = json.dumps({
               "query": query,
               "channel": resolved_channel_name or channel_input,
               "sort_by": sort_by,
               "en_query": en_query,
-              "filter_prompt": filter_prompt,
-              "items": filtered
+              "high_quality_only": high_quality_only,
+              "translate_titles": translate_titles,
+              "items": pool
           }, ensure_ascii=False).encode("utf-8")
           with open("recommendations.json", "wb") as f:
               f.write(payload_bytes)
@@ -633,9 +650,8 @@ jobs:
               timeout=60
           )
           sha = r.json().get("sha", "") if r.status_code == 201 else ""
-
           tag = f"rec-{req_id}"
-          notes_str = json.dumps({"blobs": [sha] if sha else [], "count": len(filtered)})
+          notes_str = json.dumps({"blobs": [sha] if sha else [], "count": len(pool)})
           subprocess.run(
               ["gh", "release", "create", tag, "recommendations.json", "--repo", gh_repo, "--title", tag, "--notes", notes_str],
               capture_output=True, text=True, check=False
