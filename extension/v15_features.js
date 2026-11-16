@@ -5,6 +5,37 @@
   const mainWrap = document.querySelector("main.wrap");
   if (mainWrap) mainWrap.style.overflowAnchor = "auto";
 
+  // ניקוי אוטומטי מיידי של תמונות Base64 כבדות שנתקעו ב-chrome.storage.local
+  function slimStoredSessions() {
+    if (!chrome || !chrome.storage || !chrome.storage.local) return;
+    chrome.storage.local.get(null, (all) => {
+      if (!all) return;
+      const patch = {};
+      for (const [k, val] of Object.entries(all)) {
+        if (!val || typeof val !== "object") continue;
+        let changed = false;
+        const cleanItems = (items) => {
+          if (!Array.isArray(items)) return;
+          for (const it of items) {
+            if (it && typeof it.thumbnail === "string" && it.thumbnail.startsWith("data:image/") && it.id) {
+              it.thumbnail = "https://i.ytimg.com/vi/" + it.id + "/mqdefault.jpg";
+              changed = true;
+            }
+          }
+        };
+        if (Array.isArray(val.items)) cleanItems(val.items);
+        else {
+          for (const s of Object.values(val)) {
+            if (s && typeof s === "object" && Array.isArray(s.items)) cleanItems(s.items);
+          }
+        }
+        if (changed) patch[k] = val;
+      }
+      if (Object.keys(patch).length) chrome.storage.local.set(patch);
+    });
+  }
+  slimStoredSessions();
+
   const HUB_GROUPS = {
     il_media: [
       ["🇮🇱 ערוץ הספורט (ספורט 5)", "@SPORT5_IL"], ["🇮🇱 ספורט 1 / צ'רלטון", "@sport1sport2"], ["🇮🇱 ONE - הערוץ הרשמי", "@one-1004"],
@@ -45,7 +76,7 @@
   function extract11Id(raw) {
     const s = String(raw || "").trim();
     if (/^[a-zA-Z0-9_-]{11}$/.test(s)) return s;
-    const m = s.match(/(?:\[|v=|youtu\.be\/|\/shorts\/|\/embed\/|\/live\/)([a-zA-Z0-9_-]{11})/);
+    const m = s.match(/(?:\[|v=|youtu\.be\/|\/shorts\/|\/embed\/|\/live\/|vi\/)([a-zA-Z0-9_-]{11})/);
     return m ? m[1] : "";
   }
 
@@ -67,7 +98,7 @@
   function lockCardScroll(cardEl) {
     if (!cardEl || !cardEl.parentElement) return;
     const cards = Array.from(cardEl.parentElement.children);
-    scrollLock = { card: cardEl, idx: cards.indexOf(cardEl), boxId: cardEl.parentElement.id, top: cardEl.getBoundingClientRect().top, exp: Date.now() + 2200 };
+    scrollLock = { card: cardEl, idx: cards.indexOf(cardEl), boxId: cardEl.parentElement.id, top: cardEl.getBoundingClientRect().top, exp: Date.now() + 2000 };
     const fix = () => {
       if (!scrollLock || Date.now() > scrollLock.exp) return;
       let el = scrollLock.card;
@@ -81,7 +112,7 @@
       }
     };
     requestAnimationFrame(fix);
-    [40, 120, 260, 500].forEach((ms) => setTimeout(fix, ms));
+    [40, 120, 260].forEach((ms) => setTimeout(fix, ms));
   }
 
   document.addEventListener("mousedown", (e) => {
@@ -106,7 +137,7 @@
           if (Math.abs(d) > 2) window.scrollBy(0, d);
         }
       }
-    }).observe($("jobList"), { childList: true, subtree: true });
+    }).observe($("jobList"), { childList: true });
   }
 
   function cleanSportsTermsHe(t) {
@@ -161,7 +192,7 @@
     box.style.display = "flex";
     titleEl.textContent = "⏳ טוען פרטי סרטון (" + vid + ")...";
     authorEl.textContent = "מזהה: " + vid;
-    if (thumb) thumb.src = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" viewBox="0 0 160 90"><rect width="160" height="90" rx="8" fill="#1c2742"/><polygon points="68,30 68,60 96,45" fill="#38bdf8"/><text x="80" y="80" font-family="Segoe UI,sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">${vid}</text></svg>`);
+    if (thumb) thumb.src = "https://i.ytimg.com/vi/" + vid + "/mqdefault.jpg";
     try {
       const res = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -434,81 +465,100 @@
     });
   }
 
-  function enhanceCards() {
-    for (const cid of ["recList", "historyList"]) {
-      const box = $(cid);
-      if (!box) continue;
-      for (const card of box.children) {
-        if (card.dataset.v15Done) continue;
-        const titleEl = Array.from(card.querySelectorAll("a, div, span")).find((el) => /^#\d+\s*•/.test((el.textContent || "").trim()) && el.children.length === 0);
-        if (titleEl) {
-          const pfx = (titleEl.textContent.match(/^#\d+\s*•\s*/) || [""])[0];
-          const raw = titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim();
-          titleEl.title = raw;
-          titleEl.textContent = pfx + cleanSportsTermsHe(raw);
-        }
-        const mId = (card.innerHTML || "").match(/(?:watch\?v=|\[|vi\/)([a-zA-Z0-9_-]{11})(?:["'&\]\s.\/]|$)/);
-        if (mId && mId[1]) {
-          card.dataset.v15Done = "1";
-          const vid11 = mId[1], btns = card.querySelectorAll("button"), lastBtn = btns[btns.length - 1];
-          if (lastBtn && lastBtn.parentElement) {
-            const parent = lastBtn.parentElement;
-            if (cid === "recList") {
-              const subDlBtn = document.createElement("button");
-              subDlBtn.type = "button";
-              subDlBtn.className = "btn small";
-              subDlBtn.style.cssText = "padding:4px 8px;font-size:11.5px;border-color:var(--ok);color:var(--ok);";
-              subDlBtn.textContent = "🎬+📝 עם כתוביות";
-              subDlBtn.addEventListener("click", (e) => {
-                e.stopPropagation();
-                lockCardScroll(card);
-                const cleanT = titleEl ? titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim() : vid11;
-                chrome.runtime.sendMessage({
-                  type: "START_DOWNLOAD",
-                  payload: { url: "https://www.youtube.com/watch?v=" + vid11, title: cleanT, quality: ($("formatSelect") && $("formatSelect").value) || "best", mode: "video", subtitles: "embed" }
-                });
-                showStatus(`🚀 נשלחה הורדה עם כתוביות בעברית: ${cleanT}`);
-              });
-              parent.insertBefore(subDlBtn, lastBtn);
-            }
-            const simBtn = document.createElement("button");
-            simBtn.type = "button";
-            simBtn.className = "btn small";
-            simBtn.style.cssText = "padding:4px 8px;font-size:11.5px;border-color:var(--accent);color:var(--accent);";
-            simBtn.textContent = "🔍 דומים";
-            simBtn.addEventListener("click", (e) => {
-              e.stopPropagation();
-              triggerSimilarSearch(vid11, titleEl ? titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim() : vid11);
-            });
-            parent.insertBefore(simBtn, lastBtn);
+  // פונקציית שדרוג כרטיסים מהירה (0% עומס CPU, ללא קריאת innerHTML וללא לולאת MutationObserver!)
+  let enhanceScheduled = false;
+  function scheduleEnhanceCards() {
+    if (enhanceScheduled) return;
+    enhanceScheduled = true;
+    requestAnimationFrame(() => {
+      enhanceScheduled = false;
+      for (const cid of ["recList", "historyList"]) {
+        const box = $(cid);
+        if (!box) continue;
+        for (const card of box.children) {
+          if (card.dataset.v15Done === "1") continue;
+          card.dataset.v15Done = "1"; // מסומן מיד בשורה הראשונה למניעת לולאה אינסופית!
 
-            if (!card.textContent.includes("🆔 " + vid11)) {
-              const idBtn = document.createElement("button");
-              idBtn.type = "button";
-              idBtn.className = "btn small";
-              idBtn.style.cssText = "padding:4px 8px;font-size:11.5px;";
-              idBtn.textContent = `🆔 ${vid11}`;
-              idBtn.addEventListener("click", async (e) => {
+          const imgEl = card.querySelector("img");
+          if (imgEl) imgEl.loading = "lazy";
+
+          const titleEl = Array.from(card.querySelectorAll("a, div, span")).find((el) => /^#\d+\s*•/.test((el.textContent || "").trim()) && el.children.length === 0);
+          if (titleEl) {
+            const pfx = (titleEl.textContent.match(/^#\d+\s*•\s*/) || [""])[0];
+            const raw = titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim();
+            titleEl.title = raw;
+            titleEl.textContent = pfx + cleanSportsTermsHe(raw);
+          }
+
+          let vid11 = "";
+          if (imgEl && imgEl.src && !imgEl.src.startsWith("data:")) vid11 = extract11Id(imgEl.src);
+          if (!vid11) {
+            const linkEl = card.querySelector("a[href]");
+            if (linkEl) vid11 = extract11Id(linkEl.href);
+          }
+          if (!vid11) vid11 = extract11Id(card.textContent || "");
+
+          if (vid11) {
+            const btns = card.querySelectorAll("button"), lastBtn = btns[btns.length - 1];
+            if (lastBtn && lastBtn.parentElement) {
+              const parent = lastBtn.parentElement;
+              if (cid === "recList") {
+                const subDlBtn = document.createElement("button");
+                subDlBtn.type = "button";
+                subDlBtn.className = "btn small";
+                subDlBtn.style.cssText = "padding:4px 8px;font-size:11.5px;border-color:var(--ok);color:var(--ok);";
+                subDlBtn.textContent = "🎬+📝 עם כתוביות";
+                subDlBtn.addEventListener("click", (e) => {
+                  e.stopPropagation();
+                  lockCardScroll(card);
+                  const cleanT = titleEl ? titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim() : vid11;
+                  chrome.runtime.sendMessage({
+                    type: "START_DOWNLOAD",
+                    payload: { url: "https://www.youtube.com/watch?v=" + vid11, title: cleanT, quality: ($("formatSelect") && $("formatSelect").value) || "best", mode: "video", subtitles: "embed" }
+                  });
+                  showStatus(`🚀 נשלחה הורדה עם כתוביות בעברית: ${cleanT}`);
+                });
+                parent.insertBefore(subDlBtn, lastBtn);
+              }
+              const simBtn = document.createElement("button");
+              simBtn.type = "button";
+              simBtn.className = "btn small";
+              simBtn.style.cssText = "padding:4px 8px;font-size:11.5px;border-color:var(--accent);color:var(--accent);";
+              simBtn.textContent = "🔍 דומים";
+              simBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
-                await navigator.clipboard.writeText(vid11);
-                idBtn.textContent = "✅ הועתק!";
-                setTimeout(() => { idBtn.textContent = `🆔 ${vid11}`; }, 1400);
+                triggerSimilarSearch(vid11, titleEl ? titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim() : vid11);
               });
-              parent.insertBefore(idBtn, lastBtn);
+              parent.insertBefore(simBtn, lastBtn);
+
+              if (!card.textContent.includes("🆔 " + vid11)) {
+                const idBtn = document.createElement("button");
+                idBtn.type = "button";
+                idBtn.className = "btn small";
+                idBtn.style.cssText = "padding:4px 8px;font-size:11.5px;";
+                idBtn.textContent = `🆔 ${vid11}`;
+                idBtn.addEventListener("click", async (e) => {
+                  e.stopPropagation();
+                  await navigator.clipboard.writeText(vid11);
+                  idBtn.textContent = "✅ הועתק!";
+                  setTimeout(() => { idBtn.textContent = `🆔 ${vid11}`; }, 1400);
+                });
+                parent.insertBefore(idBtn, lastBtn);
+              }
             }
           }
         }
       }
-    }
+    });
   }
 
   function init() {
     injectV15Controls();
     wireV15Events();
-    const obs = new MutationObserver(enhanceCards);
-    if ($("recList")) obs.observe($("recList"), { childList: true, subtree: true });
-    if ($("historyList")) obs.observe($("historyList"), { childList: true, subtree: true });
-    enhanceCards();
+    const obs = new MutationObserver(scheduleEnhanceCards);
+    if ($("recList")) obs.observe($("recList"), { childList: true });
+    if ($("historyList")) obs.observe($("historyList"), { childList: true });
+    scheduleEnhanceCards();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
