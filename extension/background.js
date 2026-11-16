@@ -1253,3 +1253,13 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   }
   return undefined;
 });
+
+if (chrome.downloads && chrome.downloads.onDeterminingFilename && !self._v15SrtGuardInstalled) {
+  self._v15SrtGuardInstalled = true;
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    if (item && item.filename && /\.he\.txt$/i.test(item.filename)) {
+      suggest({ filename: item.filename.replace(/\.he\.txt$/i, ".he.srt"), conflictAction: "uniquify" });
+      return true;
+    }
+  });
+}
