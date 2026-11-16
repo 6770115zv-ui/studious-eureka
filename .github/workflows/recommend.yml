@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update -y && sudo apt-get install -y --no-install-recommends python3-cryptography
           python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
-      - name: Search Channel Uploads Playlist & Enrich Metadata
+      - name: Fast Channel & Topic Search Engine
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
@@ -152,7 +152,7 @@ jobs:
               elif isinstance(obj, list):
                   for it in obj: walk_items(it, out_vids, out_grid_toks, out_chip_toks)
 
-          def fetch_search(q_str: str, sp_param: str = "", target_count: int = 160):
+          def fetch_search(q_str: str, sp_param: str = "", target_count: int = 140):
               if not q_str: return []
               api_url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false"
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
@@ -167,7 +167,7 @@ jobs:
                   for v in vids:
                       if v["id"] not in seen_vids: seen_vids.add(v["id"]); collected.append(v)
                   pages = 0
-                  while toks and len(collected) < target_count and pages < 7:
+                  while toks and len(collected) < target_count and pages < 6:
                       nt = toks.pop(0)
                       if nt in visited: continue
                       visited.add(nt); pages += 1
@@ -261,7 +261,7 @@ jobs:
                   except Exception: pass
               return base, uc_id, name
 
-          def fetch_playlist_browse(browse_id: str, ch_title: str, max_pages: int = 16, target_count: int = 500):
+          def fetch_playlist_browse(browse_id: str, ch_title: str, max_pages: int = 14, target_count: int = 450):
               api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
               collected, seen_vids, visited = [], set(), set()
@@ -288,7 +288,7 @@ jobs:
               except Exception: pass
               return collected
 
-          def fetch_channel_vids(base_url: str, uc_id: str, ch_title: str, sort_mode: str, target_count: int = 500):
+          def fetch_channel_vids(base_url: str, uc_id: str, ch_title: str, sort_mode: str, target_count: int = 450):
               collected, seen_vids = [], set()
               def add_items(arr):
                   for v in arr:
@@ -300,7 +300,7 @@ jobs:
               if playlist_mode == "streams" and base_url:
                   add_items(fetch_yt_json(f"{base_url}/streams", str(target_count)))
               if uc_id and sort_mode in ("views", "likes", "quality_score") and playlist_mode != "uu_all":
-                  add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, 15, target_count))
+                  add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, 14, target_count))
               if uc_id and len(collected) < target_count:
                   api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
                   ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
@@ -320,7 +320,7 @@ jobs:
                           if not active:
                               add_items(iv); active = ig[:]
                           pages = 0
-                          while active and len(collected) < target_count and pages < 22:
+                          while active and len(collected) < target_count and pages < 18:
                               nt = active.pop(0)
                               if nt in visited: continue
                               visited.add(nt); pages += 1
@@ -334,12 +334,12 @@ jobs:
                           if len(collected) < 15 and iv: add_items(iv)
                   except Exception: pass
               if uc_id and (len(collected) < max_results or playlist_mode == "uu_all"):
-                  add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, 25, max(target_count, 800)))
+                  add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, 20, max(target_count, 600)))
               if len(collected) < 25:
-                  if uc_id: add_items(fetch_yt_json(f"https://www.youtube.com/playlist?list=UU{uc_id[2:]}", str(max(target_count, 500))))
+                  if uc_id: add_items(fetch_yt_json(f"https://www.youtube.com/playlist?list=UU{uc_id[2:]}", str(max(target_count, 450))))
                   if base_url:
-                      add_items(fetch_yt_json(f"{base_url}/videos", str(max(target_count, 400))))
-                      add_items(fetch_yt_json(f"{base_url}/streams", "200"))
+                      add_items(fetch_yt_json(f"{base_url}/videos", str(max(target_count, 350))))
+                      add_items(fetch_yt_json(f"{base_url}/streams", "150"))
               return collected
 
           clean_q = re.sub(r"[!?\u05be]+", " ", query).strip()
@@ -358,17 +358,17 @@ jobs:
 
           if channel_input:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
-              raw.extend(fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 100, 500)))
+              raw.extend(fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 80, 450)))
               if query or len(raw) < 10:
                   q_term = f"{resolved_ch} {clean_q}".strip()
-                  raw.extend(fetch_search(q_term, sp_code, 140))
-                  if en_query: raw.extend(fetch_search(f"{resolved_ch} {en_query}", sp_code, 140))
+                  raw.extend(fetch_search(q_term, sp_code, 120))
+                  if en_query: raw.extend(fetch_search(f"{resolved_ch} {en_query}", sp_code, 120))
           else:
               jobs = [(clean_q or query, ""), (clean_q or query, sp_code)]
               if en_query and en_query.lower() != (clean_q or query).lower():
                   jobs.extend([(en_query, ""), (en_query, sp_code)])
-              with ThreadPoolExecutor(max_workers=5) as ex:
-                  for b in ex.map(lambda j: fetch_search(j[0], j[1], max(160, max_results + 50)), jobs): raw.extend(b)
+              with ThreadPoolExecutor(max_workers=4) as ex:
+                  for b in ex.map(lambda j: fetch_search(j[0], j[1], max(140, max_results + 40)), jobs): raw.extend(b)
 
           seen_ids = {direct_vid} if (is_similar and direct_vid) else (set() if (channel_input or direct_vid) else set(exclude))
           cands = []
@@ -386,7 +386,7 @@ jobs:
                   "duration": int(e.get("duration") or 0), "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          cap_pool = max_results + 35 if high_quality_only else max_results + 20
+          cap_pool = max_results + 30 if high_quality_only else max_results + 15
           if sort_by in ("views", "likes", "quality_score"):
               cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
           selected_pool = cands[:cap_pool]
@@ -420,7 +420,7 @@ jobs:
                       fmts = (pd.get("streamingData") or {}).get("adaptiveFormats") or []
                       if fmts: c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
               except Exception: pass
-              if c["max_height"] == 0 and (high_quality_only or len(selected_pool) <= 130):
+              if c["max_height"] == 0 and (high_quality_only or len(selected_pool) <= 100):
                   try:
                       rv = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "ANDROID_VR", "clientVersion": "1.60.19", "androidSdkVersion": 32, "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
                       if rv.status_code == 200:
@@ -446,7 +446,7 @@ jobs:
               except Exception: pass
 
           if selected_pool:
-              with ThreadPoolExecutor(max_workers=24) as ex: list(ex.map(enrich, selected_pool))
+              with ThreadPoolExecutor(max_workers=16) as ex: list(ex.map(enrich, selected_pool))
 
           if high_quality_only:
               hq = [c for c in selected_pool if (c.get("duration") == 0 or c.get("duration", 0) >= 60) and "#shorts" not in c["title"].lower() and (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
@@ -483,7 +483,7 @@ jobs:
                   if not gh_tok: return {}
                   sys_p = "תרגם כל כותרת סרטון (מאנגלית, ספרדית או כל שפה) לעברית ישראלית טבעית וחלקה ללא מילים לועזיות. Highlights/Resumen=תקציר, Full Match=משחק מלא. החזר רק JSON: {\"items\":[{\"i\":0,\"he\":\"...\"}]}"
                   try:
-                      r = requests.post("https://models.inference.ai.azure.com/chat/completions", headers={"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"}, json={"model": "gpt-4o-mini", "messages": [{"role": "system", "content": sys_p}, {"role": "user", "content": json.dumps([{"i": i, "t": t} for i, t in pairs], ensure_ascii=False)}], "temperature": 0.1}, timeout=25)
+                      r = requests.post("https://models.inference.ai.azure.com/chat/completions", headers={"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"}, json={"model": "gpt-4o-mini", "messages": [{"role": "system", "content": sys_p}, {"role": "user", "content": json.dumps([{"i": i, "t": t} for i, t in pairs], ensure_ascii=False)}], "temperature": 0.1}, timeout=20)
                       if r.status_code == 200:
                           m = re.search(r"\{.*\}", re.sub(r"```(?:json)?|```", "", r.json()["choices"][0]["message"]["content"]).strip(), re.DOTALL)
                           if m: return {int(x["i"]): str(x["he"]).strip() for x in (json.loads(m.group(0)).get("items") or []) if x.get("he")}
@@ -491,7 +491,7 @@ jobs:
                   return {}
               if need_tr:
                   chunks = [need_tr[i:i + 30] for i in range(0, len(need_tr), 30)]
-                  with ThreadPoolExecutor(max_workers=4) as ex:
+                  with ThreadPoolExecutor(max_workers=3) as ex:
                       for rmap in ex.map(ai_chunk, chunks):
                           for ki, hv in rmap.items():
                               if 0 <= ki < len(items_arr) and hv: items_arr[ki]["title_he"] = hv
@@ -505,21 +505,9 @@ jobs:
                   except Exception: pass
               rem = [(idx, it["title_he"]) for idx, it in enumerate(items_arr) if sum(1 for ch in it.get("title_he", "") if "a" <= ch.lower() <= "z") > 3]
               if rem:
-                  with ThreadPoolExecutor(max_workers=16) as ex: list(ex.map(tr_one, rem))
+                  with ThreadPoolExecutor(max_workers=12) as ex: list(ex.map(tr_one, rem))
 
           translate_titles_properly(pool)
-
-          def encode_thumb_b64(item_obj):
-              vid = item_obj["id"]; sess = get_sess()
-              for qn in ("mqdefault.jpg", "hqdefault.jpg"):
-                  try:
-                      r = sess.get(f"https://i.ytimg.com/vi/{vid}/{qn}", timeout=8)
-                      if r.status_code == 200 and len(r.content) > 800:
-                          item_obj["thumbnail"] = "data:image/jpeg;base64," + base64.b64encode(r.content).decode("ascii")
-                          return
-                  except Exception: pass
-
-          with ThreadPoolExecutor(max_workers=28) as ex: list(ex.map(encode_thumb_b64, pool))
 
           for item in pool:
               item.pop("orig_pos", None)
