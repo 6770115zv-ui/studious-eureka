@@ -60,3 +60,15 @@ if (typeof self !== "undefined") {
   self.extractYoutubeId = extractYoutubeId;
   self.fetchYoutubeOembed = fetchYoutubeOembed;
 }
+
+// extract11Bare support
+(function(root){
+  const orig = root.extractYoutubeId;
+  root.extractYoutubeId = function(input) {
+    const s = String(input || "").trim();
+    if (/^[a-zA-Z0-9_-]{11}$/.test(s)) return s;
+    const mBr = s.match(/\[([a-zA-Z0-9_-]{11})\]/);
+    if (mBr) return mBr[1];
+    return orig ? orig(input) : "";
+  };
+})(typeof globalThis !== "undefined" ? globalThis : self);
