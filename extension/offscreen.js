@@ -3,7 +3,7 @@
   const ZIP_CACHE_NAME = "ytcloud-assets-v5";
   const MIME = {
     mp4: "video/mp4", webm: "video/webm", mkv: "video/x-matroska", mp3: "audio/mpeg",
-    m4a: "audio/mp4", flac: "audio/flac", wav: "audio/wav", opus: "audio/opus", srt: "application/octet-stream", zip: "application/zip"
+    m4a: "audio/mp4", flac: "audio/flac", wav: "audio/wav", opus: "audio/opus", srt: "text/plain;charset=utf-8", zip: "application/zip"
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
