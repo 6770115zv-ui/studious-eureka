@@ -656,6 +656,13 @@ async function driveJob(jobId) {
 }
 
 async function startDownload(payload) {
+  if (payload && payload.url && /^[a-zA-Z0-9_-]{11}$/.test(String(payload.url).trim())) {
+    payload.url = "https://www.youtube.com/watch?v=" + String(payload.url).trim();
+  }
+  if (payload && Array.isArray(payload.urls)) {
+    payload.urls = payload.urls.map((u) => /^[a-zA-Z0-9_-]{11}$/.test(String(u).trim()) ? "https://www.youtube.com/watch?v=" + String(u).trim() : u);
+  }
+
   const cfg = await getConfig();
   if (!cfg.owner || !cfg.repo || !cfg.token) {
     return { ok: false, error: "חסרות הגדרות חיבור (owner/repo/token)" };
@@ -1105,4 +1112,118 @@ chrome.action.onClicked.addListener(async () => {
   const tabs = await chrome.tabs.query({ url });
   if (tabs.length) await chrome.tabs.update(tabs[0].id, { active: true });
   else await chrome.tabs.create({ url });
+});
+
+// === V15_CLOUD_ULTRA_HANDLERS ===
+async function v15PurgeAllCloud() {
+  const cfg = await getConfig();
+  if (!cfg.owner || !cfg.repo || !cfg.token) return { ok: false, error: "חסרות הגדרות מאגר או טוקן" };
+  let deletedReleases = 0;
+  let deletedRuns = 0;
+  try {
+    for (let page = 1; page <= 6; page++) {
+      const rRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases?per_page=100", cfg);
+      if (!rRes.ok) break;
+      const rels = await rRes.json();
+      if (!Array.isArray(rels) || !rels.length) break;
+      await Promise.all(rels.map(async (rel) => {
+        try {
+          await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/releases/" + rel.id, cfg, { method: "DELETE" });
+          if (rel.tag_name) {
+            await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/git/refs/tags/" + encodeURIComponent(rel.tag_name), cfg, { method: "DELETE" });
+          }
+          deletedReleases++;
+        } catch {}
+      }));
+    }
+    for (let page = 1; page <= 8; page++) {
+      const wRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs?per_page=100", cfg);
+      if (!wRes.ok) break;
+      const data = await wRes.json();
+      const runs = (data && data.workflow_runs) || [];
+      if (!runs.length) break;
+      let pageDeleted = 0;
+      await Promise.all(runs.map(async (run) => {
+        try {
+          if (run.status !== "completed") {
+            await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + run.id + "/cancel", cfg, { method: "POST" });
+          }
+          const delRes = await ghFetch(API + "/repos/" + cfg.owner + "/" + cfg.repo + "/actions/runs/" + run.id, cfg, { method: "DELETE" });
+          if (delRes.ok || delRes.status === 204) {
+            deletedRuns++;
+            pageDeleted++;
+          }
+        } catch {}
+      }));
+      if (pageDeleted === 0) break;
+    }
+  } catch (e) {
+    return { ok: false, error: e.message, deletedReleases, deletedRuns };
+  }
+  return { ok: true, deletedReleases, deletedRuns };
+}
+
+async function v15ExportCookies() {
+  const cfg = await getConfig();
+  const raw = await exportYoutubeCookies();
+  if (!raw) return { ok: false, error: "לא נמצאו עוגיות YouTube" };
+  const count = Math.max(0, raw.trim().split("\n").length - 1);
+  let encrypted = "";
+  if (cfg.cookieKey && cfg.cookieKey.length === 64) {
+    try { encrypted = await encryptCookies(raw, cfg.cookieKey); } catch {}
+  }
+  return { ok: true, raw, encrypted, count };
+}
+
+async function v15TranslateHistoryToHebrew() {
+  const list = await getHistory();
+  if (!list.length) return { ok: true, count: 0 };
+  let translatedCount = 0;
+  for (let i = 0; i < list.length; i += 20) {
+    const chunk = list.slice(i, i + 20);
+    const titles = chunk.map((item) => {
+      const rawT = String(item.title || "");
+      const m = rawT.match(/^(.*?)(\s*\[[a-zA-Z0-9_-]{11}\].*|\s*—\s*\[.*|$)/);
+      return m ? m[1].trim() : rawT;
+    });
+    try {
+      const u = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=iw&dt=t&q=" + encodeURIComponent(titles.join("\n ||| \n"));
+      const r = await fetch(u);
+      if (r.ok) {
+        const d = await r.json();
+        const full = (d[0] || []).map((x) => (x && x[0]) || "").join("");
+        const parts = full.split(/\s*\|\|\|\s*/);
+        if (parts.length === chunk.length) {
+          for (let j = 0; j < chunk.length; j++) {
+            const orig = String(chunk[j].title || "");
+            const m = orig.match(/^(.*?)(\s*\[[a-zA-Z0-9_-]{11}\].*|\s*—\s*\[.*)?$/);
+            const tail = (m && m[2]) || "";
+            if (parts[j] && parts[j].trim()) {
+              chunk[j].title = parts[j].trim() + tail;
+              translatedCount++;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+  await chrome.storage.local.set({ [HIST_KEY]: list });
+  return { ok: true, count: translatedCount };
+}
+
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg) return undefined;
+  if (msg.type === "PURGE_ALL_CLOUD") {
+    v15PurgeAllCloud().then(sendResponse);
+    return true;
+  }
+  if (msg.type === "EXPORT_COOKIES") {
+    v15ExportCookies().then(sendResponse);
+    return true;
+  }
+  if (msg.type === "TRANSLATE_HISTORY_HE") {
+    v15TranslateHistoryToHebrew().then(sendResponse);
+    return true;
+  }
+  return undefined;
 });
