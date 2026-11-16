@@ -17,7 +17,6 @@ on:
 
 permissions:
   contents: write
-  models: read
   actions: read
 
 jobs:
@@ -371,108 +370,26 @@ jobs:
                   out_batch.append([s_ms, e_ms, tr_single])
               return out_batch
 
-                    def translate_cues_to_hebrew(cues, video_title=""):
-              if not cues:
-                  return []
-              texts = [re.sub(r"\s+", " ", c[2]).strip() for c in cues]
-              out_texts = list(texts)
-              gh_tok = os.environ.get("GH_TOKEN", "").strip()
-              gem_key = os.environ.get("GEMINI_API_KEY", "").strip()
+          def translate_cues_to_hebrew(cues_list):
+              if not cues_list:
+                  return None
+              sample_txt = " ".join(c[2] for c in cues_list[:15])
+              if sum(1 for ch in sample_txt if "\u0590" <= ch <= "\u05FF") >= 5:
+                  return cues_list
 
-              def translate_batch_ai(batch_idx_texts):
-                  payload_items = [{"i": idx, "t": txt} for idx, txt in batch_idx_texts]
-                  sys_prompt = (
-                      "You are an elite Israeli television subtitle translator. "
-                      "Translate the following subtitle lines into natural, fluent, idiomatic Israeli Hebrew, exactly like professional TV subtitles. "
-                      f"Video context: '{video_title}'. "
-                      "Rules:\n"
-                      "1. Translate ALL English words into natural Hebrew (e.g., 'playing' in sports = 'משחק', 'fly commercial' = 'לטוס בטיסה מסחרית', 'cringe' = 'מביך/קרינג׳', 'bicycle kick' = 'מספרת', 'dub' = 'ניצחון').\n"
-                      "2. If a sentence is split across two consecutive lines, make sure the Hebrew flows naturally between them.\n"
-                      "3. NEVER leave any line in English.\n"
-                      "4. Return ONLY valid JSON in the exact format: {\"items\": [{\"i\": 0, \"he\": \"...\"}]}"
-                  )
-                  usr_prompt = json.dumps(payload_items, ensure_ascii=False)
-                  if gh_tok:
-                      try:
-                          r = requests.post(
-                              "https://models.inference.ai.azure.com/chat/completions",
-                              headers={"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"},
-                              json={
-                                  "model": "gpt-4o-mini",
-                                  "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": usr_prompt}],
-                                  "temperature": 0.1
-                              },
-                              timeout=35
-                          )
-                          if r.status_code == 200:
-                              content = r.json()["choices"][0]["message"]["content"]
-                              clean_j = re.sub(r"```(?:json)?|```", "", content).strip()
-                              m = re.search(r"\{.*\}", clean_j, re.DOTALL)
-                              if m:
-                                  parsed = json.loads(m.group(0)).get("items") or []
-                                  if len(parsed) == len(batch_idx_texts):
-                                      return {int(x["i"]): str(x["he"]).strip() for x in parsed if x.get("he")}
-                      except Exception:
-                          pass
-                  if gem_key:
-                      try:
-                          r = requests.post(
-                              f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gem_key}",
-                              headers={"Content-Type": "application/json"},
-                              json={"contents": [{"parts": [{"text": sys_prompt + "\n\n" + usr_prompt}]}]},
-                              timeout=35
-                          )
-                          if r.status_code == 200:
-                              content = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                              clean_j = re.sub(r"```(?:json)?|```", "", content).strip()
-                              m = re.search(r"\{.*\}", clean_j, re.DOTALL)
-                              if m:
-                                  parsed = json.loads(m.group(0)).get("items") or []
-                                  if len(parsed) == len(batch_idx_texts):
-                                      return {int(x["i"]): str(x["he"]).strip() for x in parsed if x.get("he")}
-                      except Exception:
-                          pass
-                  return {}
+              print(f"Translating {len(cues_list)} reconstructed sentences to Hebrew...", flush=True)
+              batch_size = 35
+              batches = [cues_list[i:i + batch_size] for i in range(0, len(cues_list), batch_size)]
 
-              # שלב 1: תרגום הקשרי חכם ב-AI (במקביל)
-              indexed = list(enumerate(texts))
-              batches = [indexed[i:i + 35] for i in range(0, len(indexed), 35)]
-              from concurrent.futures import ThreadPoolExecutor
+              translated_cues = []
+              # שימוש ב-4 תהליכונים מבוקרים כדי למנוע חסימת 429 ולקבל 100% עברית
               with ThreadPoolExecutor(max_workers=4) as ex:
-                  for res_map in ex.map(translate_batch_ai, batches):
-                      for k_idx, he_val in res_map.items():
-                          if 0 <= k_idx < len(out_texts) and he_val:
-                              out_texts[k_idx] = he_val
+                  for res_batch in ex.map(translate_batch_guaranteed, batches):
+                      translated_cues.extend(res_batch)
 
-              # שלב 2: השלמה אוטומטית לכל שורה שעדיין מכילה אנגלית (מבטיח 0% שורות באנגלית!)
-              def has_mostly_english(s):
-                  heb = sum(1 for c in s if "\u0590" <= c <= "\u05FF")
-                  lat = sum(1 for c in s if "a" <= c.lower() <= "z")
-                  return lat > 3 and heb < lat
-
-              remaining = [idx for idx, val in enumerate(out_texts) if has_mostly_english(val)]
-              for i in range(0, len(remaining), 15):
-                  rem_idxs = remaining[i:i + 15]
-                  joined = "\n ||| \n".join(texts[idx] for idx in rem_idxs)
-                  try:
-                      u = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=iw&dt=t&q=" + urllib.parse.quote(joined)
-                      r = requests.get(u, timeout=15)
-                      if r.status_code == 200:
-                          full_tr = "".join(seg[0] for seg in (r.json()[0] or []) if seg and seg[0])
-                          parts = [p.strip() for p in re.split(r"\|\|\|", full_tr)]
-                          if len(parts) == len(rem_idxs):
-                              for r_idx, p_txt in zip(rem_idxs, parts):
-                                  if p_txt:
-                                      out_texts[r_idx] = p_txt
-                          else:
-                              for r_idx in rem_idxs:
-                                  r1 = requests.get("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=iw&dt=t&q=" + urllib.parse.quote(texts[r_idx]), timeout=10)
-                                  if r1.status_code == 200:
-                                      out_texts[r_idx] = "".join(seg[0] for seg in (r1.json()[0] or []) if seg and seg[0]).strip() or out_texts[r_idx]
-                  except Exception:
-                      pass
-
-              return [(cues[i][0], cues[i][1], out_texts[i]) for i in range(len(cues))]
+              hebrew_chars = sum(1 for _, _, txt in translated_cues for ch in txt if "\u0590" <= ch <= "\u05FF")
+              print(f"Translation finished: {len(translated_cues)} cues, {hebrew_chars} Hebrew chars.", flush=True)
+              return translated_cues if hebrew_chars > 0 else None
 
           def fetch_subtitles_for_url(video_url: str, base_stem: str = None):
               if subs_dir.exists():
