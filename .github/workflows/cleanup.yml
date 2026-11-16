@@ -10,21 +10,41 @@ permissions:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
-      - name: Delete All Temporary Releases, Tags and Completed Runs
+      - name: Delete All Releases (and Their Tags) and All Workflow Runs
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           CUR_RUN_ID: ${{ github.run_id }}
         run: |
-          RELEASES=$(gh api "repos/${GH_REPO}/releases?per_page=100" --jq '.[].tag_name' || true)
-          for tag in $RELEASES; do
-            if [[ "$tag" == dl-* || "$tag" == rec-* ]]; then
-              gh release delete "$tag" --repo "$GH_REPO" --cleanup-tag --yes || true
+          echo "=== 1. Deleting all releases (including drafts) and their tags ==="
+          RELEASES=$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" --jq '.[] | "\(.id)\t\(.tag_name // "")"' || true)
+          while IFS=$'\t' read -r id tag; do
+            [[ -z "$id" ]] && continue
+            gh api -X DELETE "repos/${GH_REPO}/releases/${id}" || true
+            if [[ -n "$tag" ]]; then
+              encoded_tag=$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$tag")
+              gh api -X DELETE "repos/${GH_REPO}/git/refs/tags/${encoded_tag}" || true
+            fi
+          done <<< "$RELEASES"
+
+          echo "=== 2. Cancelling active runs (except current run) ==="
+          ACTIVE_RUNS=$(gh api --paginate "repos/${GH_REPO}/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.status != "completed") | .id' || true)
+          CANCELLED_ANY=false
+          for rid in $ACTIVE_RUNS; do
+            if [[ "$rid" != "$CUR_RUN_ID" ]]; then
+              gh api -X POST "repos/${GH_REPO}/actions/runs/${rid}/cancel" || true
+              CANCELLED_ANY=true
             fi
           done
-          RUNS=$(gh api "repos/${GH_REPO}/actions/runs?status=completed&per_page=100" --jq '.workflow_runs[].id' || true)
+          if [[ "$CANCELLED_ANY" == "true" ]]; then
+            sleep 5
+          fi
+
+          echo "=== 3. Deleting all workflow runs, logs and artifacts (except current run) ==="
+          RUNS=$(gh api --paginate "repos/${GH_REPO}/actions/runs?per_page=100" --jq '.workflow_runs[].id' || true)
           for rid in $RUNS; do
             if [[ "$rid" != "$CUR_RUN_ID" ]]; then
               gh api -X DELETE "repos/${GH_REPO}/actions/runs/${rid}" || true
