@@ -73,9 +73,11 @@ async function addHistoryEntry(entry) {
   const idTailRx = new RegExp("\\s*\\[[a-zA-Z0-9_-]{11}\\]\\.[a-z0-9]+\\x24", "i");
   const cleanTitle = String(entry.title || "").replace(idTailRx, "").trim();
   if (!cleanTitle || cleanTitle.startsWith("http")) return list;
-  const filtered = list.filter((x) => (vid ? x.videoId !== vid : x.title !== cleanTitle));
+  const isSubEntry = /\.srt$/i.test(String(entry.title || "")) || String(entry.quality || "").includes("SRT");
+  const entryKey = vid ? (isSubEntry ? vid + "_srt" : vid) : "";
+  const filtered = list.filter((x) => (entryKey ? x.videoId !== entryKey : x.title !== cleanTitle));
   filtered.unshift({
-    videoId: vid || "",
+    videoId: entryKey || vid || "",
     title: cleanTitle,
     url: entry.url || "",
     quality: entry.quality || "best",
@@ -621,7 +623,7 @@ async function driveJob(jobId) {
     patchJob(jobId, { status: "saving", localDlPct: 100, detail: "שומר קובץ בתיקיית ההורדות במחשב...", percent: 94 });
     const saved = [];
     for (const f of files) {
-      const name = sanitizeFilename(f.name);
+      const name = await v15MaybeTranslateFilename(sanitizeFilename(f.name));
       await saveBlob(f.blobUrl || f.url, name, jobId);
       saved.push(name);
     }
@@ -1115,6 +1117,30 @@ chrome.action.onClicked.addListener(async () => {
 });
 
 // === V15_CLOUD_ULTRA_HANDLERS ===
+async function v15MaybeTranslateFilename(filename) {
+  try {
+    const st = await chrome.storage.local.get("ytcloud_tr_dl_title");
+    if (!st || !st.ytcloud_tr_dl_title) return filename;
+    const m = String(filename || "").match(/^(.*?)(\s*\[[a-zA-Z0-9_-]{11}\])(\.[a-z0-9.]+)$/i);
+    const baseTitle = m ? m[1].trim() : filename.replace(/(\.[a-z0-9.]+)$/i, "").trim();
+    const idPart = m ? m[2] : "";
+    const extPart = m ? m[3] : ((filename.match(/(\.[a-z0-9.]+)$/i) || [""])[0]);
+    if (!baseTitle) return filename;
+    const hebChars = (baseTitle.match(/[\u0590-\u05FF]/g) || []).length;
+    const latChars = (baseTitle.match(/[a-zA-Z]/g) || []).length;
+    if (hebChars >= latChars && latChars < 4) return filename;
+    const u = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=iw&dt=t&q=" + encodeURIComponent(baseTitle);
+    const res = await fetch(u);
+    if (!res.ok) return filename;
+    const data = await res.json();
+    const tr = ((data[0] || []).map((x) => (x && x[0]) || "").join("") || "").trim();
+    if (!tr) return filename;
+    return sanitizeFilename(tr + idPart + extPart);
+  } catch {
+    return filename;
+  }
+}
+
 async function v15PurgeAllCloud() {
   const cfg = await getConfig();
   if (!cfg.owner || !cfg.repo || !cfg.token) return { ok: false, error: "חסרות הגדרות מאגר או טוקן" };
