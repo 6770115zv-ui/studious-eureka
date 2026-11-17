@@ -3,7 +3,7 @@ importScripts("shared/common.js");
 
 const BUILTIN_CONFIG = {
   owner: "6770115zv-ui", repo: "studious-eureka", workflow: "download.yml", ref: "main",
-  token: "", cookieKey: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3", autoCleanRelease: "true", updateOwner: "6770115zv-ui", updateRepo: "studious-eureka",
+  token: "", cookieKey: "", autoCleanRelease: "true", updateOwner: "6770115zv-ui", updateRepo: "studious-eureka",
   emailTo: ""
 };
 try { importScripts("config.js"); } catch {}
@@ -42,7 +42,6 @@ async function getConfig() {
   if (self.DEFAULT_CONFIG && self.DEFAULT_CONFIG.token && !cfg.token) {
     cfg.token = self.DEFAULT_CONFIG.token;
   }
-  cfg.cookieKey = BUILTIN_CONFIG.cookieKey;
   for (const k of Object.keys(BUILTIN_CONFIG)) cfg[k] = String(cfg[k] ?? "").trim();
   if (!cfg.workflow) cfg.workflow = "download.yml";
   if (!cfg.ref) cfg.ref = "main";
@@ -58,7 +57,6 @@ async function setConfig(patch) {
       next[k] = String(v).trim();
     }
   }
-  next.cookieKey = BUILTIN_CONFIG.cookieKey;
   await chrome.storage.local.set({ [CFG_KEY]: next });
   return getConfig();
 }
