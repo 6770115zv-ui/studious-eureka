@@ -141,7 +141,7 @@
   }
 
   function cleanSportsTermsHe(t) {
-    return String(t || "")
+    return String(t || "").replace(/\\u[0-9a-fA-F]{4}/g, " ").replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, "")
       .replace(/\s*\([^)]*[a-zA-Z]{4,}[^)]*\)\s*$/g, "")
       .replace(/\bEXTENDED HIGHLIGHTS\b/gi, "תקציר מורחב")
       .replace(/\b(?:HIGHLIGHTS|HHIHLIGHTS|RESUMEN)\b/gi, "תקציר")
