@@ -505,6 +505,71 @@ jobs:
               if rem:
                   with ThreadPoolExecutor(max_workers=12) as ex: list(ex.map(tr_one, rem))
 
+          def apply_ai_filter(items_arr, prompt_rule):
+              if not items_arr or not prompt_rule:
+                  return items_arr
+              gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+              gh_tok = os.environ.get("GH_TOKEN", "").strip()
+              if not gemini_key and not gh_tok:
+                  return items_arr
+
+              sys_instruction = (
+                  "You are a strict content filter for YouTube search results. "
+                  f"User filtering rule: {prompt_rule}\n"
+                  "Return ONLY valid JSON with the IDs of videos that strictly match the topic/channel and obey the rule: "
+                  '{"keep_ids": ["id1", "id2"]}'
+              )
+              kept_ids = set()
+              for i in range(0, len(items_arr), 45):
+                  batch = [{"id": x["id"], "title": x["title"], "channel": x["channel"]} for x in items_arr[i:i + 45]]
+                  user_msg = json.dumps(batch, ensure_ascii=False)
+                  parsed_ids = None
+                  if gemini_key:
+                      try:
+                          gr = requests.post(
+                              f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}",
+                              json={
+                                  "contents": [{"parts": [{"text": sys_instruction + "\nVideos:\n" + user_msg}]}],
+                                  "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+                              },
+                              timeout=25,
+                          )
+                          if gr.status_code == 200:
+                              txt = gr.json()["candidates"][0]["content"]["parts"][0]["text"]
+                              parsed_ids = json.loads(txt).get("keep_ids")
+                      except Exception:
+                          pass
+                  if parsed_ids is None and gh_tok:
+                      try:
+                          ar = requests.post(
+                              "https://models.inference.ai.azure.com/chat/completions",
+                              headers={"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"},
+                              json={
+                                  "model": "gpt-4o-mini",
+                                  "messages": [
+                                      {"role": "system", "content": sys_instruction},
+                                      {"role": "user", "content": user_msg},
+                                  ],
+                                  "temperature": 0.1,
+                              },
+                              timeout=25,
+                          )
+                          if ar.status_code == 200:
+                              raw_c = re.sub(r"```(?:json)?|```", "", ar.json()["choices"][0]["message"]["content"]).strip()
+                              m = re.search(r"\{.*\}", raw_c, re.DOTALL)
+                              if m:
+                                  parsed_ids = json.loads(m.group(0)).get("keep_ids")
+                      except Exception:
+                          pass
+                  if isinstance(parsed_ids, list):
+                      kept_ids.update(str(x).strip() for x in parsed_ids)
+                  else:
+                      kept_ids.update(x["id"] for x in batch)
+
+              filtered_out = [x for x in items_arr if x["id"] in kept_ids]
+              return filtered_out if len(filtered_out) >= 3 else items_arr
+
+          pool = apply_ai_filter(pool, filter_prompt)
           translate_titles_properly(pool)
 
           for item in pool:
