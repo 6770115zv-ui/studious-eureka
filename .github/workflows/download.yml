@@ -407,7 +407,7 @@ jobs:
               out_tmpl = f"/tmp/subs/{base_stem}.%(ext)s" if base_stem else "/tmp/subs/%(title).120B [%(id)s].%(ext)s"
               base_sub_cmd = [
                   "python3", "-m", "yt_dlp",
-                  "--ignore-config", "--force-ipv4", "--no-check-certificates",
+                  "--ignore-config", "--rm-cache-dir", "--force-ipv4", "--no-check-certificates",
                   "--skip-download", "--ignore-errors",
                   "--sleep-requests", "1",
                   "--js-runtimes", "deno",
@@ -587,41 +587,60 @@ jobs:
               pot_ep = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
               attempts = []
 
-              if has_ck:
-                  attempts.extend([
-                      ("Auth Native 2026 Clients (web_embedded + tv_samsung) + PO-Token", [
-                          "--cookies", str(cookie_file),
-                          "--concurrent-fragments", "3",
-                          "--extractor-args", pot_ep
-                      ], True, False),
-                      ("Auth TV Samsung / Web Embedded / Creator HD", [
-                          "--cookies", str(cookie_file),
-                          "--concurrent-fragments", "2",
-                          "--extractor-args", "youtube:player_client=tv_samsung,web_embedded,web_creator;fetch_pot=always",
-                          "--extractor-args", pot_ep
-                      ], True, False),
-                      ("Auth MWeb / Safari HD + Geo-Bypass XFF", [
-                          "--cookies", str(cookie_file), "--xff", geo,
-                          "--impersonate", "chrome", "--concurrent-fragments", "1", "--http-chunk-size", "10M",
-                          "--extractor-args", "youtube:player_client=mweb,web_safari;fetch_pot=always",
-                          "--extractor-args", pot_ep
-                      ], True, False),
-                  ])
-
+              # ניסיון 1: ללא עוגיות עם Impersonate Chrome + Android VR / iOS / Web Safari (עוקף 403 על עוגיות מסומנות ב-IP של ענן!)
               attempts.append((
-                  "No-Cookies: Android VR + TV Embedded + iOS Direct HD", [
-                      "--concurrent-fragments", "2", "--http-chunk-size", "10M",
-                      "--extractor-args", "youtube:player_client=android_vr,tv_embedded,ios;player_skip=webpage",
+                  "Cloud Stealth HD (Chrome TLS Impersonation + web_safari,ios,android_vr + PO-Token)", [
+                      "--impersonate", "chrome",
+                      "--xff", geo,
+                      "--concurrent-fragments", "3",
+                      "--http-chunk-size", "10M",
+                      "--extractor-args", "youtube:player_client=web_safari,ios,android_vr,web;fetch_pot=always",
                       "--extractor-args", pot_ep
                   ], True, False
               ))
 
+              if has_ck:
+                  attempts.extend([
+                      ("Auth Chrome TLS + Web / Web Safari / TV + PO-Token", [
+                          "--cookies", str(cookie_file),
+                          "--impersonate", "chrome",
+                          "--xff", geo,
+                          "--concurrent-fragments", "3",
+                          "--extractor-args", "youtube:player_client=web_safari,web,tv,web_creator;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, False),
+                      ("Auth HLS Stream Bypass (m3u8_native + Safari/iOS/MWeb)", [
+                          "--cookies", str(cookie_file),
+                          "--impersonate", "chrome",
+                          "--xff", geo,
+                          "--concurrent-fragments", "2",
+                          "--extractor-args", "youtube:player_client=web_safari,ios,mweb;fetch_pot=always",
+                          "--extractor-args", pot_ep
+                      ], True, True),
+                  ])
+
+              # ניסיון 4: מצב HLS מבוסס m3u8 ללא עוגיות (פותר סרטונים שמחזירים Only images are available)
               attempts.append((
-                  "Universal Fallback (When Source Video Has Only <=480p)",
-                  (["--cookies", str(cookie_file), "--xff", geo] if has_ck else []) + [
-                      "--concurrent-fragments", "1", "--http-chunk-size", "10M",
+                  "No-Cookies HLS Manifest Bypass (web_safari + ios + tv)", [
+                      "--impersonate", "chrome",
+                      "--xff", "US",
+                      "--concurrent-fragments", "2",
+                      "--extractor-args", "youtube:player_client=web_safari,ios,tv;fetch_pot=always",
                       "--extractor-args", pot_ep
-                  ], False, False
+                  ], True, True
+              ))
+
+              # ניסיון 5: Universal Fallback גמיש לכל איכות קיימת (כולל סרטונים ישנים או מוגבלים)
+              attempts.append((
+                  "Universal Resilient Fallback (All Formats + Chrome TLS)",
+                  (["--cookies", str(cookie_file)] if has_ck else []) + [
+                      "--impersonate", "chrome",
+                      "--xff", geo,
+                      "--concurrent-fragments", "1",
+                      "--http-chunk-size", "10M",
+                      "--extractor-args", "youtube:player_client=web,web_safari,ios,android_vr;fetch_pot=always",
+                      "--extractor-args", pot_ep
+                  ], False, True
               ))
 
               def get_stage_files():
@@ -641,7 +660,7 @@ jobs:
 
                       cmd = [
                           "python3", "-m", "yt_dlp",
-                          "--ignore-config",
+                          "--ignore-config", "--rm-cache-dir",
                           "--ffmpeg-location", "/usr/bin/ffmpeg",
                           "--retries", "8",
                           "--fragment-retries", "8",
