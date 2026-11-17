@@ -264,6 +264,19 @@ select.input option {
   border-color: rgba(56, 189, 248, 0.38) !important;
   background: rgba(30, 44, 76, 0.85) !important;
 }
+
+#v15SportsPlaylistHub {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.09), rgba(56, 189, 248, 0.06)) !important;
+  border: 1px solid rgba(16, 185, 129, 0.3) !important;
+  border-radius: 14px !important;
+  padding: 14px !important;
+}
+#v15SearchToggles {
+  background: rgba(15, 23, 42, 0.65) !important;
+  border: 1px solid rgba(56, 189, 248, 0.25) !important;
+  border-radius: 14px !important;
+  padding: 12px 14px !important;
+}
 #recSessionsTabs {
   display: flex;
   flex-wrap: wrap !important;
