@@ -15,9 +15,9 @@ $manifest = [ordered]@{
 }
 [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
 $roots = @(
-  "HKCU:\Software\Google\Chrome\NativeMessagingHosts$hostName",
-  "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts$hostName",
-  "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts$hostName"
+  "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$hostName",
+  "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$hostName",
+  "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\$hostName"
 )
 foreach ($k in $roots) {
   try {
