@@ -610,41 +610,27 @@ jobs:
 
           def enrich(c):
               sess = get_sess(); vid = c["id"]
+              # 1. קריאה ל-/youtubei/v1/next שמחזירה תמיד כותרת, ערוץ, צפיות ותאריך מדויק גם לסרטונים שחסומים גיאוגרפית בארה"ב (Geo-Blocked to IL)!
               try:
-                  r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "WEB_EMBEDDED_PLAYER", "clientVersion": "1.20261101.01.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
-                  if r.status_code == 200:
-                      pd = r.json(); vd = pd.get("videoDetails") or {}; mf = (pd.get("microformat") or {}).get("playerMicroformatRenderer") or {}
-                      if vd.get("channelId"): c["channel_id"] = str(vd["channelId"]).strip()
-                      if vd.get("viewCount"): c["views"] = int(vd["viewCount"])
-                      if vd.get("lengthSeconds") and not c["duration"]: c["duration"] = int(vd["lengthSeconds"])
-                      if vd.get("author"): c["channel"] = str(vd["author"]).strip()
-                      if vd.get("title"): c["title"] = str(vd["title"]).strip()
-                      dt = parse_dt(mf.get("publishDate") or mf.get("uploadDate") or "")
-                      if dt: c["upload_date"] = dt
-                      fmts = (pd.get("streamingData") or {}).get("adaptiveFormats") or []
-                      if fmts: c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
-              except Exception: pass
-              if not c.get("upload_date") or not c.get("channel_id"):
-                  try:
-                      r2 = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
-                      if r2.status_code == 200:
-                          pd2 = r2.json(); vd2 = pd2.get("videoDetails") or {}; mf2 = (pd2.get("microformat") or {}).get("playerMicroformatRenderer") or {}
-                          if vd2.get("channelId") and not c.get("channel_id"): c["channel_id"] = str(vd2["channelId"]).strip()
-                          if vd2.get("viewCount") and not c.get("views"): c["views"] = int(vd2["viewCount"])
-                          if vd2.get("title"): c["title"] = str(vd2["title"]).strip()
-                          dt2 = parse_dt(mf2.get("publishDate") or mf2.get("uploadDate") or "")
-                          if dt2: c["upload_date"] = dt2
-                  except Exception: pass
-              try:
-                  rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
+                  rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "IL"}}, "videoId": vid}, timeout=10)
                   if rn.status_code == 200:
                       rt = rn.text
+                      if not c.get("channel_id"):
+                          mc = re.search(r'"videoOwnerRenderer"\s*:\s*\{.*?"browseId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', rt)
+                          if mc: c["channel_id"] = mc.group(1)
+                      if not c.get("title") or c.get("title") == vid:
+                          mt = re.search(r'"videoPrimaryInfoRenderer"\s*:\s*\{\s*"title"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"]+)"', rt)
+                          if mt: c["title"] = mt.group(1)
                       if not c.get("upload_date"):
                           md = re.search(r'"dateText"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"', rt)
                           if md:
-                              p_dt = parse_dt(md.group(1))
+                              raw_dt = md.group(1).replace("Premiered ", "").replace("Streamed live on ", "").strip()
+                              p_dt = parse_dt(raw_dt)
                               if p_dt: c["upload_date"] = p_dt
-                              else: c["published_rel"] = md.group(1)
+                              else: c["published_rel"] = raw_dt
+                      if not c.get("views"):
+                          mv = re.search(r'"viewCount"\s*:\s*\{\s*"videoViewCountRenderer"\s*:\s*\{\s*"viewCount"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"', rt)
+                          if mv: c["views"] = parse_views_text(mv.group(1))
                       if c["likes"] == 0:
                           ml = re.search(r'"likeCount"\s*:\s*(\d+)', rt)
                           if ml: c["likes"] = int(ml.group(1))
@@ -652,6 +638,23 @@ jobs:
                               mf = re.search(r'"factoidRenderer"\s*:\s*\{\s*"value"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"\s*\}\s*,\s*"label"\s*:\s*\{\s*"simpleText"\s*:\s*"Likes"', rt)
                               if mf: c["likes"] = parse_views_text(mf.group(1))
               except Exception: pass
+
+              # 2. השלמה מ-/youtubei/v1/player (אורך סרטון ורזולוציה)
+              if not c.get("upload_date") or not c.get("duration") or not c.get("channel_id"):
+                  try:
+                      r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "IL"}}, "videoId": vid}, timeout=10)
+                      if r.status_code == 200:
+                          pd = r.json(); vd = pd.get("videoDetails") or {}; mf = (pd.get("microformat") or {}).get("playerMicroformatRenderer") or {}
+                          if vd.get("channelId"): c["channel_id"] = str(vd["channelId"]).strip()
+                          if vd.get("viewCount") and not c.get("views"): c["views"] = int(vd["viewCount"])
+                          if vd.get("lengthSeconds") and not c["duration"]: c["duration"] = int(vd["lengthSeconds"])
+                          if vd.get("author"): c["channel"] = str(vd["author"]).strip()
+                          if vd.get("title"): c["title"] = str(vd["title"]).strip()
+                          dt = parse_dt(mf.get("publishDate") or mf.get("uploadDate") or "")
+                          if dt: c["upload_date"] = dt
+                          fmts = (pd.get("streamingData") or {}).get("adaptiveFormats") or []
+                          if fmts: c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
+                  except Exception: pass
 
           if selected_pool:
               with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:900]))

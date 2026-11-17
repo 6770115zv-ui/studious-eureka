@@ -105,23 +105,32 @@
     };
     const dateOp = SEASON_OPS[seasonMode] || "";
     const chObj = ALL_CHANNELS.find((x) => x.handle.toLowerCase() === ch.toLowerCase());
-    const chName = chObj ? chObj.label.replace(/^[^\s]+\s*/, "").split(" (")[0].trim() : ch.replace(/^@/, "");
+    const chName = chObj ? chObj.label.replace(/^[^\s]+\s*/, "").split(" (")[0].replace("ראשי", "הערוץ הרשמי").trim() : ch.replace(/^@/, "");
 
     const queries = [];
     if (ch && seasonMode && seasonMode !== "all") {
-      queries.push(`${chName} ${q} ${dateOp}`.trim());
-      queries.push(`${chName} תקציר ${dateOp}`.trim());
-      queries.push(`${chName} מחזור ${dateOp}`.trim());
-      queries.push(`${chName} ברצלונה ${dateOp}`.trim());
-      queries.push(`${chName} ריאל מדריד ${dateOp}`.trim());
-      queries.push(`${chName} מכבי ${dateOp}`.trim());
+      if (q) {
+        queries.push(`"${chName}" ${q} ${dateOp}`.trim());
+        queries.push(`${chName} ${q} ${dateOp}`.trim());
+      } else {
+        queries.push(`"${chName}" ${dateOp}`.trim());
+        queries.push(`"${chName}" תקציר ${dateOp}`.trim());
+        queries.push(`"${chName}" תקציר מורחב ${dateOp}`.trim());
+        queries.push(`"${chName}" מחזור ${dateOp}`.trim());
+        queries.push(`"${chName}" ברצלונה ${dateOp}`.trim());
+        queries.push(`"${chName}" ריאל מדריד ${dateOp}`.trim());
+        queries.push(`"${chName}" מילאן ${dateOp}`.trim());
+        queries.push(`"${chName}" אינטר ${dateOp}`.trim());
+        queries.push(`"${chName}" מכבי ${dateOp}`.trim());
+        queries.push(`"${chName}" הפועל ${dateOp}`.trim());
+      }
     } else if (ch || q) {
       queries.push(`${chName} ${q} ${dateOp}`.trim());
     }
 
     const foundIds = new Set();
     const ctx = { client: { clientName: "WEB", clientVersion: "2.20261101.00.00", hl: "he", gl: "IL" } };
-    await Promise.all(queries.slice(0, 6).map(async (qStr) => {
+    await Promise.all(queries.map(async (qStr) => {
       try {
         const res = await fetch("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", {
           method: "POST",
@@ -130,7 +139,8 @@
         });
         if (!res.ok) return;
         const txt = await res.text();
-        const rx = /"videoRenderer"\s*:\s*\{\s*"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"/g;
+        // תופס כל videoId בתוך תוצאות החיפוש מה-IP הישראלי (ללא תלות בסדר השדות ב-JSON!)
+        const rx = /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"/g;
         let m;
         while ((m = rx.exec(txt)) !== null) {
           foundIds.add(m[1]);
