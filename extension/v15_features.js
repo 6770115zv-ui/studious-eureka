@@ -113,8 +113,9 @@
       const durMode = ($("recDurationSelect") && $("recDurationSelect").value) || "all";
       if (durMode !== "all") tags.push("[DUR:" + durMode.toUpperCase() + "]");
 
+      const isSimQuery = String(msg.payload.query || "").toUpperCase().startsWith("SIMILAR:");
       const seasonMode = ($("recSeasonSelect") && $("recSeasonSelect").value) || "all";
-      if (seasonMode !== "all") tags.push("[SEASON:" + seasonMode.toUpperCase() + "]");
+      if (seasonMode !== "all" && !isSimQuery) tags.push("[SEASON:" + seasonMode.toUpperCase() + "]");
 
       msg.payload.filterPrompt = (basePrompt + " " + tags.join(" ")).trim();
     }
@@ -159,29 +160,7 @@
         }
       }
 
-      // 2. סינון קשיח לפי עונה (כולל הסתרת כרטיסים חסרי תאריך מ-2026 כשנבחרה עונה היסטורית!)
-      const seasonMode = ($("recSeasonSelect") && $("recSeasonSelect").value) || "all";
-      if (show && seasonMode !== "all") {
-        const mDate = txt.match(/📅\s*(\d{2})\/(\d{2})\/(\d{4})/);
-        if (!mDate) {
-          show = false;
-        } else {
-          const ymd = parseInt(mDate[3] + mDate[2] + mDate[1], 10);
-          const ranges = {
-            "2026_2027": [20260801, 20270731],
-            "2025_2026": [20250801, 20260731],
-            "2024_2025": [20240801, 20250731],
-            "2023_2024": [20230801, 20240731],
-            "2022_2023": [20220801, 20230731],
-            "year_2025": [20250101, 20251231],
-            "year_2024": [20240101, 20241231],
-            "year_2023": [20230101, 20231231],
-            "before_2023": [19900101, 20221231]
-          };
-          const rng = ranges[seasonMode];
-          if (rng && (ymd < rng[0] || ymd > rng[1])) show = false;
-        }
-      }
+
       if (show && hqOnly && totalSec > 0 && totalSec < 65) show = false;
       if (show && minViews > 0 && views < minViews) show = false;
       if (show && liveSearch && !txt.toLowerCase().includes(liveSearch)) show = false;
@@ -318,7 +297,7 @@
       });
     }
 
-    for (const id of ["recDurationSelect", "recSeasonSelect", "recMinViewsSelect", "recHighQualityOnlyToggle", "liveRecSearchInput"]) {
+    for (const id of ["recDurationSelect", "recMinViewsSelect", "recHighQualityOnlyToggle", "liveRecSearchInput"]) {
       const el = $(id);
       if (el) {
         el.addEventListener("change", applyLiveClientFilters);

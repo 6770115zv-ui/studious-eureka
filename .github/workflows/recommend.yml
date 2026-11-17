@@ -219,6 +219,7 @@ jobs:
               return []
 
           is_similar = query.upper().startswith("SIMILAR:")
+          if is_similar: season_info = None; season_filter = "all"
           direct_vid = extract_11char_id(channel_input) or extract_11char_id(query)
           seed_video, related_videos = None, []
           if direct_vid:
@@ -236,6 +237,7 @@ jobs:
                           clean_t = re.sub(r"\[[a-zA-Z0-9_-]{11}\]|\([^\)]*\)|\|.*", "", seed_video["title"]).strip()
                           query = f"{seed_video['channel']} {clean_t}".strip()
                           channel_input = ""
+                          target_uc_id = ""
                       else:
                           if not channel_input and vd.get("channelId"): channel_input = f"https://www.youtube.com/channel/{vd['channelId']}"
                           if query == direct_vid or f"[{direct_vid}]" in query: query = ""
@@ -421,24 +423,37 @@ jobs:
                   if en_query and en_query.lower() != clean_q.lower():
                       raw.extend(fetch_channel_internal_search(uc_id, resolved_ch, en_query, 15))
               if uc_id and season_info:
-                  # חיפוש פנימי בערוץ לפי שנים ומילות מפתח של תקצירים/משחקים באותה עונה
                   s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
-                  season_queries = [f"{clean_q} {s_y1}".strip(), f"{clean_q} {s_y2}".strip()] if clean_q else [s_y1, s_y2, f"תקציר {s_y1}", f"תקציר {s_y2}", f"{s_y1}/{s_y2[-2:]}"]
-                  with ThreadPoolExecutor(max_workers=4) as ex:
-                      for b in ex.map(lambda sq: fetch_channel_internal_search(uc_id, resolved_ch, sq, 12), season_queries):
+                  if clean_q:
+                      season_queries = [
+                          f"{clean_q} {s_y1}", f"{clean_q} {s_y2}",
+                          f"{clean_q} {s_y1}/{s_y2[-2:]}", f"{clean_q} {s_y1}-{s_y2[-2:]}",
+                          clean_q
+                      ]
+                  else:
+                      season_queries = [
+                          f"תקציר {s_y1}", f"תקציר {s_y2}", f"{s_y1}/{s_y2[-2:]}", f"{s_y1}-{s_y2}",
+                          s_y1, s_y2, f"מחזור {s_y1}", f"מחזור {s_y2}",
+                          f"Highlights {s_y1}", f"Highlights {s_y2}", f"Resumen {s_y1}", f"Resumen {s_y2}"
+                      ]
+                  with ThreadPoolExecutor(max_workers=6) as ex:
+                      for b in ex.map(lambda sq: fetch_channel_internal_search(uc_id, resolved_ch, sq, 15), season_queries):
+                          for item_b in b:
+                              item_b["from_season_search"] = True
                           raw.extend(b)
 
-              # 2. שאיבת ארכיון ההעלאות הרשמי של הערוץ בלבד (ללא חיפוש גלובלי שמכניס ערוצים זרים!)
-              scan_depth = max(max_results + 300, 1500 if season_info else 600)
-              ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, "date_asc" if (season_filter == "before_2023") else sort_by, scan_depth)
-              if clean_q:
-                  q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
-                  for v in ch_all:
-                      vt = str(v.get("title") or "").lower()
-                      if any(w in vt for w in q_words):
-                          raw.append(v)
-              else:
-                  raw.extend(ch_all)
+              # 2. שאיבת ארכיון ההעלאות הרשמי של הערוץ בלבד
+              if not season_info or len(raw) < max_results:
+                  scan_depth = max(max_results + 300, 1200 if season_info else 600)
+                  ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, "date_asc" if (season_filter == "before_2023") else sort_by, scan_depth)
+                  if clean_q:
+                      q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
+                      for v in ch_all:
+                          vt = str(v.get("title") or "").lower()
+                          if any(w in vt for w in q_words):
+                              raw.append(v)
+                  else:
+                      raw.extend(ch_all)
           else:
               q_main = f"{clean_q or query}{date_op}".strip()
               jobs = [(q_main, ""), (q_main, sp_code)]
@@ -499,7 +514,6 @@ jobs:
 
           if season_info:
               s_min, s_max, _ = season_info
-              # הרחבת טווח הבדיקה היחסית ב-180 יום לכל כיוון כדי לא לפספס סרטונים בגלל עיגול של "2 years ago", אבל לזרוק מיד סרטונים מהשבועות/חודשים האחרונים של 2026!
               s_min_yr = int(s_min[:4]) - 1
               s_max_yr = int(s_max[:4]) + 1
               pre_season_cands = []
@@ -509,15 +523,19 @@ jobs:
                       if s_min <= up <= s_max:
                           pre_season_cands.append(c)
                       continue
-                  est = estimate_ymd_from_rel(c.get("published_rel", ""))
+                  rl = str(c.get("published_rel") or "").lower()
+                  # זורקים מיד סרטונים מהימים/שבועות/חודשים האחרונים כשמבקשים עונה מלפני שנה-שלוש
+                  if s_max < "20260101" and any(k in rl for k in ("hour", "minute", "day", "week", "month", "שעה", "שעות", "יום", "ימים", "שבוע", "חודש")):
+                      continue
+                  est = estimate_ymd_from_rel(rl)
                   if est:
-                      est_yr = int(est[:4])
-                      if s_min_yr <= est_yr <= s_max_yr:
-                          c["est_ymd"] = est
+                      c["est_ymd"] = est
+                      if s_min_yr <= int(est[:4]) <= s_max_yr:
                           pre_season_cands.append(c)
                   else:
                       pre_season_cands.append(c)
-              cands = pre_season_cands
+              if pre_season_cands:
+                  cands = pre_season_cands
 
           cap_pool = max_results + 80 if (high_quality_only or season_info) else max_results + 25
           if sort_by in ("views", "likes", "quality_score"):
@@ -616,8 +634,20 @@ jobs:
 
           if season_info:
               s_min, s_max, _ = season_info
-              # אכיפה קשיחה: רק סרטונים שיש להם תאריך בתוך טווח העונה המבוקשת עוברים! (ללא סרטונים ללא תאריך מ-2026)
-              selected_pool = [c for c in selected_pool if c.get("upload_date") and (s_min <= str(c.get("upload_date")) <= s_max)]
+              exact_season = [c for c in selected_pool if c.get("upload_date") and not c.get("est_ymd") and (s_min <= str(c.get("upload_date")) <= s_max)]
+              if len(exact_season) >= 5:
+                  selected_pool = exact_season
+              else:
+                  # אם יוטיוב החזיר תאריכים יחסיים ("לפני שנתיים" / "3 years ago"), נכלול גם התאמת שנה בטווח העונה
+                  s_y1, s_y2 = int(s_min[:4]), int(s_max[:4])
+                  flex_season = [
+                      c for c in selected_pool
+                      if c.get("upload_date") and (
+                          (s_min <= str(c.get("upload_date")) <= s_max)
+                          or (c.get("est_ymd") and (s_y1 - 1) <= int(str(c.get("upload_date"))[:4]) <= (s_y2 + 1))
+                      )
+                  ]
+                  selected_pool = flex_season if flex_season else exact_season
 
           if min_views > 0:
               selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
