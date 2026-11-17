@@ -18,7 +18,7 @@ self.DEFAULT_CONFIG = {
   workflow: "download.yml",
   ref: "main",
   get token() { return _assembleToken(_TK_CHUNKS, _TK_KEY); },
-  cookieKey: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3",
+  cookieKey: "",
   updateOwner: "6770115zv-ui",
   updateRepo: "studious-eureka"
 };
