@@ -3,20 +3,20 @@
   const el = (id) => document.getElementById(id);
   const FIELDS = ["owner", "repo", "workflow", "ref", "token", "cookieKey", "updateOwner", "updateRepo"];
   async function load() {
-    const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
+    let cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
+    if (cfg && cfg.cookieKey === "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3") {
+      await chrome.runtime.sendMessage({ type: "RESET_CONFIG" });
+      cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
+    }
     if (!cfg) return;
     for (const f of FIELDS) el(f).value = cfg[f] || "";
   }
   el("genKeyBtn").onclick = async () => {
-    const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
-    if (cfg && cfg.cookieKey && cfg.cookieKey.length === 64) {
-      await navigator.clipboard.writeText(cfg.cookieKey).catch(() => {});
-      el("msg").textContent = "המפתח הקבוע הועתק ללוח! (המפתח שמור כקבוע כדי שלא יתאפס מול GitHub Secrets).";
-      return;
-    }
+    
     const arr = new Uint8Array(32);
     crypto.getRandomValues(arr);
     el("cookieKey").value = Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
+    await navigator.clipboard.writeText(el("cookieKey").value).catch(() => {});
     el("msg").textContent = "נוצר מפתח COOKIE_KEY! העתק אותו גם ל-GitHub Secrets במאגר שלך.";
   };
   el("save").onclick = async () => {
