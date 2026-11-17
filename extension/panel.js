@@ -1,6 +1,5 @@
 "use strict";
 (() => {
-  }).catch(() => {});
   const el = (id) => document.getElementById(id);
   const formatSelect = el("formatSelect");
   for (const p of self.YTPROXY_PRESETS) {
