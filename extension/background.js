@@ -53,9 +53,10 @@ async function setConfig(patch) {
   const stored = (await chrome.storage.local.get(CFG_KEY))[CFG_KEY] || {};
   const next = { ...stored };
   for (const [k, v] of Object.entries(patch || {})) {
-    if (v !== undefined && v !== null && String(v).trim() !== "") {
-      next[k] = String(v).trim();
-    }
+    if (v === undefined || v === null) continue;
+    const cleanVal = String(v).trim();
+    if (cleanVal === "") delete next[k];
+    else next[k] = cleanVal;
   }
   await chrome.storage.local.set({ [CFG_KEY]: next });
   return getConfig();
