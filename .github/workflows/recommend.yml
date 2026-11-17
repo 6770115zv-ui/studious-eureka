@@ -26,8 +26,7 @@ jobs:
           deno-version: v2.x
       - name: Install yt-dlp
         run: |
-          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends python3-cryptography
-          python3 -m pip install --upgrade --break-system-packages --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
+          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
       - name: Fast Channel & Topic Search Engine
         env:
           REQ_ID: ${{ inputs.request_id }}

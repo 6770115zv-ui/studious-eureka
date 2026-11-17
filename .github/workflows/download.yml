@@ -31,19 +31,17 @@ jobs:
 
       - name: Install yt-dlp + ffmpeg + curl_cffi + atomicparsley
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends ffmpeg zip python3-cryptography python3-pip atomicparsley curl
-          python3 -m pip install --break-system-packages -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests deep-translator
           if command -v docker >/dev/null 2>&1; then
-            docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest || true
-            for i in $(seq 1 15); do
-              if curl -s http://127.0.0.1:4416/ping >/dev/null 2>&1 || curl -s http://127.0.0.1:4416 >/dev/null 2>&1; then
-                echo "BgUtils PO Token Server is ready on port 4416."
-                break
-              fi
-              sleep 1
-            done
+            docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest >/dev/null 2>&1 &
           fi
+          python3 -m pip install --break-system-packages --no-cache-dir -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests deep-translator mutagen
+          for i in $(seq 1 14); do
+            if curl -s http://127.0.0.1:4416/ping >/dev/null 2>&1 || curl -s http://127.0.0.1:4416 >/dev/null 2>&1; then
+              echo "BgUtils PO Token Server is ready on port 4416."
+              break
+            fi
+            sleep 1
+          done
           python3 -m yt_dlp --version
 
       - name: Execute Smart Engine v5 (Release + Direct API Blob Bridge + Email Delivery)
@@ -753,7 +751,7 @@ jobs:
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           blob_shas = []
 
-          if len(zip_paths) == 1 and zip_size <= 35 * 1024 * 1024:
+          if len(zip_paths) == 1 and zip_size <= 65 * 1024 * 1024:
               raw_bytes = zip_path.read_bytes()
               chunk_size = 12 * 1024 * 1024
               for offset in range(0, len(raw_bytes), chunk_size):

@@ -165,6 +165,16 @@
         if (listSubsSel.value === "only") msg.payload.quality = "subs_only";
       }
     }
+    if (msg && msg.type === "START_RECOMMEND" && msg.payload) {
+      const base = String(msg.payload.filterPrompt || "").replace(/\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP)\]/gi, "").trim();
+      const tags = [];
+      if ($("recHighQualityOnlyToggle") && $("recHighQualityOnlyToggle").checked) tags.push("[HQ_ONLY]");
+      if ($("recTranslateTitlesToggle") && $("recTranslateTitlesToggle").checked) tags.push("[TR_HE]");
+      const plMode = $("v15HubPlaylistMode") && $("v15HubPlaylistMode").value;
+      if (plMode === "uu_all") tags.push("[PL_UU]");
+      else if (plMode === "streams") tags.push("[PL_STREAMS]");
+      msg.payload.filterPrompt = (base + " " + tags.join(" ")).trim();
+    }
     return origSend(msg, ...rest);
   };
 
@@ -189,10 +199,14 @@
     const box = $("videoPreview"), thumb = $("previewThumb"), titleEl = $("previewTitle"), authorEl = $("previewAuthor");
     if (!vid || !box || !titleEl || !authorEl || (vid === lastPreviewVid && box.style.display !== "none")) return;
     lastPreviewVid = vid;
+    box.dataset.v15Active = "1";
     box.style.display = "flex";
     titleEl.textContent = "⏳ טוען פרטי סרטון (" + vid + ")...";
     authorEl.textContent = "מזהה: " + vid;
-    if (thumb) thumb.src = "https://i.ytimg.com/vi/" + vid + "/mqdefault.jpg";
+    if (thumb) {
+      thumb.onerror = () => { if (self.NETFREE_SAFE_THUMB_SVG && thumb.src !== self.NETFREE_SAFE_THUMB_SVG) thumb.src = self.NETFREE_SAFE_THUMB_SVG; };
+      thumb.src = "https://i.ytimg.com/vi/" + vid + "/mqdefault.jpg";
+    }
     try {
       const res = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -429,18 +443,10 @@
       else showStatus("❌ שגיאה בהצפנת עוגיות", true);
     });
 
-    if ($("findRecsBtn")) $("findRecsBtn").addEventListener("click", () => {
+    if ($("recFilterPromptInput")) {
       const fp = $("recFilterPromptInput");
-      if (!fp) return;
-      const base = fp.value.replace(/\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP)\]/gi, "").trim();
-      const tags = [];
-      if ($("recHighQualityOnlyToggle") && $("recHighQualityOnlyToggle").checked) tags.push("[HQ_ONLY]");
-      if ($("recTranslateTitlesToggle") && $("recTranslateTitlesToggle").checked) tags.push("[TR_HE]");
-      const plMode = $("v15HubPlaylistMode") && $("v15HubPlaylistMode").value;
-      if (plMode === "uu_all") tags.push("[PL_UU]");
-      else if (plMode === "streams") tags.push("[PL_STREAMS]");
-      if (tags.length) { fp.value = base + " " + tags.join(" "); setTimeout(() => { fp.value = base; }, 400); }
-    }, true);
+      fp.value = fp.value.replace(/\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP)\]/gi, "").trim();
+    }
 
     if ($("translateVisibleRecsBtn")) $("translateVisibleRecsBtn").addEventListener("click", async () => {
       const recList = $("recList");
@@ -480,7 +486,7 @@
           card.dataset.v15Done = "1"; // מסומן מיד בשורה הראשונה למניעת לולאה אינסופית!
 
           const imgEl = card.querySelector("img");
-          if (imgEl) imgEl.loading = "lazy";
+          if (imgEl) { imgEl.loading = "lazy"; imgEl.onerror = () => { if (self.NETFREE_SAFE_THUMB_SVG && imgEl.src !== self.NETFREE_SAFE_THUMB_SVG) imgEl.src = self.NETFREE_SAFE_THUMB_SVG; }; }
 
           const titleEl = Array.from(card.querySelectorAll("a, div, span")).find((el) => /^#\d+\s*•/.test((el.textContent || "").trim()) && el.children.length === 0);
           if (titleEl) {

@@ -356,11 +356,15 @@
       const meta = await self.fetchYoutubeOembed(firstUrl);
       if (meta) {
         currentPreview = meta;
-        el("previewThumb").src = meta.thumbnail;
-        el("previewTitle").textContent = meta.title;
-        el("previewAuthor").textContent = meta.author ? ("ערוץ: " + meta.author) : "";
-        el("videoPreview").style.display = "flex";
-      } else {
+        if (el("videoPreview").dataset.v15Active !== "1") {
+          const th = el("previewThumb");
+          th.onerror = () => { if (self.NETFREE_SAFE_THUMB_SVG && th.src !== self.NETFREE_SAFE_THUMB_SVG) th.src = self.NETFREE_SAFE_THUMB_SVG; };
+          th.src = meta.thumbnail;
+          el("previewTitle").textContent = meta.title;
+          el("previewAuthor").textContent = meta.author ? ("ערוץ: " + meta.author) : "";
+          el("videoPreview").style.display = "flex";
+        }
+      } else if (el("videoPreview").dataset.v15Active !== "1") {
         el("videoPreview").style.display = "none";
       }
     }, 350);
@@ -693,9 +697,10 @@
 
       if (item.thumbnail) {
         const img = document.createElement("img");
+        img.onerror = () => { if (self.NETFREE_SAFE_THUMB_SVG && img.src !== self.NETFREE_SAFE_THUMB_SVG) img.src = self.NETFREE_SAFE_THUMB_SVG; };
         img.src = item.thumbnail;
         img.loading = "lazy";
-        img.style.cssText = "width:106px;height:60px;object-fit:cover;border-radius:8px;flex-shrink:0;";
+        img.style.cssText = "width:106px;height:60px;object-fit:cover;border-radius:8px;flex-shrink:0;background:#0f172a;";
         row.append(img);
       }
       const meta = document.createElement("div");
@@ -960,6 +965,7 @@
     if (m && m.type === "JOBS_CHANGED") renderJobs(m.jobs);
     if (m && m.type === "RECS_CHANGED") void refresh();
   });
-  setInterval(refresh, 2500);
+  setInterval(() => { if (!document.hidden) void refresh(); }, 2500);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
   void refresh();
 })();

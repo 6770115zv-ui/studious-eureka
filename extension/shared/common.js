@@ -16,6 +16,15 @@ const YTPROXY_PRESETS = [
 ];
 const YTPROXY_PRESETS_BY_ID = Object.fromEntries(YTPROXY_PRESETS.map((p) => [p.id, p]));
 
+const NETFREE_SAFE_THUMB_SVG = "data:image/svg+xml;utf8," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">' +
+  '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0f172a"/><stop offset="100%" stop-color="#1e293b"/></linearGradient></defs>' +
+  '<rect width="320" height="180" rx="12" fill="url(#g)"/>' +
+  '<circle cx="160" cy="90" r="28" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-width="2"/>' +
+  '<polygon points="153,77 153,103 175,90" fill="#38bdf8"/>' +
+  '</svg>'
+);
+
 function formatBytes(n) {
   if (!n || n < 0) return "";
   if (n < 1024 * 1024) return Math.round(n / 1024) + " KB";
@@ -32,21 +41,36 @@ function formatClock(sec) {
 
 function extractYoutubeId(url) {
   if (!url) return null;
-  const m = String(url).match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  const s = String(url).trim();
+  if (/^[a-zA-Z0-9_-]{11}$/.test(s)) return s;
+  const mBr = s.match(/\[([a-zA-Z0-9_-]{11})\]/);
+  if (mBr) return mBr[1];
+  const m = s.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|v\/|live\/)|youtu\.be\/|vi\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
 }
 
 async function fetchYoutubeOembed(url) {
+  const vid = extractYoutubeId(url);
+  if (!vid) return null;
   try {
-    const res = await fetch("https://noembed.com/embed?url=" + encodeURIComponent(url));
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (data && data.title) {
-      return {
-        title: data.title,
-        author: data.author_name || "",
-        thumbnail: data.thumbnail_url || ""
-      };
+    const res = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        context: { client: { clientName: "WEB", clientVersion: "2.20261101.00.00", hl: "he", gl: "IL" } },
+        videoId: vid
+      })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const vd = data.videoDetails || {};
+      if (vd.title) {
+        return {
+          title: vd.title,
+          author: vd.author || "",
+          thumbnail: "https://i.ytimg.com/vi/" + vid + "/mqdefault.jpg"
+        };
+      }
     }
   } catch {}
   return null;
@@ -55,20 +79,9 @@ async function fetchYoutubeOembed(url) {
 if (typeof self !== "undefined") {
   self.YTPROXY_PRESETS = YTPROXY_PRESETS;
   self.YTPROXY_PRESETS_BY_ID = YTPROXY_PRESETS_BY_ID;
+  self.NETFREE_SAFE_THUMB_SVG = NETFREE_SAFE_THUMB_SVG;
   self.formatBytes = formatBytes;
   self.formatClock = formatClock;
   self.extractYoutubeId = extractYoutubeId;
   self.fetchYoutubeOembed = fetchYoutubeOembed;
 }
-
-// extract11Bare support
-(function(root){
-  const orig = root.extractYoutubeId;
-  root.extractYoutubeId = function(input) {
-    const s = String(input || "").trim();
-    if (/^[a-zA-Z0-9_-]{11}$/.test(s)) return s;
-    const mBr = s.match(/\[([a-zA-Z0-9_-]{11})\]/);
-    if (mBr) return mBr[1];
-    return orig ? orig(input) : "";
-  };
-})(typeof globalThis !== "undefined" ? globalThis : self);

@@ -400,8 +400,7 @@ async function ensureOffscreen() {
 async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
   if (!Array.isArray(blobShas) || !blobShas.length) return null;
   try {
-    const chunks = [];
-    let totalLen = 0;
+    const blobParts = [];
     for (let i = 0; i < blobShas.length; i++) {
       const sha = blobShas[i];
       const localPct = Math.round((i / blobShas.length) * 100);
@@ -415,19 +414,14 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
       if (!res.ok) return null;
       const data = await res.json();
       if (!data || !data.content) return null;
-      const bytes = b64ToBytes(data.content);
-      chunks.push(bytes);
-      totalLen += bytes.byteLength;
+      const cleanB64 = String(data.content).replace(/\s+/g, "");
+      const binRes = await fetch("data:application/octet-stream;base64," + cleanB64);
+      blobParts.push(await binRes.blob());
     }
-    const merged = new Uint8Array(totalLen);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.byteLength;
-    }
+    const mergedBlob = new Blob(blobParts, { type: "application/zip" });
     const cacheKey = "https://ytcloud.local/asset-" + jobId + "-" + Date.now() + ".zip";
     const cache = await caches.open(ZIP_CACHE_NAME);
-    await cache.put(cacheKey, new Response(merged, { headers: { "Content-Type": "application/zip" } }));
+    await cache.put(cacheKey, new Response(mergedBlob, { headers: { "Content-Type": "application/zip" } }));
     return cacheKey;
   } catch {
     return null;
@@ -1086,7 +1080,7 @@ async function handle(msg) {
     case "TRIGGER_SELF_UPDATE": {
       const cfg = await getConfig();
       try {
-        const res = await chrome.runtime.sendNativeMessage(UPDATE_HOST, { updateOwner: cfg.updateOwner || cfg.owner, updateRepo: cfg.updateRepo || cfg.repo });
+        const res = await chrome.runtime.sendNativeMessage(UPDATE_HOST, { updateOwner: cfg.updateOwner || cfg.owner, updateRepo: cfg.updateRepo || cfg.repo, token: cfg.token || "" });
         return res && res.ok ? { ok: true } : { ok: false, error: (res && res.error) || "נכשל בעדכון" };
       } catch (e) { return { ok: false, error: e.message }; }
     }

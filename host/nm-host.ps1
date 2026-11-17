@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 try {
   $stdin = [Console]::OpenStandardInput()
   $stdout = [Console]::OpenStandardOutput()
-  $owner = ""; $repo = ""
+  $owner = ""; $repo = ""; $token = ""
   $lenBuf = New-Object byte[] 4
   if ($stdin.Read($lenBuf, 0, 4) -ge 4) {
     $len = [BitConverter]::ToInt32($lenBuf, 0)
@@ -17,13 +17,13 @@ try {
       $payload = [Text.Encoding]::UTF8.GetString($msg) | ConvertFrom-Json
       if ($payload.updateOwner) { $owner = [string]$payload.updateOwner }
       if ($payload.updateRepo)  { $repo  = [string]$payload.updateRepo }
+      if ($payload.token)       { $token = [string]$payload.token }
     }
   }
   $hostDir = Split-Path -Parent $PSCommandPath
   $ok = $true; $err = ""
   try {
-    $argsList = @()
-    if ($owner -and $repo) { $argsList = @($owner, $repo) }
+    $argsList = @($owner, $repo, $token)
     $p = Start-Process -FilePath (Join-Path $hostDir "update.bat") -ArgumentList $argsList -WorkingDirectory $hostDir -WindowStyle Hidden -Wait -PassThru
     if ($p.ExitCode -ne 0) { $ok = $false; $err = "Exit code $($p.ExitCode)" }
   } catch { $ok = $false; $err = $_.Exception.Message }
