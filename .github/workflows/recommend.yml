@@ -422,23 +422,53 @@ jobs:
                           for sq in (f"תקציר {s_y1}", f"תקציר {s_y2}", f"{s_y1}/{s_y2[-2:]}"):
                               raw.extend(fetch_yt_json(f"{ch_base}/search?query={urllib.parse.quote(sq)}", "150", uc_id, resolved_ch))
 
-                  # 2. חיפוש עם אופרטור תאריך (after:YYYY-MM-DD before:YYYY-MM-DD) אבל עם סינון קשיח must_match_uc=uc_id שזורק 100% מהערוצים הזרים!
+                  # 2. מנוע Multi-Slice Deep Harvester: פירוק העונה לתתי-תקופות חודשיות + מילות מפתח של קבוצות ומחזורים במקביל!
                   s_queries = []
+                  def build_date_slices(s_min_str: str, s_max_str: str):
+                      try:
+                          d_start = datetime.datetime.strptime(s_min_str, "%Y%m%d")
+                          d_end = datetime.datetime.strptime(s_max_str, "%Y%m%d")
+                          slices = []
+                          cur = d_start
+                          while cur < d_end:
+                              nxt = min(d_end, cur + datetime.timedelta(days=45))
+                              a_str = (cur - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                              b_str = (nxt + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                              slices.append(f"after:{a_str} before:{b_str}")
+                              cur = nxt + datetime.timedelta(days=1)
+                          return slices
+                      except Exception:
+                          return [date_op.strip()] if date_op.strip() else []
+
                   if clean_q:
                       s_queries.append((f'"{resolved_ch}" {clean_q}{date_op}', ""))
                       s_queries.append((f'"{resolved_ch}" {clean_q}{date_op}', sp_code))
+                      if en_query and en_query.lower() != clean_q.lower():
+                          s_queries.append((f'"{resolved_ch}" {en_query}{date_op}', ""))
+                          s_queries.append((f'"{resolved_ch}" {en_query}{date_op}', sp_code))
+                      if season_info:
+                          for sl_op in build_date_slices(season_info[0], season_info[1]):
+                              s_queries.append((f'"{resolved_ch}" {clean_q} {sl_op}', ""))
                   elif season_info:
                       s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
-                      s_queries = [
-                          (f'"{resolved_ch}"{date_op}', ""),
-                          (f'"{resolved_ch}"{date_op}', sp_code),
-                          (f'"{resolved_ch}" תקציר{date_op}', ""),
-                          (f'"{resolved_ch}" מחזור{date_op}', ""),
-                          (f'"{resolved_ch}" {s_y1}/{s_y2[-2:]}{date_op}', ""),
-                          (f'"{resolved_ch}" ליגת העל{date_op}', ""),
+                      # א. חלוקה ל-8 חלונות זמן של 45 יום לאורך כל העונה (כדי שיוטיוב לא יחתוך תוצאות!)
+                      for sl_op in build_date_slices(season_info[0], season_info[1]):
+                          s_queries.append((f'"{resolved_ch}" {sl_op}', ""))
+                          s_queries.append((f'"{resolved_ch}" {sl_op}', sp_code))
+                          s_queries.append((f'"{resolved_ch}" תקציר {sl_op}', ""))
+                      # ב. סריקה ממוקדת של כל הקבוצות והליגות המרכזיות בעונה הזו
+                      topic_Boosters = [
+                          "תקציר", "תקציר מורחב", "מחזור", "ברצלונה", "ריאל מדריד", "אתלטיקו",
+                          "מילאן", "אינטר", "יובנטוס", "נאפולי", "רומא", "לאציו",
+                          "מכבי תל אביב", "מכבי חיפה", "הפועל", "בית\"ר", "נבחרת",
+                          "ליגת העל", "לה ליגה", "סרייה א", "דרבי", "קלאסיקו",
+                          "Highlights", "Resumen", f"{s_y1}/{s_y2[-2:]}"
                       ]
-                  with ThreadPoolExecutor(max_workers=6) as ex:
-                      for b in ex.map(lambda q_pair: fetch_search(q_pair[0], q_pair[1], 250, uc_id, resolved_ch), s_queries):
+                      for tb in topic_Boosters:
+                          s_queries.append((f'"{resolved_ch}" {tb}{date_op}', ""))
+
+                  with ThreadPoolExecutor(max_workers=14) as ex:
+                      for b in ex.map(lambda q_pair: fetch_search(q_pair[0], q_pair[1], 300, uc_id, resolved_ch), s_queries):
                           for it_b in b:
                               it_b["matched_date_op"] = True
                           raw.extend(b)
@@ -487,7 +517,7 @@ jobs:
                   "duration": int(e.get("duration") or 0), "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          cap_pool = max(max_results + 60, 280)
+          cap_pool = max(max_results + 150, 900)
           if sort_by in ("views", "likes", "quality_score"):
               cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
           selected_pool = cands[:cap_pool]
@@ -510,7 +540,7 @@ jobs:
           def enrich(c):
               sess = get_sess(); vid = c["id"]
               try:
-                  r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
+                  r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "WEB_EMBEDDED_PLAYER", "clientVersion": "1.20261101.01.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
                   if r.status_code == 200:
                       pd = r.json(); vd = pd.get("videoDetails") or {}; mf = (pd.get("microformat") or {}).get("playerMicroformatRenderer") or {}
                       if vd.get("channelId"): c["channel_id"] = str(vd["channelId"]).strip()
@@ -522,6 +552,16 @@ jobs:
                       fmts = (pd.get("streamingData") or {}).get("adaptiveFormats") or []
                       if fmts: c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
               except Exception: pass
+              if not c.get("upload_date") or not c.get("channel_id"):
+                  try:
+                      r2 = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
+                      if r2.status_code == 200:
+                          pd2 = r2.json(); vd2 = pd2.get("videoDetails") or {}; mf2 = (pd2.get("microformat") or {}).get("playerMicroformatRenderer") or {}
+                          if vd2.get("channelId") and not c.get("channel_id"): c["channel_id"] = str(vd2["channelId"]).strip()
+                          if vd2.get("viewCount") and not c.get("views"): c["views"] = int(vd2["viewCount"])
+                          dt2 = parse_dt(mf2.get("publishDate") or mf2.get("uploadDate") or "")
+                          if dt2: c["upload_date"] = dt2
+                  except Exception: pass
               try:
                   rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
                   if rn.status_code == 200:
@@ -541,7 +581,7 @@ jobs:
               except Exception: pass
 
           if selected_pool:
-              with ThreadPoolExecutor(max_workers=24) as ex: list(ex.map(enrich, selected_pool[:320]))
+              with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:900]))
 
           # 1. נעילת ערוץ הרמטית 100% לאחר ה-enrich: זורק כל סרטון שאינו שייך ל-target_uc_id!
           if target_uc_id:
