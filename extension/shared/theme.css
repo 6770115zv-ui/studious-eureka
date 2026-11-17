@@ -12,19 +12,7 @@
   --warn: #f59e0b;
   --fail: #ef4444;
 }
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f1f5f9;
-    --surface: #ffffff;
-    --surface-2: #f8fafc;
-    --surface-3: #e2e8f0;
-    --border: rgba(15, 23, 42, 0.12);
-    --text: #0f172a;
-    --muted: #64748b;
-    --accent: #0284c7;
-    --accent-2: #4f46e5;
-  }
-}
+
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -173,3 +161,5 @@ body {
   object-fit: cover;
   border-radius: 8px;
 }
+select.input option{background:#131b2e;color:#f1f5f9}
+
