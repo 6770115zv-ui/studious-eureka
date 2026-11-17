@@ -52,6 +52,7 @@
     "https://*.githubusercontent.com/*",
     "https://*.blob.core.windows.net/*",
     "https://translate.googleapis.com/*",
-    "https://models.inference.ai.azure.com/*"
+    "https://models.inference.ai.azure.com/*",
+    "https://text.pollinations.ai/*"
   ]
 }
