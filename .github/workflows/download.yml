@@ -148,13 +148,20 @@ jobs:
           # ====================================================================
           def ts_to_ms(ts_str: str) -> int:
               try:
-                  ts_str = ts_str.strip().replace(".", ",")
-                  hms, ms = ts_str.split(",")
-                  parts = [int(x) for x in hms.split(":")]
+                  clean = re.sub(r"[^\d:,.]", "", ts_str.strip()).replace(".", ",")
+                  if "," in clean:
+                      hms, ms = clean.split(",", 1)
+                  else:
+                      hms, ms = clean, "0"
+                  parts = [int(x) for x in hms.split(":") if x.isdigit()]
                   if len(parts) == 3:
                       h, m, s = parts
-                  else:
+                  elif len(parts) == 2:
                       h, m, s = 0, parts[0], parts[1]
+                  elif len(parts) == 1:
+                      h, m, s = 0, 0, parts[0]
+                  else:
+                      return 0
                   return ((h * 3600 + m * 60 + s) * 1000) + int(ms[:3].ljust(3, "0"))
               except Exception:
                   return 0
@@ -208,7 +215,7 @@ jobs:
                       continue
                   start_ms = ts_to_ms(ts_parts[0])
                   end_ms = ts_to_ms(ts_parts[1].split()[0])
-                  if end_ms - start_ms < 140:
+                  if end_ms <= start_ms:
                       continue
 
                   text_lines = []
@@ -319,7 +326,7 @@ jobs:
                       try:
                           r = requests.post(
                               "https://translate.googleapis.com/translate_a/single",
-                              params={"client": client_id, "sl": "en", "tl": "iw", "dt": "t", "dj": "1"},
+                              params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
                               data={"q": joined_lines},
                               headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
                               timeout=20
@@ -339,7 +346,7 @@ jobs:
               # ניסיון 2: deep-translator (GoogleTranslator)
               try:
                   from deep_translator import GoogleTranslator
-                  tr_text = GoogleTranslator(source="en", target="iw").translate(joined_lines)
+                  tr_text = GoogleTranslator(source="auto", target="iw").translate(joined_lines)
                   if tr_text and has_hebrew(tr_text):
                       tr_lines = [ln.strip() for ln in tr_text.splitlines() if ln.strip()]
                       if len(tr_lines) == len(batch_cues):
@@ -355,7 +362,7 @@ jobs:
                       try:
                           r = requests.post(
                               "https://translate.googleapis.com/translate_a/single",
-                              params={"client": client_id, "sl": "en", "tl": "iw", "dt": "t", "dj": "1"},
+                              params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
                               data={"q": orig_txt},
                               headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
                               timeout=12
@@ -405,7 +412,7 @@ jobs:
                   "--sleep-requests", "1",
                   "--js-runtimes", "deno",
                   "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                  "--convert-subs", "srt",
+                  "--sub-format", "vtt/srt/best",
                   "-o", out_tmpl,
               ]
               if mode != "collection":
@@ -413,44 +420,50 @@ jobs:
               if has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
-              subprocess.run(base_sub_cmd + ["--write-subs", "--sub-langs", "he,iw", video_url], check=False)
-              he_srts = [p for p in list(subs_dir.glob("*.srt")) + list(subs_dir.glob("*.vtt")) if p.stat().st_size > 20]
-              if he_srts:
-                  src_f = he_srts[0]
-                  clean_cues = clean_and_reconstruct_sentences(src_f.read_text(encoding="utf-8", errors="replace"))
-                  if clean_cues:
-                      clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_f.stem)
-                      final_he = subs_dir / f"{clean_stem}.he.srt"
-                      final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
-                      for p in he_srts:
-                          if p != final_he:
-                              p.unlink(missing_ok=True)
-                      return [final_he], "כתוביות בעברית (SRT נקי)"
-
-              for lang_code in ["en-orig", "en", "en.*"]:
-                  subprocess.run(base_sub_cmd + ["--write-subs", "--write-auto-subs", "--sub-langs", lang_code, video_url], check=False)
-                  en_srts = [p for p in list(subs_dir.glob("*.srt")) + list(subs_dir.glob("*.vtt")) if p.stat().st_size > 20]
-                  if en_srts:
-                      src_en = en_srts[0]
-                      clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_en.stem)
-                      clean_en_cues = clean_and_reconstruct_sentences(src_en.read_text(encoding="utf-8", errors="replace"))
-                      for p in en_srts:
-                          p.unlink(missing_ok=True)
-
-                      if not clean_en_cues:
-                          continue
-
-                      he_cues = translate_cues_to_hebrew(clean_en_cues)
-                      if he_cues:
+              sub_clients = [
+                  [],
+                  ["--extractor-args", "youtube:player_client=android_vr,tv_embedded,mweb"],
+              ]
+              # 1. ניסיון כתוביות קיימות בעברית (ידניות או אוטומטיות)
+              for extra_cl in sub_clients:
+                  subprocess.run(base_sub_cmd + extra_cl + ["--write-subs", "--write-auto-subs", "--sub-langs", "he,iw", video_url], check=False)
+                  he_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15]
+                  if he_files:
+                      src_f = max(he_files, key=lambda p: p.stat().st_size)
+                      clean_cues = clean_and_reconstruct_sentences(src_f.read_text(encoding="utf-8", errors="replace"))
+                      if clean_cues:
+                          clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_f.stem)
                           final_he = subs_dir / f"{clean_stem}.he.srt"
-                          final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
-                          return [final_he], "כתוביות מתורגמות לעברית (SRT)"
-                      else:
-                          final_en = subs_dir / f"{clean_stem}.en.srt"
-                          final_en.write_text(build_srt_string(clean_en_cues), encoding="utf-8")
-                          return [final_en], "כתוביות באנגלית (SRT נקי)"
+                          final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
+                          for p in he_files:
+                              if p != final_he:
+                                  p.unlink(missing_ok=True)
+                          return [final_he], "כתוביות בעברית (SRT נקי)"
 
-              return [], "לא נמצאו כתוביות זמינות"
+              # 2. ניסיון כתוביות באנגלית או שפת המקור של הסרטון (ספרדית/צרפתית/אוטומטי) ותרגום לעברית
+              for lang_code in ["en-orig,en,es,fr,pt,de,it", "all"]:
+                  for extra_cl in sub_clients:
+                      subprocess.run(base_sub_cmd + extra_cl + ["--write-subs", "--write-auto-subs", "--sub-langs", lang_code, video_url], check=False)
+                      cand_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15 and not p.name.endswith("live_chat.json")]
+                      if cand_files:
+                          src_en = max(cand_files, key=lambda p: p.stat().st_size)
+                          clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_en.stem)
+                          clean_en_cues = clean_and_reconstruct_sentences(src_en.read_text(encoding="utf-8", errors="replace"))
+                          for p in cand_files:
+                              p.unlink(missing_ok=True)
+                          if not clean_en_cues:
+                              continue
+                          he_cues = translate_cues_to_hebrew(clean_en_cues)
+                          if he_cues:
+                              final_he = subs_dir / f"{clean_stem}.he.srt"
+                              final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
+                              return [final_he], "כתוביות מתורגמות לעברית (SRT)"
+                          else:
+                              final_en = subs_dir / f"{clean_stem}.en.srt"
+                              final_en.write_text(build_srt_string(clean_en_cues), encoding="utf-8")
+                              return [final_en], "כתוביות מקור (SRT נקי)"
+
+              return [], "לסרטון זה אין כתוביות ביוטיוב"
 
           if is_subs_only:
               quality_report = "כתוביות בלבד (SRT)"

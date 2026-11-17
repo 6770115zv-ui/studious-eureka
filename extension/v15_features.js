@@ -165,14 +165,18 @@
   }
 
   function cleanSportsTermsHe(t) {
-    return String(t || "").replace(/\\u[0-9a-fA-F]{4}/g, " ").replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, "")
+    return String(t || "").replace(/[\u2066-\u2069]/g, "").replace(/\\u[0-9a-fA-F]{4}/g, " ").replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, "")
       .replace(/\s*\([^)]*[a-zA-Z]{4,}[^)]*\)\s*$/g, "")
       .replace(/\bEXTENDED HIGHLIGHTS\b/gi, "תקציר מורחב")
       .replace(/\b(?:HIGHLIGHTS|HHIHLIGHTS|RESUMEN)\b/gi, "תקציר")
-      .replace(/\b(?:FULL MATCH|PARTIDO COMPLETO)\b/gi, "משחק מלא")
-      .replace(/\bFC Barcelona\b/gi, "ברצלונה")
+      .replace(/\b(?:FULL MATCH|PARTIDO COMPLETO|PARTIDO ENTERO)\b/gi, "משחק מלא")
+      .replace(/\bFC Barcelona\b|\bBarça\b/gi, "ברצלונה")
       .replace(/\bReal Madrid\b/gi, "ריאל מדריד")
       .replace(/\bAtl[eé]tico de Madrid\b/gi, "אתלטיקו מדריד")
+      .replace(/\bLa\s*Mas[ií]a\b/gi, "לה מאסיה")
+      .replace(/\bOrian Goren\b/gi, "אוריין גורן")
+      .replace(/\bLamine Yamal\b/gi, "לאמין ימאל")
+      .replace(/\bPau Cubars[ií]\b/gi, "פאו קובארסי")
       .replace(/\bLALIGA EA SPORTS\b/gi, "לה ליגה")
       .replace(/\bדגשים\b|\bהבהרה\b/g, "תקציר")
       .trim();
@@ -517,7 +521,15 @@
             const pfx = (titleEl.textContent.match(/^#\d+\s*•\s*/) || [""])[0];
             const raw = titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim();
             titleEl.title = raw;
-            titleEl.textContent = pfx + cleanSportsTermsHe(raw);
+            const cleaned = cleanSportsTermsHe(raw);
+            titleEl.textContent = pfx + cleaned;
+            const autoTr = !$("recTranslateTitlesToggle") || $("recTranslateTitlesToggle").checked;
+            if (autoTr && (cleaned.match(/[a-zA-Z]/g) || []).length >= 5 && !titleEl.dataset.trQueued) {
+              titleEl.dataset.trQueued = "1";
+              translateSingleToHebrew(cleaned).then((he) => {
+                if (he && titleEl.isConnected) titleEl.textContent = pfx + he;
+              }).catch(() => {});
+            }
           }
 
           let vid11 = "";

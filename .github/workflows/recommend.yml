@@ -460,49 +460,69 @@ jobs:
           pool = pool[:max_results]
 
           def translate_titles_properly(items_arr):
-              gh_tok = os.environ.get("GH_TOKEN", "").strip()
               def pre_clean(t: str) -> str:
-                  s = re.sub(r"\bEXTENDED HIGHLIGHTS\b", "תקציר מורחב", t, flags=re.I)
+                  s = re.sub(r"[\u2066-\u2069]", "", str(t or ""))
+                  s = re.sub(r"\bEXTENDED HIGHLIGHTS\b", "תקציר מורחב", s, flags=re.I)
                   s = re.sub(r"\b(?:HIGHLIGHTS|HHIHLIGHTS|RESUMEN)\b", "תקציר", s, flags=re.I)
-                  s = re.sub(r"\b(?:FULL MATCH|PARTIDO COMPLETO)\b", "משחק מלא", s, flags=re.I)
-                  s = re.sub(r"\bFC Barcelona\b", "ברצלונה", s, flags=re.I)
+                  s = re.sub(r"\b(?:FULL MATCH|PARTIDO COMPLETO|PARTIDO ENTERO)\b", "משחק מלא", s, flags=re.I)
+                  s = re.sub(r"\bFC Barcelona\b|\bBarça\b", "ברצלונה", s, flags=re.I)
                   s = re.sub(r"\bReal Madrid\b", "ריאל מדריד", s, flags=re.I)
                   s = re.sub(r"\bAtl[eé]tico de Madrid\b", "אתלטיקו מדריד", s, flags=re.I)
-                  s = re.sub(r"\bLALIGA EA SPORTS\b", "לה ליגה", s, flags=re.I)
-                  return s
+                  s = re.sub(r"\bLa\s*Mas[ií]a\b", "לה מאסיה", s, flags=re.I)
+                  s = re.sub(r"\bOrian Goren\b", "אוריין גורן", s, flags=re.I)
+                  s = re.sub(r"\bLamine Yamal\b", "לאמין ימאל", s, flags=re.I)
+                  s = re.sub(r"\bPau Cubars[ií]\b", "פאו קובארסי", s, flags=re.I)
+                  return s.strip()
+
               need_tr = []
               for idx, it in enumerate(items_arr):
                   it["orig_title"] = it["title"]
                   it["title_he"] = pre_clean(it["title"])
-                  if sum(1 for ch in it["title_he"] if "a" <= ch.lower() <= "z") > 2:
+                  if sum(1 for ch in it["title_he"] if "a" <= ch.lower() <= "z") > 1:
                       need_tr.append((idx, it["title_he"]))
-              def ai_chunk(pairs):
-                  if not gh_tok: return {}
-                  sys_p = "תרגם כל כותרת סרטון (מאנגלית, ספרדית או כל שפה) לעברית ישראלית טבעית וחלקה ללא מילים לועזיות. Highlights/Resumen=תקציר, Full Match=משחק מלא. החזר רק JSON: {\"items\":[{\"i\":0,\"he\":\"...\"}]}"
-                  try:
-                      r = requests.post("https://models.inference.ai.azure.com/chat/completions", headers={"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"}, json={"model": "gpt-4o-mini", "messages": [{"role": "system", "content": sys_p}, {"role": "user", "content": json.dumps([{"i": i, "t": t} for i, t in pairs], ensure_ascii=False)}], "temperature": 0.1}, timeout=20)
-                      if r.status_code == 200:
-                          m = re.search(r"\{.*\}", re.sub(r"```(?:json)?|```", "", r.json()["choices"][0]["message"]["content"]).strip(), re.DOTALL)
-                          if m: return {int(x["i"]): str(x["he"]).strip() for x in (json.loads(m.group(0)).get("items") or []) if x.get("he")}
-                  except Exception: pass
-                  return {}
+
+              def tr_batch(batch_pairs):
+                  joined = "\n".join(p[1].replace("\n", " ") for p in batch_pairs)
+                  for client_id in ("gtx", "dict-chrome-ex"):
+                      try:
+                          r = requests.post(
+                              "https://translate.googleapis.com/translate_a/single",
+                              params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
+                              data={"q": joined},
+                              headers={"User-Agent": UA_STR, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                              timeout=15
+                          )
+                          if r.status_code == 200:
+                              sents = r.json().get("sentences") or []
+                              full_tr = "".join(s.get("trans", "") for s in sents if "trans" in s).strip()
+                              lines = [ln.strip() for ln in full_tr.splitlines() if ln.strip()]
+                              if len(lines) == len(batch_pairs):
+                                  for (item_idx, _), tr_line in zip(batch_pairs, lines):
+                                      items_arr[item_idx]["title_he"] = pre_clean(tr_line)
+                                  return
+                      except Exception:
+                          pass
+                  for item_idx, orig_t in batch_pairs:
+                      try:
+                          r = requests.post(
+                              "https://translate.googleapis.com/translate_a/single",
+                              params={"client": "gtx", "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
+                              data={"q": orig_t},
+                              headers={"User-Agent": UA_STR, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                              timeout=10
+                          )
+                          if r.status_code == 200:
+                              sents = r.json().get("sentences") or []
+                              tr_s = " ".join(s.get("trans", "").strip() for s in sents if s.get("trans")).strip()
+                              if tr_s:
+                                  items_arr[item_idx]["title_he"] = pre_clean(tr_s)
+                      except Exception:
+                          pass
+
               if need_tr:
-                  chunks = [need_tr[i:i + 30] for i in range(0, len(need_tr), 30)]
-                  with ThreadPoolExecutor(max_workers=3) as ex:
-                      for rmap in ex.map(ai_chunk, chunks):
-                          for ki, hv in rmap.items():
-                              if 0 <= ki < len(items_arr) and hv: items_arr[ki]["title_he"] = hv
-              def tr_one(pair):
-                  idx, txt = pair
-                  try:
-                      r = requests.get("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=iw&dt=t&q=" + urllib.parse.quote(txt), timeout=8)
-                      if r.status_code == 200:
-                          s = "".join(seg[0] for seg in (r.json()[0] or []) if seg and seg[0]).strip()
-                          if s: items_arr[idx]["title_he"] = s
-                  except Exception: pass
-              rem = [(idx, it["title_he"]) for idx, it in enumerate(items_arr) if sum(1 for ch in it.get("title_he", "") if "a" <= ch.lower() <= "z") > 3]
-              if rem:
-                  with ThreadPoolExecutor(max_workers=12) as ex: list(ex.map(tr_one, rem))
+                  batches = [need_tr[i:i + 30] for i in range(0, len(need_tr), 30)]
+                  with ThreadPoolExecutor(max_workers=4) as ex:
+                      list(ex.map(tr_batch, batches))
 
           def apply_ai_filter(items_arr, prompt_rule):
               if not items_arr or not prompt_rule:
@@ -580,7 +600,7 @@ jobs:
               qb = "4K" if mh >= 2160 else ("1440p" if mh >= 1440 else ("1080p HD" if mh >= 1080 else ("720p" if mh >= 720 else (f"{mh}p" if mh > 0 else ""))))
               item["quality_badge"] = qb
               item["channel"] = " • ".join(p for p in [item["channel"], f"🎬 {qb}" if qb else ""] if p)
-              if translate_titles and item.get("title_he"): item["title"] = item["title_he"]
+              if item.get("title_he"): item["title"] = item["title_he"]
 
           payload_bytes = json.dumps({"query": query, "channel": resolved_ch or channel_input, "sort_by": sort_by, "items": pool}, ensure_ascii=False).encode("utf-8")
           with open("recommendations.json", "wb") as f: f.write(payload_bytes)
