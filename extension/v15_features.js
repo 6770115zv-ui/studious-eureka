@@ -466,6 +466,23 @@
     });
   }
 
+  function cleanZeroTabs() {
+    if (!chrome || !chrome.storage || !chrome.storage.local) return;
+    chrome.storage.local.get(["ytproxy_rec_sessions"], (d) => {
+      if (!d || !d.ytproxy_rec_sessions) return;
+      const next = {};
+      let changed = false;
+      for (const [k, s] of Object.entries(d.ytproxy_rec_sessions)) {
+        if (s && s.status === "completed" && (!s.items || s.items.length === 0)) {
+          changed = true;
+          continue;
+        }
+        next[k] = s;
+      }
+      if (changed) chrome.storage.local.set({ ytproxy_rec_sessions: next });
+    });
+  }
+  cleanZeroTabs();
   function init() {
     initHubAndEvents();
     const obs = new MutationObserver(scheduleEnhanceCards);

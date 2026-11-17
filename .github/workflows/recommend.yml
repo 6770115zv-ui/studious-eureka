@@ -44,7 +44,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - << 'EOF'
-          import base64, json, os, re, subprocess, threading, urllib.parse, requests
+          import base64, datetime, json, os, re, subprocess, threading, urllib.parse, requests
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -68,6 +68,7 @@ jobs:
           dur_filter = m_dur.group(1) if m_dur else "all"
           m_season = re.search(r"\[season:([a-z0-9_]+)\]", fp_low)
           season_filter = m_season.group(1) if m_season else "all"
+
           SEASON_RANGES = {
               "2026_2027": ("20260801", "20270731", "after:2026-07-31"),
               "2025_2026": ("20250801", "20260731", "after:2025-07-31 before:2026-08-01"),
@@ -163,7 +164,15 @@ jobs:
                               if bid.startswith("UC"):
                                   ch_id = bid
                                   break
-                          out_vids.append({"id": vid, "title": title.strip(), "channel": "".join(r.get("text", "") for r in ch_runs).strip(), "channel_id": ch_id, "view_count": parse_views_text(vc_txt), "published_rel": pub_rel.strip(), "duration": dur_sec})
+                          out_vids.append({
+                              "id": vid,
+                              "title": title.strip(),
+                              "channel": "".join(r.get("text", "") for r in ch_runs).strip(),
+                              "channel_id": ch_id,
+                              "view_count": parse_views_text(vc_txt),
+                              "published_rel": pub_rel.strip(),
+                              "duration": dur_sec
+                          })
                   if "continuationItemRenderer" in obj:
                       for t in find_tokens(obj["continuationItemRenderer"]):
                           if t not in out_grid_toks: out_grid_toks.append(t)
@@ -172,22 +181,28 @@ jobs:
               elif isinstance(obj, list):
                   for it in obj: walk_items(it, out_vids, out_grid_toks, out_chip_toks)
 
-          def fetch_search(q_str: str, sp_param: str = "", target_count: int = 140):
+          def fetch_search(q_str: str, sp_param: str = "", target_count: int = 160, must_match_uc: str = "", must_match_name: str = ""):
               if not q_str: return []
               api_url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false"
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
               payload = {"context": ctx, "query": q_str}
               if sp_param: payload["params"] = sp_param
               collected, seen_vids, visited = [], set(), set()
+              max_s_pages = max(8, min(35, (target_count // 15) + 4))
               try:
                   r = requests.post(api_url, headers=build_headers(), json=payload, timeout=15)
                   if r.status_code != 200: return []
                   vids, toks, _ = [], [], []
                   walk_items(r.json(), vids, toks, _)
                   for v in vids:
-                      if v["id"] not in seen_vids: seen_vids.add(v["id"]); collected.append(v)
+                      if v["id"] in seen_vids: continue
+                      if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc:
+                          continue
+                      if must_match_name and not v.get("channel_id") and v.get("channel") and v["channel"].strip().lower() != must_match_name.strip().lower():
+                          continue
+                      seen_vids.add(v["id"])
+                      collected.append(v)
                   pages = 0
-                  max_s_pages = max(10, min(45, (target_count // 18) + 4))
                   while toks and len(collected) < target_count and pages < max_s_pages:
                       nt = toks.pop(0)
                       if nt in visited: continue
@@ -197,13 +212,19 @@ jobs:
                       mv, mt, _ = [], [], []
                       walk_items(rn.json(), mv, mt, _)
                       for v in mv:
-                          if v["id"] not in seen_vids: seen_vids.add(v["id"]); collected.append(v)
+                          if v["id"] in seen_vids: continue
+                          if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc:
+                              continue
+                          if must_match_name and not v.get("channel_id") and v.get("channel") and v["channel"].strip().lower() != must_match_name.strip().lower():
+                              continue
+                          seen_vids.add(v["id"])
+                          collected.append(v)
                       for t in mt:
                           if t not in visited: toks.append(t)
               except Exception: pass
               return collected
 
-          def fetch_yt_json(target_url, limit_str):
+          def fetch_yt_json(target_url, limit_str, forced_uc: str = "", forced_name: str = ""):
               for use_ck in ([False, True] if has_ck else [False]):
                   cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--flat-playlist", "--playlist-end", str(limit_str), "--ignore-errors", "--no-warnings", "--js-runtimes", "deno"]
                   if use_ck: cmd += ["--cookies", str(cookie_file)]
@@ -213,13 +234,21 @@ jobs:
                   for ln in r.stdout.splitlines():
                       try:
                           d = json.loads(ln)
-                          if d.get("id") and len(str(d.get("id"))) == 11: out.append(d)
+                          vid = str(d.get("id") or "")
+                          if len(vid) == 11:
+                              if forced_uc: d["channel_id"] = forced_uc
+                              if forced_name and not d.get("channel"): d["channel"] = forced_name
+                              out.append(d)
                       except Exception: pass
                   if out: return out
               return []
 
           is_similar = query.upper().startswith("SIMILAR:")
-          if is_similar: season_info = None; season_filter = "all"
+          if is_similar:
+              season_info = None
+              season_filter = "all"
+              channel_input = ""
+
           direct_vid = extract_11char_id(channel_input) or extract_11char_id(query)
           seed_video, related_videos = None, []
           if direct_vid:
@@ -227,7 +256,7 @@ jobs:
                   pr = requests.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", headers=build_headers(), json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": direct_vid}, timeout=12)
                   vd = (pr.json().get("videoDetails") or {}) if pr.status_code == 200 else {}
                   if vd.get("videoId"):
-                      seed_video = {"id": vd["videoId"], "title": vd.get("title") or direct_vid, "channel": vd.get("author") or "", "view_count": int(vd.get("viewCount") or 0), "duration": int(vd.get("lengthSeconds") or 0)}
+                      seed_video = {"id": vd["videoId"], "title": vd.get("title") or direct_vid, "channel": vd.get("author") or "", "channel_id": vd.get("channelId") or "", "view_count": int(vd.get("viewCount") or 0), "duration": int(vd.get("lengthSeconds") or 0)}
                       rn = requests.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", headers=build_headers(), json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": direct_vid}, timeout=12)
                       if rn.status_code == 200:
                           rv, rt, _ = [], [], []
@@ -237,7 +266,6 @@ jobs:
                           clean_t = re.sub(r"\[[a-zA-Z0-9_-]{11}\]|\([^\)]*\)|\|.*", "", seed_video["title"]).strip()
                           query = f"{seed_video['channel']} {clean_t}".strip()
                           channel_input = ""
-                          target_uc_id = ""
                       else:
                           if not channel_input and vd.get("channelId"): channel_input = f"https://www.youtube.com/channel/{vd['channelId']}"
                           if query == direct_vid or f"[{direct_vid}]" in query: query = ""
@@ -284,7 +312,7 @@ jobs:
                   except Exception: pass
               return base, uc_id, name
 
-          def fetch_playlist_browse(browse_id: str, ch_title: str, max_pages: int = 90, target_count: int = 2500):
+          def fetch_playlist_browse(browse_id: str, ch_title: str, uc_id: str, max_pages: int = 85, target_count: int = 2500):
               api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
               collected, seen_vids, visited = [], set(), set()
@@ -294,7 +322,8 @@ jobs:
                   pv, pt, _ = [], [], []
                   walk_items(rp.json(), pv, pt, _)
                   for v in pv:
-                      if v["id"] not in seen_vids: seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = browse_id if browse_id.startswith("UC") else ("UC" + browse_id[4:] if browse_id.startswith("VLUU") else v.get("channel_id", "")); collected.append(v)
+                      if v["id"] not in seen_vids:
+                          seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
                   pages = 0
                   while pt and len(collected) < target_count and pages < max_pages:
                       nt = pt.pop(0)
@@ -305,25 +334,27 @@ jobs:
                       mv, mt, _ = [], [], []
                       walk_items(rn.json(), mv, mt, _)
                       for v in mv:
-                          if v["id"] not in seen_vids: seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = browse_id if browse_id.startswith("UC") else ("UC" + browse_id[4:] if browse_id.startswith("VLUU") else v.get("channel_id", "")); collected.append(v)
+                          if v["id"] not in seen_vids:
+                              seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
                       for t in mt:
                           if t not in visited: pt.append(t)
               except Exception: pass
               return collected
 
-          def fetch_channel_vids(base_url: str, uc_id: str, ch_title: str, sort_mode: str, target_count: int = 450):
+          def fetch_channel_vids(base_url: str, uc_id: str, ch_title: str, sort_mode: str, target_count: int = 800):
               collected, seen_vids = [], set()
               def add_items(arr):
                   for v in arr:
                       vid = v.get("id")
                       if vid and len(vid) == 11 and vid not in seen_vids:
                           seen_vids.add(vid)
-                          v["channel"] = ch_title; v["channel_id"] = uc_id or v.get("channel_id", "")
+                          v["channel"] = ch_title
+                          v["channel_id"] = uc_id
                           collected.append(v)
               if playlist_mode == "streams" and base_url:
-                  add_items(fetch_yt_json(f"{base_url}/streams", str(target_count)))
+                  add_items(fetch_yt_json(f"{base_url}/streams", str(target_count), uc_id, ch_title))
               if uc_id and sort_mode in ("views", "likes", "quality_score") and playlist_mode != "uu_all":
-                  add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, 14, target_count))
+                  add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, uc_id, 30, target_count))
               if uc_id and len(collected) < target_count:
                   api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
                   ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
@@ -343,7 +374,7 @@ jobs:
                           if not active:
                               add_items(iv); active = ig[:]
                           pages = 0
-                          max_c_pages = max(25, min(95, (target_count // 25) + 10))
+                          max_c_pages = max(25, min(90, (target_count // 25) + 10))
                           while active and len(collected) < target_count and pages < max_c_pages:
                               nt = active.pop(0)
                               if nt in visited: continue
@@ -358,17 +389,12 @@ jobs:
                           if len(collected) < 15 and iv: add_items(iv)
                   except Exception: pass
               if uc_id and (len(collected) < max_results or playlist_mode == "uu_all"):
-                  add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, max(35, min(95, (target_count // 25) + 15)), max(target_count, 800)))
-              if len(collected) < 25:
-                  if uc_id: add_items(fetch_yt_json(f"https://www.youtube.com/playlist?list=UU{uc_id[2:]}", str(max(target_count, 450))))
-                  if base_url:
-                      add_items(fetch_yt_json(f"{base_url}/videos", str(max(target_count, 350))))
-                      add_items(fetch_yt_json(f"{base_url}/streams", "150"))
+                  add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, uc_id, max(35, min(90, (target_count // 25) + 15)), max(target_count, 800)))
               return collected
 
           clean_q = re.sub(r"[!?\u05be]+", " ", query).strip()
           en_query = ""
-          if clean_q and any("\u0590" <= ch <= "\u05FF" for ch in clean_q):
+          if clean_q and any("\u0590" <= ch <= "\u05FF" for ch in clean_q) and not is_similar:
               try:
                   tr_r = requests.get("https://translate.googleapis.com/translate_a/single?client=gtx&sl=iw&tl=en&dt=t&q=" + urllib.parse.quote(clean_q), timeout=10)
                   if tr_r.status_code == 200: en_query = "".join(p[0] for p in tr_r.json()[0] if p and p[0]).strip()
@@ -379,78 +405,51 @@ jobs:
           if seed_video and not is_similar: raw.append(seed_video)
           if related_videos: raw.extend(related_videos)
           resolved_ch = channel_input
-
-          def fetch_channel_internal_search(uc_id: str, ch_title: str, q_str: str, max_pages: int = 15):
-              if not uc_id or not q_str: return []
-              api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
-              ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
-              # params="EgZzZWFyY2g%3D" מפעיל את לשונית החיפוש הפנימית של הערוץ עצמו בלבד!
-              payload = {"context": ctx, "browseId": uc_id, "params": "EgZzZWFyY2g%3D", "query": q_str}
-              collected, seen_vids, visited = [], set(), set()
-              try:
-                  r = requests.post(api_url, headers=build_headers(), json=payload, timeout=15)
-                  if r.status_code != 200: return []
-                  vids, toks, _ = [], [], []
-                  walk_items(r.json(), vids, toks, _)
-                  for v in vids:
-                      if v["id"] not in seen_vids:
-                          seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
-                  pages = 0
-                  while toks and pages < max_pages:
-                      nt = toks.pop(0)
-                      if nt in visited: continue
-                      visited.add(nt); pages += 1
-                      rn = requests.post(api_url, headers=build_headers(), json={"context": ctx, "continuation": nt}, timeout=15)
-                      if rn.status_code != 200: break
-                      mv, mt, _ = [], [], []
-                      walk_items(rn.json(), mv, mt, _)
-                      for v in mv:
-                          if v["id"] not in seen_vids:
-                              seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
-                      for t in mt:
-                          if t not in visited: toks.append(t)
-              except Exception: pass
-              return collected
+          target_uc_id = ""
 
           date_op = f" {season_info[2]}" if season_info else ""
-          target_uc_id = ""
           if channel_input:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
               target_uc_id = uc_id
-              # 1. אם הוזנו מילות חיפוש או עונה, נפעיל קודם כל את החיפוש הפנימי של הערוץ עצמו (100% מתוך הערוץ בלבד!)
-              if uc_id and clean_q:
-                  raw.extend(fetch_channel_internal_search(uc_id, resolved_ch, clean_q, 20))
-                  if en_query and en_query.lower() != clean_q.lower():
-                      raw.extend(fetch_channel_internal_search(uc_id, resolved_ch, en_query, 15))
-              if uc_id and season_info:
-                  s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
+              if season_info or clean_q:
+                  # 1. חיפוש ישיר בתוך כתובת הערוץ ביוטיוב דרך yt-dlp (100% מתוך הערוץ בלבד!)
+                  if ch_base:
+                      ch_s_term = f"{clean_q} {season_info[0][:4]}".strip() if season_info else clean_q
+                      if ch_s_term:
+                          raw.extend(fetch_yt_json(f"{ch_base}/search?query={urllib.parse.quote(ch_s_term)}", "250", uc_id, resolved_ch))
+                      if season_info and not clean_q:
+                          s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
+                          for sq in (f"תקציר {s_y1}", f"תקציר {s_y2}", f"{s_y1}/{s_y2[-2:]}"):
+                              raw.extend(fetch_yt_json(f"{ch_base}/search?query={urllib.parse.quote(sq)}", "150", uc_id, resolved_ch))
+
+                  # 2. חיפוש עם אופרטור תאריך (after:YYYY-MM-DD before:YYYY-MM-DD) אבל עם סינון קשיח must_match_uc=uc_id שזורק 100% מהערוצים הזרים!
+                  s_queries = []
                   if clean_q:
-                      season_queries = [
-                          f"{clean_q} {s_y1}", f"{clean_q} {s_y2}",
-                          f"{clean_q} {s_y1}/{s_y2[-2:]}", f"{clean_q} {s_y1}-{s_y2[-2:]}",
-                          clean_q
-                      ]
-                  else:
-                      season_queries = [
-                          f"תקציר {s_y1}", f"תקציר {s_y2}", f"{s_y1}/{s_y2[-2:]}", f"{s_y1}-{s_y2}",
-                          s_y1, s_y2, f"מחזור {s_y1}", f"מחזור {s_y2}",
-                          f"Highlights {s_y1}", f"Highlights {s_y2}", f"Resumen {s_y1}", f"Resumen {s_y2}"
+                      s_queries.append((f'"{resolved_ch}" {clean_q}{date_op}', ""))
+                      s_queries.append((f'"{resolved_ch}" {clean_q}{date_op}', sp_code))
+                  elif season_info:
+                      s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
+                      s_queries = [
+                          (f'"{resolved_ch}"{date_op}', ""),
+                          (f'"{resolved_ch}"{date_op}', sp_code),
+                          (f'"{resolved_ch}" תקציר{date_op}', ""),
+                          (f'"{resolved_ch}" מחזור{date_op}', ""),
+                          (f'"{resolved_ch}" {s_y1}/{s_y2[-2:]}{date_op}', ""),
+                          (f'"{resolved_ch}" ליגת העל{date_op}', ""),
                       ]
                   with ThreadPoolExecutor(max_workers=6) as ex:
-                      for b in ex.map(lambda sq: fetch_channel_internal_search(uc_id, resolved_ch, sq, 15), season_queries):
-                          for item_b in b:
-                              item_b["from_season_search"] = True
+                      for b in ex.map(lambda q_pair: fetch_search(q_pair[0], q_pair[1], 250, uc_id, resolved_ch), s_queries):
+                          for it_b in b:
+                              it_b["matched_date_op"] = True
                           raw.extend(b)
 
-              # 2. שאיבת ארכיון ההעלאות הרשמי של הערוץ בלבד
-              if not season_info or len(raw) < max_results:
-                  scan_depth = max(max_results + 300, 1200 if season_info else 600)
-                  ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, "date_asc" if (season_filter == "before_2023") else sort_by, scan_depth)
+              # 3. אם לא נבחרה עונה ישנה (או שצריך השלמה מהפלייליסט של הערוץ)
+              if not season_info:
+                  ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 600))
                   if clean_q:
                       q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
                       for v in ch_all:
-                          vt = str(v.get("title") or "").lower()
-                          if any(w in vt for w in q_words):
+                          if any(w in str(v.get("title") or "").lower() for w in q_words):
                               raw.append(v)
                   else:
                       raw.extend(ch_all)
@@ -469,75 +468,26 @@ jobs:
               vid = e.get("id")
               title = (e.get("title") or "").strip()
               if not vid or vid in seen_ids or len(vid) != 11 or not title: continue
-              # נעילת ערוץ הרמטית: אם המשתמש ביקש ערוץ ספציפי, דחה על הסף כל סרטון שמגיע מערוץ אחר!
               e_cid = str(e.get("channel_id") or "").strip()
               e_ch = str(e.get("channel") or e.get("uploader") or "").strip()
+              # נעילת ערוץ הרמטית:
               if target_uc_id and e_cid and e_cid != target_uc_id:
                   continue
-              if channel_input and resolved_ch and e_ch and e_ch.lower() != resolved_ch.lower() and not e_cid:
+              if channel_input and resolved_ch and not e_cid and e_ch and e_ch.strip().lower() != resolved_ch.strip().lower():
                   continue
               seen_ids.add(vid)
               cands.append({
                   "id": vid, "title": title, "url": f"https://www.youtube.com/watch?v={vid}",
                   "channel": resolved_ch if channel_input else (e_ch or resolved_ch),
-                  "channel_id": e_cid or target_uc_id,
+                  "channel_id": e_cid or "",
                   "views": parse_views_text(e.get("view_count") or 0), "likes": int(e.get("like_count") or 0),
                   "upload_date": str(e.get("upload_date") or "").strip().replace("-", ""),
                   "published_rel": str(e.get("published_rel") or ""), "max_height": 0, "orig_pos": idx_pos,
+                  "matched_date_op": bool(e.get("matched_date_op")),
                   "duration": int(e.get("duration") or 0), "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
               })
 
-          import datetime
-          now_dt = datetime.datetime.utcnow()
-          today_ymd = now_dt.strftime("%Y%m%d")
-
-          def estimate_ymd_from_rel(rel_str: str) -> str:
-              rl = str(rel_str or "").lower()
-              if not rl: return ""
-              if any(k in rl for k in ("hour", "minute", "second", "שעה", "שעות", "דקה", "דקות", "streamed", "premiered")):
-                  return today_ymd
-              m_num = re.search(r"(\d+)", rl)
-              num = int(m_num.group(1)) if m_num else 1
-              if "יומיים" in rl: num = 2
-              elif "שבועיים" in rl: num = 2
-              elif "חודשיים" in rl: num = 2
-              elif "שנתיים" in rl: num = 2
-              if any(k in rl for k in ("day", "יום", "ימים", "יומיים")):
-                  return (now_dt - datetime.timedelta(days=num)).strftime("%Y%m%d")
-              if any(k in rl for k in ("week", "שבוע", "שבועות", "שבועיים")):
-                  return (now_dt - datetime.timedelta(days=num * 7)).strftime("%Y%m%d")
-              if any(k in rl for k in ("month", "חודש", "חודשים", "חודשיים")):
-                  return (now_dt - datetime.timedelta(days=num * 30)).strftime("%Y%m%d")
-              if any(k in rl for k in ("year", "שנה", "שנים", "שנתיים")):
-                  return (now_dt - datetime.timedelta(days=num * 365)).strftime("%Y%m%d")
-              return ""
-
-          if season_info:
-              s_min, s_max, _ = season_info
-              s_min_yr = int(s_min[:4]) - 1
-              s_max_yr = int(s_max[:4]) + 1
-              pre_season_cands = []
-              for c in cands:
-                  up = str(c.get("upload_date") or "")
-                  if up:
-                      if s_min <= up <= s_max:
-                          pre_season_cands.append(c)
-                      continue
-                  rl = str(c.get("published_rel") or "").lower()
-                  # זורקים מיד סרטונים מהימים/שבועות/חודשים האחרונים כשמבקשים עונה מלפני שנה-שלוש
-                  if s_max < "20260101" and any(k in rl for k in ("hour", "minute", "day", "week", "month", "שעה", "שעות", "יום", "ימים", "שבוע", "חודש")):
-                      continue
-                  est = estimate_ymd_from_rel(rl)
-                  if est:
-                      c["est_ymd"] = est
-                      if s_min_yr <= int(est[:4]) <= s_max_yr:
-                          pre_season_cands.append(c)
-                  else:
-                      pre_season_cands.append(c)
-              if pre_season_cands:
-                  cands = pre_season_cands
-
-          cap_pool = max_results + 80 if (high_quality_only or season_info) else max_results + 25
+          cap_pool = max(max_results + 60, 280)
           if sort_by in ("views", "likes", "quality_score"):
               cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
           selected_pool = cands[:cap_pool]
@@ -572,13 +522,6 @@ jobs:
                       fmts = (pd.get("streamingData") or {}).get("adaptiveFormats") or []
                       if fmts: c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
               except Exception: pass
-              if c["max_height"] == 0 and (high_quality_only or len(selected_pool) <= 100):
-                  try:
-                      rv = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "ANDROID_VR", "clientVersion": "1.60.19", "androidSdkVersion": 32, "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
-                      if rv.status_code == 200:
-                          fmts = (rv.json().get("streamingData") or {}).get("adaptiveFormats") or []
-                          if fmts: c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
-                  except Exception: pass
               try:
                   rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}, "videoId": vid}, timeout=10)
                   if rn.status_code == 200:
@@ -600,18 +543,27 @@ jobs:
           if selected_pool:
               with ThreadPoolExecutor(max_workers=24) as ex: list(ex.map(enrich, selected_pool[:320]))
 
-          for c in selected_pool:
-              if not c.get("upload_date"):
-                  est = c.get("est_ymd") or estimate_ymd_from_rel(c.get("published_rel", ""))
-                  if est:
-                      c["upload_date"] = est
-
-          # נעילה הרמטית אחרי enrich: זריקת כל סרטון שהתברר ששייך לערוץ אחר!
+          # 1. נעילת ערוץ הרמטית 100% לאחר ה-enrich: זורק כל סרטון שאינו שייך ל-target_uc_id!
           if target_uc_id:
-              selected_pool = [c for c in selected_pool if not c.get("channel_id") or c.get("channel_id") == target_uc_id]
-          if channel_input and resolved_ch:
-              selected_pool = [c for c in selected_pool if not c.get("channel") or c.get("channel").strip().lower() == resolved_ch.strip().lower()]
+              selected_pool = [c for c in selected_pool if c.get("channel_id") == target_uc_id]
+          elif channel_input and resolved_ch:
+              selected_pool = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
 
+          # 2. סינון לפי עונה היסטורית (אם נבחרה):
+          if season_info:
+              s_min, s_max, _ = season_info
+              season_filtered = []
+              for c in selected_pool:
+                  up = str(c.get("upload_date") or "")
+                  if up:
+                      if s_min <= up <= s_max:
+                          season_filtered.append(c)
+                  elif c.get("matched_date_op"):
+                      # הגיע מחיפוש יוטיוב עם אופרטור after:YYYY-MM-DD before:YYYY-MM-DD
+                      season_filtered.append(c)
+              selected_pool = season_filtered
+
+          # 3. סינון לפי אורך סרטון:
           def match_dur(c):
               d = int(c.get("duration") or 0)
               t_low = str(c.get("title") or "").lower()
@@ -631,23 +583,6 @@ jobs:
 
           if high_quality_only:
               selected_pool = [c for c in selected_pool if (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
-
-          if season_info:
-              s_min, s_max, _ = season_info
-              exact_season = [c for c in selected_pool if c.get("upload_date") and not c.get("est_ymd") and (s_min <= str(c.get("upload_date")) <= s_max)]
-              if len(exact_season) >= 5:
-                  selected_pool = exact_season
-              else:
-                  # אם יוטיוב החזיר תאריכים יחסיים ("לפני שנתיים" / "3 years ago"), נכלול גם התאמת שנה בטווח העונה
-                  s_y1, s_y2 = int(s_min[:4]), int(s_max[:4])
-                  flex_season = [
-                      c for c in selected_pool
-                      if c.get("upload_date") and (
-                          (s_min <= str(c.get("upload_date")) <= s_max)
-                          or (c.get("est_ymd") and (s_y1 - 1) <= int(str(c.get("upload_date"))[:4]) <= (s_y2 + 1))
-                      )
-                  ]
-                  selected_pool = flex_season if flex_season else exact_season
 
           if min_views > 0:
               selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
@@ -708,97 +643,18 @@ jobs:
                                   return
                       except Exception:
                           pass
-                  for item_idx, orig_t in batch_pairs:
-                      try:
-                          r = requests.post(
-                              "https://translate.googleapis.com/translate_a/single",
-                              params={"client": "gtx", "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
-                              data={"q": orig_t},
-                              headers={"User-Agent": UA_STR, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-                              timeout=10
-                          )
-                          if r.status_code == 200:
-                              sents = r.json().get("sentences") or []
-                              tr_s = " ".join(s.get("trans", "").strip() for s in sents if s.get("trans")).strip()
-                              if tr_s:
-                                  items_arr[item_idx]["title_he"] = pre_clean(tr_s)
-                      except Exception:
-                          pass
 
               if need_tr:
                   batches = [need_tr[i:i + 30] for i in range(0, len(need_tr), 30)]
                   with ThreadPoolExecutor(max_workers=4) as ex:
                       list(ex.map(tr_batch, batches))
 
-          def apply_ai_filter(items_arr, prompt_rule):
-              if not items_arr or not prompt_rule:
-                  return items_arr
-              gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-              gh_tok = os.environ.get("GH_TOKEN", "").strip()
-              if not gemini_key and not gh_tok:
-                  return items_arr
-
-              sys_instruction = (
-                  "You are a strict content filter for YouTube search results. "
-                  f"User filtering rule: {prompt_rule}\n"
-                  "Return ONLY valid JSON with the IDs of videos that strictly match the topic/channel and obey the rule: "
-                  '{"keep_ids": ["id1", "id2"]}'
-              )
-              kept_ids = set()
-              for i in range(0, len(items_arr), 45):
-                  batch = [{"id": x["id"], "title": x["title"], "channel": x["channel"]} for x in items_arr[i:i + 45]]
-                  user_msg = json.dumps(batch, ensure_ascii=False)
-                  parsed_ids = None
-                  if gemini_key:
-                      try:
-                          gr = requests.post(
-                              f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}",
-                              json={
-                                  "contents": [{"parts": [{"text": sys_instruction + "\nVideos:\n" + user_msg}]}],
-                                  "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
-                              },
-                              timeout=25,
-                          )
-                          if gr.status_code == 200:
-                              txt = gr.json()["candidates"][0]["content"]["parts"][0]["text"]
-                              parsed_ids = json.loads(txt).get("keep_ids")
-                      except Exception:
-                          pass
-                  if parsed_ids is None and gh_tok:
-                      try:
-                          ar = requests.post(
-                              "https://models.inference.ai.azure.com/chat/completions",
-                              headers={"Authorization": f"Bearer {gh_tok}", "Content-Type": "application/json"},
-                              json={
-                                  "model": "gpt-4o-mini",
-                                  "messages": [
-                                      {"role": "system", "content": sys_instruction},
-                                      {"role": "user", "content": user_msg},
-                                  ],
-                                  "temperature": 0.1,
-                              },
-                              timeout=25,
-                          )
-                          if ar.status_code == 200:
-                              raw_c = re.sub(r"```(?:json)?|```", "", ar.json()["choices"][0]["message"]["content"]).strip()
-                              m = re.search(r"\{.*\}", raw_c, re.DOTALL)
-                              if m:
-                                  parsed_ids = json.loads(m.group(0)).get("keep_ids")
-                      except Exception:
-                          pass
-                  if isinstance(parsed_ids, list):
-                      kept_ids.update(str(x).strip() for x in parsed_ids)
-                  else:
-                      kept_ids.update(x["id"] for x in batch)
-
-              filtered_out = [x for x in items_arr if x["id"] in kept_ids]
-              return filtered_out if len(filtered_out) >= 3 else items_arr
-
-          pool = apply_ai_filter(pool, filter_prompt)
           translate_titles_properly(pool)
 
           for item in pool:
               item.pop("orig_pos", None)
+              item.pop("matched_date_op", None)
+              item.pop("channel_id", None)
               rd = str(item.get("upload_date") or "").strip()
               d_disp = f"{rd[6:8]}/{rd[4:6]}/{rd[0:4]}" if (len(rd) == 8 and rd.isdigit()) else item.get("published_rel", "")
               item["date_formatted"] = d_disp
