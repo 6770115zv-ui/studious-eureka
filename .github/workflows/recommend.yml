@@ -60,11 +60,14 @@ jobs:
           cookies_enc = os.environ.get("COOKIES_ENC", "").strip()
           secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
 
-          high_quality_only = "[hq_only]" in filter_prompt.lower() or "|hq" in sort_raw.lower() or sort_raw.lower() == "quality_score"
-          translate_titles = "[tr_he]" in filter_prompt.lower() or "|tr" in sort_raw.lower()
-          playlist_mode = "streams" if "[pl_streams]" in filter_prompt.lower() else ("uu_all" if "[pl_uu]" in filter_prompt.lower() else "auto")
+          fp_low = filter_prompt.lower()
+          high_quality_only = "[hq_only]" in fp_low or "|hq" in sort_raw.lower() or sort_raw.lower() == "quality_score"
+          translate_titles = "[tr_he]" in fp_low or "|tr" in sort_raw.lower()
+          playlist_mode = "streams" if "[pl_streams]" in fp_low else ("uu_all" if "[pl_uu]" in fp_low else ("uulp" if "[pl_uulp]" in fp_low else "auto"))
+          m_dur = re.search(r"\[dur:([a-z0-9_]+)\]", fp_low)
+          dur_filter = m_dur.group(1) if m_dur else "all"
           sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "views"
-          filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP)\]", "", filter_prompt, flags=re.I).strip()
+          filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+)\]", "", filter_prompt, flags=re.I).strip()
 
           cookie_file = Path("/tmp/rec_cookies.txt")
           cookie_dict = {"SOCS": "CAISHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiAo_CmBg", "CONSENT": "YES+cb"}
@@ -355,11 +358,20 @@ jobs:
 
           if channel_input:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
-              raw.extend(fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 80, 450)))
-              if query or len(raw) < 10:
+              if clean_q:
                   q_term = f"{resolved_ch} {clean_q}".strip()
-                  raw.extend(fetch_search(q_term, sp_code, 120))
-                  if en_query: raw.extend(fetch_search(f"{resolved_ch} {en_query}", sp_code, 120))
+                  raw.extend(fetch_search(q_term, sp_code, max(120, max_results * 2)))
+                  if en_query: raw.extend(fetch_search(f"{resolved_ch} {en_query}", sp_code, max(120, max_results * 2)))
+                  ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, 450)
+                  q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
+                  for v in ch_all:
+                      vt = str(v.get("title") or "").lower()
+                      if any(w in vt for w in q_words):
+                          raw.append(v)
+              else:
+                  raw.extend(fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 80, 450)))
+                  if len(raw) < 10:
+                      raw.extend(fetch_search(resolved_ch, sp_code, 120))
           else:
               jobs = [(clean_q or query, ""), (clean_q or query, sp_code)]
               if en_query and en_query.lower() != (clean_q or query).lower():
@@ -445,19 +457,49 @@ jobs:
           if selected_pool:
               with ThreadPoolExecutor(max_workers=16) as ex: list(ex.map(enrich, selected_pool))
 
+          import datetime
+          today_ymd = datetime.datetime.utcnow().strftime("%Y%m%d")
+          for c in selected_pool:
+              if not c.get("upload_date"):
+                  rel_low = str(c.get("published_rel") or "").lower()
+                  if any(k in rel_low for k in ("hour", "minute", "second", "שעה", "שעות", "דקות", "streamed", "premiered")):
+                      c["upload_date"] = today_ymd
+
+          def match_dur(c):
+              d = int(c.get("duration") or 0)
+              t_low = str(c.get("title") or "").lower()
+              if high_quality_only and ("#shorts" in t_low or (0 < d < 65)):
+                  return False
+              if dur_filter == "no_shorts":
+                  return d == 0 or d >= 90
+              if dur_filter == "clips":
+                  return d == 0 or (60 <= d <= 1200)
+              if dur_filter == "long":
+                  return d >= 1200
+              if dur_filter == "short5":
+                  return 0 < d <= 300
+              return True
+
+          selected_pool = [c for c in selected_pool if match_dur(c)]
+
           if high_quality_only:
-              hq = [c for c in selected_pool if (c.get("duration") == 0 or c.get("duration", 0) >= 60) and "#shorts" not in c["title"].lower() and (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
-              if len(hq) >= 8: selected_pool = hq
+              selected_pool = [c for c in selected_pool if (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
 
-          if sort_by == "likes": selected_pool.sort(key=lambda x: (int(x.get("likes") or 0), int(x.get("views") or 0)), reverse=True)
-          elif sort_by == "quality_score": selected_pool.sort(key=lambda x: (int(x.get("max_height") or 0) >= 1080, int(x.get("likes") or 0) * 25 + int(x.get("views") or 0)), reverse=True)
-          elif sort_by == "date_desc": selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "00000000"), -int(x.get("orig_pos") or 0)), reverse=True)
-          elif sort_by == "date_asc": selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "99999999"), int(x.get("orig_pos") or 0)), reverse=False)
-          else: selected_pool.sort(key=lambda x: (int(x.get("views") or 0), int(x.get("likes") or 0)), reverse=True)
+          if min_views > 0:
+              selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
 
-          pool = [c for c in selected_pool if c["views"] >= min_views]
-          if len(pool) < min(max_results, 15): pool = selected_pool[:]
-          pool = pool[:max_results]
+          if sort_by == "likes":
+              selected_pool.sort(key=lambda x: (int(x.get("likes") or 0), int(x.get("views") or 0)), reverse=True)
+          elif sort_by == "quality_score":
+              selected_pool.sort(key=lambda x: (int(x.get("max_height") or 0) >= 1080, int(x.get("likes") or 0) * 25 + int(x.get("views") or 0)), reverse=True)
+          elif sort_by == "date_desc":
+              selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "00000000"), -int(x.get("orig_pos") or 0)), reverse=True)
+          elif sort_by == "date_asc":
+              selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "99999999"), int(x.get("orig_pos") or 0)), reverse=False)
+          else:
+              selected_pool.sort(key=lambda x: (int(x.get("views") or 0), int(x.get("likes") or 0)), reverse=True)
+
+          pool = selected_pool[:max_results]
 
           def translate_titles_properly(items_arr):
               def pre_clean(t: str) -> str:

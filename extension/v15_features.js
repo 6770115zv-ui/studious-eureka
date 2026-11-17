@@ -1,81 +1,23 @@
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
-  document.body.style.overflowAnchor = "auto";
-  const mainWrap = document.querySelector("main.wrap");
-  if (mainWrap) mainWrap.style.overflowAnchor = "auto";
-
-  // ניקוי אוטומטי מיידי של תמונות Base64 כבדות שנתקעו ב-chrome.storage.local
-  function slimStoredSessions() {
-    if (!chrome || !chrome.storage || !chrome.storage.local) return;
-    chrome.storage.local.get(null, (all) => {
-      if (!all) return;
-      const patch = {};
-      for (const [k, val] of Object.entries(all)) {
-        if (!val || typeof val !== "object") continue;
-        let changed = false;
-        const cleanItems = (items) => {
-          if (!Array.isArray(items)) return;
-          for (const it of items) {
-            if (it && typeof it.thumbnail === "string" && it.thumbnail.startsWith("data:image/") && it.id) {
-              it.thumbnail = "https://i.ytimg.com/vi/" + it.id + "/mqdefault.jpg";
-              changed = true;
-            }
-          }
-        };
-        if (Array.isArray(val.items)) cleanItems(val.items);
-        else {
-          for (const s of Object.values(val)) {
-            if (s && typeof s === "object" && Array.isArray(s.items)) cleanItems(s.items);
-          }
-        }
-        if (changed) patch[k] = val;
-      }
-      if (Object.keys(patch).length) chrome.storage.local.set(patch);
-    });
-  }
-  slimStoredSessions();
-  if (chrome && chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(["ytproxy_rec_sessions", "ytproxy_history"], (d) => {
-      if (d && d.ytproxy_rec_sessions) {
-        const seenTabKeys = new Set();
-        const cleanedSessions = {};
-        const sorted = Object.entries(d.ytproxy_rec_sessions).sort((a, b) => ((b[1] && b[1].startedAt) || 0) - ((a[1] && a[1].startedAt) || 0));
-        for (const [k, s] of sorted) {
-          if (!s) continue;
-          const key = (s.tabTitle || s.channel || s.query || "").trim().toLowerCase();
-          if (seenTabKeys.has(key) && s.status !== "running") continue;
-          seenTabKeys.add(key);
-          cleanedSessions[k] = s;
-        }
-        chrome.storage.local.set({ ytproxy_rec_sessions: cleanedSessions });
-      }
-      if (d && Array.isArray(d.ytproxy_history)) {
-        const cleanedHist = d.ytproxy_history.map((h) => ({
-          ...h,
-          title: String(h.title || "").replace(/[\u2066-\u2069]/g, "").replace(/\.f\d+(?:-\d+)?(?=\.[a-z0-9]{2,5}$|$)/i, "")
-        }));
-        chrome.storage.local.set({ ytproxy_history: cleanedHist });
-      }
-    });
-  }
 
   const HUB_GROUPS = {
     il_media: [
-      ["🇮🇱 ערוץ הספורט (ספורט 5)", "@SPORT5_IL"], ["🇮🇱 ספורט 1 / צ'רלטון", "@sport1sport2"], ["🇮🇱 ONE - הערוץ הרשמי", "@one-1004"],
-      ["🇮🇱 ONE - כתבות ספורט", "@one4576"], ["🇮🇱 ONE - שידורי ספורט ותיכונים", "@one5353"], ["🇮🇱 IPFL - מנהלת הליגות לכדורגל", "@Ipflofficial"],
-      ["🇮🇱 מנהלת ליגת העל בכדורסל (ווינר סל)", "@WInnerleague"], ["🇮🇱 ההתאחדות לכדורגל בישראל", "@israel_football_association"],
-      ["🇮🇱 ספורט 107.5 - רדיו חיפה", "@sport107.5fm"], ["🇮🇱 וואלה ספורט", "@walla"], ["🇮🇱 ישראל היום (על הבאזר)", "@IsraelHayomOfficial"], ["🇮🇱 מעריב (מעל הליגה)", "@Maarivonline"]
+      ["🇮🇱 ערוץ הספורט (ספורט 5)", "@SPORT5_IL"], ["🇮🇱 ספורט 1 / צ'רלטון", "@sport1sport2"], ["🇮🇱 ONE ראשי", "@one-1004"],
+      ["🇮🇱 ONE כתבות", "@one4576"], ["🇮🇱 ONE שידורים", "@one5353"], ["🇮🇱 מנהלת הכדורגל IPFL", "@Ipflofficial"],
+      ["🇮🇱 מנהלת ליגת העל בכדורסל", "@WInnerleague"], ["🇮🇱 ההתאחדות לכדורגל", "@israel_football_association"],
+      ["🇮🇱 רדיו חיפה ספורט", "@sport107.5fm"], ["🇮🇱 וואלה ספורט", "@walla"], ["🇮🇱 ישראל היום ספורט", "@IsraelHayomOfficial"], ["🇮🇱 מעריב ספורט", "@Maarivonline"]
     ],
     il_pod: [
-      ["🎙️ פודקאסט הפודיום (אורן יוסיפוביץ)", "@hapodium_podcast"], ["🎙️ בית הפודיום - ספורט", "@hapodium_sport"], ["🎙️ האנליסטים (רפאל קבסה)", "@haanalistimTV"],
-      ["🎙️ All•in הבית של הפודקאסטים (קיקטוק)", "@getallin"], ["🎙️ ONE Podcasts", "@onepodcasts3641"], ["🎙️ פוד-און • עולם הפודקאסטים", "@podonmedia"],
-      ["🏀 ספורט באיכות גבוהה - פיני בראל", "@PiniBarel"], ["🏀 עושים NBA", "@OsimNBA"], ["🎙️ FootPod - פרמיירליג", "@FootPodPL"],
-      ["🎙️ פודקאסט אני מכבי", "@im_maccabi_podcast"], ["🎙️ Playmaker • אהרונוביץ", "@PlaymakerIL"], ["🎙️ שער 10", "@Aviel-10"],
-      ["🎙️ בצהוב שחור (בית\"ר)", "@beitarpodcast"], ["🎙️ וסרמיליה (הפועל ב\"ש)", "@Vasermilya"]
+      ["🎙️ הפודיום (אורן יוסיפוביץ)", "@hapodium_podcast"], ["🎙️ בית הפודיום", "@hapodium_sport"], ["🎙️ האנליסטים", "@haanalistimTV"],
+      ["🎙️ All•in קיקטוק", "@getallin"], ["🎙️ ONE פודקאסטים", "@onepodcasts3641"], ["🎙️ פוד-און", "@podonmedia"],
+      ["🏀 פיני בראל", "@PiniBarel"], ["🏀 עושים NBA", "@OsimNBA"], ["🎙️ FootPod פרמיירליג", "@FootPodPL"],
+      ["🎙️ אני מכבי", "@im_maccabi_podcast"], ["🎙️ Playmaker", "@PlaymakerIL"], ["🎙️ שער 10", "@Aviel-10"],
+      ["🎙️ בצהוב שחור", "@beitarpodcast"], ["🎙️ וסרמיליה", "@Vasermilya"]
     ],
     il_clubs: [
-      ["🟢 מכבי חיפה (כדורגל)", "@mhfootballclub"], ["🟡 מכבי תל אביב (כדורגל)", "@MaccabiTLVFC"], ["🏀 מכבי תל אביב (כדורסל)", "@maccabitelaviv"],
+      ["🟢 מכבי חיפה", "@mhfootballclub"], ["🟡 מכבי תל אביב (כדורגל)", "@MaccabiTLVFC"], ["🏀 מכבי תל אביב (כדורסל)", "@maccabitelaviv"],
       ["🔴 הפועל תל אביב (כדורגל)", "@HapoelTelAvivFC"], ["🏀 הפועל תל אביב (כדורסל)", "@HapoelTLVBC"], ["🟡⚫ בית\"ר ירושלים", "@fcbj1936"],
       ["🔴 הפועל באר שבע", "@officehb7"], ["🏀 הפועל ירושלים", "@HapoelJerusalem"]
     ],
@@ -91,7 +33,7 @@
       ["🏀 Thinking Basketball", "@ThinkingBasketball"], ["🎙️ Bill Simmons", "@billsimmons"], ["🏀 Podcast P", "@PodcastPwithPaulGeorge"], ["📚 HITC Sevens", "@HITCSevens"]
     ],
     world_clubs: [
-      ["👑 Real Madrid", "@realmadrid"], ["🔵🔴 FC Barcelona", "@FCBarcelona"], ["🩵 Man City", "@mancity"], ["🔴 Liverpool FC", "@LiverpoolFC"],
+      ["🔵🔴 FC Barcelona", "@FCBarcelona"], ["👑 Real Madrid", "@realmadrid"], ["🩵 Man City", "@mancity"], ["🔴 Liverpool FC", "@LiverpoolFC"],
       ["🔴⚪ Arsenal", "@arsenal"], ["🔴⚫ Man Utd", "@manutd"], ["🔴⚪ FC Bayern", "@fcbayern"]
     ]
   };
@@ -113,57 +55,6 @@
     return s;
   }
 
-  if (typeof window !== "undefined") {
-    const origExtract = window.extractYoutubeId;
-    window.extractYoutubeId = (u) => extract11Id(u) || (origExtract ? origExtract(u) : "");
-  }
-
-  let scrollLock = null;
-  function lockCardScroll(cardEl) {
-    if (!cardEl || !cardEl.parentElement) return;
-    const cards = Array.from(cardEl.parentElement.children);
-    scrollLock = { card: cardEl, idx: cards.indexOf(cardEl), boxId: cardEl.parentElement.id, top: cardEl.getBoundingClientRect().top, exp: Date.now() + 2000 };
-    const fix = () => {
-      if (!scrollLock || Date.now() > scrollLock.exp) return;
-      let el = scrollLock.card;
-      if (!el || !el.isConnected) {
-        const b = $(scrollLock.boxId);
-        if (b && b.children[scrollLock.idx]) el = b.children[scrollLock.idx];
-      }
-      if (el && el.isConnected) {
-        const d = el.getBoundingClientRect().top - scrollLock.top;
-        if (Math.abs(d) > 2) window.scrollBy(0, d);
-      }
-    };
-    requestAnimationFrame(fix);
-    [40, 120, 260].forEach((ms) => setTimeout(fix, ms));
-  }
-
-  document.addEventListener("mousedown", (e) => {
-    const btn = e.target.closest("#recList button, #historyList button");
-    if (btn) {
-      let card = btn;
-      while (card.parentElement && card.parentElement.id !== "recList" && card.parentElement.id !== "historyList") card = card.parentElement;
-      lockCardScroll(card);
-    }
-  }, true);
-
-  if ($("jobList")) {
-    new MutationObserver(() => {
-      if (scrollLock && Date.now() <= scrollLock.exp) {
-        let el = scrollLock.card;
-        if (!el || !el.isConnected) {
-          const b = $(scrollLock.boxId);
-          if (b && b.children[scrollLock.idx]) el = b.children[scrollLock.idx];
-        }
-        if (el && el.isConnected) {
-          const d = el.getBoundingClientRect().top - scrollLock.top;
-          if (Math.abs(d) > 2) window.scrollBy(0, d);
-        }
-      }
-    }).observe($("jobList"), { childList: true });
-  }
-
   function cleanSportsTermsHe(t) {
     return String(t || "").replace(/[\u2066-\u2069]/g, "").replace(/\\u[0-9a-fA-F]{4}/g, " ").replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, "")
       .replace(/\s*\([^)]*[a-zA-Z]{4,}[^)]*\)\s*$/g, "")
@@ -182,30 +73,6 @@
       .trim();
   }
 
-  const origSend = chrome.runtime.sendMessage.bind(chrome.runtime);
-  chrome.runtime.sendMessage = function (msg, ...rest) {
-    if (msg && msg.type === "START_DOWNLOAD" && msg.payload) {
-      if (msg.payload.url) msg.payload.url = normalizeYtInputValue(msg.payload.url);
-      if (msg.payload.title) msg.payload.title = cleanSportsTermsHe(msg.payload.title);
-      const listSubsSel = $("v15ListSubsSelect");
-      if (listSubsSel && listSubsSel.value !== "default" && (!msg.payload.subtitles || msg.payload.subtitles === "none")) {
-        msg.payload.subtitles = listSubsSel.value;
-        if (listSubsSel.value === "only") msg.payload.quality = "subs_only";
-      }
-    }
-    if (msg && msg.type === "START_RECOMMEND" && msg.payload) {
-      const base = String(msg.payload.filterPrompt || "").replace(/\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP)\]/gi, "").trim();
-      const tags = [];
-      if ($("recHighQualityOnlyToggle") && $("recHighQualityOnlyToggle").checked) tags.push("[HQ_ONLY]");
-      if ($("recTranslateTitlesToggle") && $("recTranslateTitlesToggle").checked) tags.push("[TR_HE]");
-      const plMode = $("v15HubPlaylistMode") && $("v15HubPlaylistMode").value;
-      if (plMode === "uu_all") tags.push("[PL_UU]");
-      else if (plMode === "streams") tags.push("[PL_STREAMS]");
-      msg.payload.filterPrompt = (base + " " + tags.join(" ")).trim();
-    }
-    return origSend(msg, ...rest);
-  };
-
   async function translateSingleToHebrew(text) {
     const pre = cleanSportsTermsHe(text);
     const res = await fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=iw&dt=t&q=" + encodeURIComponent(pre));
@@ -218,7 +85,76 @@
     const qEl = $("v15QuickStatus");
     if (qEl) { qEl.textContent = msg; qEl.style.color = isErr ? "var(--fail)" : "var(--ok)"; }
     const hEl = $("hint");
-    if (hEl) { hEl.textContent = ""; }
+    if (hEl) hEl.textContent = "";
+  }
+
+  const origSend = chrome.runtime.sendMessage.bind(chrome.runtime);
+  chrome.runtime.sendMessage = function (msg, ...rest) {
+    if (msg && msg.type === "START_DOWNLOAD" && msg.payload) {
+      if (msg.payload.url) msg.payload.url = normalizeYtInputValue(msg.payload.url);
+      if (msg.payload.title) msg.payload.title = cleanSportsTermsHe(msg.payload.title);
+      const listSubsSel = $("v15ListSubsSelect");
+      if (listSubsSel && listSubsSel.value !== "default" && (!msg.payload.subtitles || msg.payload.subtitles === "none")) {
+        msg.payload.subtitles = listSubsSel.value;
+        if (listSubsSel.value === "only") msg.payload.quality = "subs_only";
+      }
+    }
+    if (msg && msg.type === "START_RECOMMEND" && msg.payload) {
+      const useAi = $("recUseAiFilterToggle") && $("recUseAiFilterToggle").checked;
+      const basePrompt = useAi ? String(msg.payload.filterPrompt || "").replace(/\[[A-Z0-9_:]+\]/gi, "").trim() : "";
+      const tags = [];
+      if ($("recHighQualityOnlyToggle") && $("recHighQualityOnlyToggle").checked) tags.push("[HQ_ONLY]");
+      if (!$("recTranslateTitlesToggle") || $("recTranslateTitlesToggle").checked) tags.push("[TR_HE]");
+      const plMode = ($("v15HubPlaylistMode") && $("v15HubPlaylistMode").value) || "auto";
+      if (plMode === "uu_all") tags.push("[PL_UU]");
+      else if (plMode === "streams") tags.push("[PL_STREAMS]");
+      else if (plMode === "uulp") tags.push("[PL_UULP]");
+
+      const durMode = ($("recDurationSelect") && $("recDurationSelect").value) || "all";
+      if (durMode !== "all") tags.push("[DUR:" + durMode.toUpperCase() + "]");
+
+      msg.payload.filterPrompt = (basePrompt + " " + tags.join(" ")).trim();
+    }
+    return origSend(msg, ...rest);
+  };
+
+  function applyLiveClientFilters() {
+    const recList = $("recList");
+    if (!recList) return;
+    const durMode = ($("recDurationSelect") && $("recDurationSelect").value) || "all";
+    const minViews = Number(($("recMinViewsSelect") && $("recMinViewsSelect").value) || 0);
+    const hqOnly = Boolean($("recHighQualityOnlyToggle") && $("recHighQualityOnlyToggle").checked);
+    const liveSearch = (($("liveRecSearchInput") && $("liveRecSearchInput").value) || "").trim().toLowerCase();
+
+    let visibleCount = 0;
+    for (const card of recList.children) {
+      const txt = (card.textContent || "");
+      const mDur = txt.match(/⏱\s*(\d+):(\d+)/);
+      const totalSec = mDur ? (parseInt(mDur[1], 10) * 60 + parseInt(mDur[2], 10)) : 0;
+      const mins = totalSec / 60;
+
+      const mViews = txt.match(/👁\s*([\d,]+)/);
+      const views = mViews ? parseInt(mViews[1].replace(/,/g, ""), 10) : 0;
+
+      let show = true;
+      if (durMode === "no_shorts" && totalSec > 0 && totalSec < 90) show = false;
+      else if (durMode === "clips" && totalSec > 0 && (totalSec < 60 || mins > 20)) show = false;
+      else if (durMode === "long" && totalSec > 0 && mins < 20) show = false;
+      else if (durMode === "short5" && totalSec > 0 && mins > 5) show = false;
+
+      if (show && hqOnly && totalSec > 0 && totalSec < 65) show = false;
+      if (show && minViews > 0 && views < minViews) show = false;
+      if (show && liveSearch && !txt.toLowerCase().includes(liveSearch)) show = false;
+
+      card.style.display = show ? "flex" : "none";
+      if (show) visibleCount++;
+    }
+    const st = $("recStatusText");
+    if (st && recList.children.length > 0) {
+      const baseTxt = st.dataset.baseText || st.textContent.replace(/\s*\(מוצגות כעת:.*\)$/, "");
+      st.dataset.baseText = baseTxt;
+      st.textContent = `${baseTxt} (מוצגות כעת: ${visibleCount} מתוך ${recList.children.length})`;
+    }
   }
 
   let lastPreviewVid = "";
@@ -264,40 +200,94 @@
     setTimeout(() => { if ($("recQueryInput").value.startsWith("SIMILAR:")) $("recQueryInput").value = ""; }, 400);
   }
 
-  function injectV15Controls() {
-    const hd = document.querySelector("header.hd");
-    if (hd && !$("v15QuickBar")) {
-      const bar = document.createElement("div");
-      bar.id = "v15QuickBar";
-      bar.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;background:var(--surface);padding:10px 14px;border-radius:14px;border:1px solid var(--border);align-items:center;";
-      bar.innerHTML = `<span class="small muted" style="font-weight:600;">⚡ כלים מהירים:</span>
-        <button class="btn btn--danger small" id="purgeAllRepoBtn" type="button">🗑️ מחק כל הריצות והשחרורים</button>
-        <button class="btn small" id="copyGhTokenBtn" type="button">🔑 העתק טוקן</button>
-        <button class="btn small" id="copyYtCookiesBtn" type="button">🍪 העתק עוגיות</button>
-        <button class="btn small" id="copyYtCookiesEncBtn" type="button">🔐 העתק עוגיות מוצפנות</button>
-        <span id="v15QuickStatus" class="small" style="margin-inline-start:auto;font-weight:600;color:var(--accent);"></span>`;
-      hd.insertAdjacentElement("afterend", bar);
+  function initHubAndEvents() {
+    const catSel = $("v15HubCatSelect"), chSel = $("v15HubChannelSelect"), quickBar = $("v15QuickChannelsBar");
+    if (catSel && chSel && quickBar) {
+      const populate = () => {
+        const list = catSel.value === "all" ? ALL_CHANNELS : ALL_CHANNELS.filter((x) => x.cat === catSel.value);
+        chSel.innerHTML = `<option value="">-- בחר ערוץ מהרשימה (${list.length}) --</option>` +
+          list.map((x) => `<option value="${x.handle}">${x.label} (${x.handle})</option>`).join("");
+        quickBar.innerHTML = `<span class="small muted" style="font-weight:700;">⚡ בחירה מהירה:</span>` +
+          list.slice(0, 12).map((x) => {
+            const cleanLbl = x.label.replace(/^[^\s]+\s*/, "").replace(/\s*\([^)]*\)/g, "").trim();
+            return `<button type="button" class="btn small v15-ch" data-h="${x.handle}" style="padding:3px 9px;font-size:11.5px;border-radius:999px;">${cleanLbl}</button>`;
+          }).join("");
+        quickBar.querySelectorAll(".v15-ch").forEach((b) => b.addEventListener("click", () => {
+          chSel.value = b.dataset.h;
+          if ($("recChannelInput")) $("recChannelInput").value = b.dataset.h;
+          showStatus(`📺 נבחר הערוץ ${b.dataset.h} — הגדר סינון או לחץ על "הפעל סריקה וחיפוש"`);
+        }));
+      };
+      catSel.addEventListener("change", populate);
+      chSel.addEventListener("change", () => {
+        if (chSel.value && $("recChannelInput")) {
+          $("recChannelInput").value = chSel.value;
+        }
+      });
+      populate();
+
+      if ($("v15LoadChannelPlaylistBtn")) {
+        $("v15LoadChannelPlaylistBtn").addEventListener("click", () => {
+          const h = chSel.value || ($("recChannelInput") && $("recChannelInput").value.trim());
+          if (!h) return showStatus("❌ בחר ערוץ מהרשימה תחילה", true);
+          if ($("recChannelInput")) $("recChannelInput").value = h;
+          $("findRecsBtn").click();
+        });
+      }
+
+      if ($("v15SendChannelToTopBtn")) {
+        $("v15SendChannelToTopBtn").addEventListener("click", () => {
+          const h = chSel.value || ($("recChannelInput") && $("recChannelInput").value.trim());
+          if (!h || !$("urlInput")) return showStatus("❌ בחר ערוץ תחילה", true);
+          const plMode = ($("v15HubPlaylistMode") && $("v15HubPlaylistMode").value) || "auto";
+          const sfx = plMode === "streams" ? "/streams" : "/videos";
+          const cleanH = h.startsWith("http") ? h : ("https://www.youtube.com/" + h + sfx);
+          $("urlInput").value = cleanH;
+          if ($("collectionToggle")) $("collectionToggle").checked = true;
+          showStatus(`📥 הועבר לתיבת ההורדה הישירה למעלה: ${cleanH}`);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+      }
+    }
+
+    if ($("clearChannelBtn")) $("clearChannelBtn").onclick = () => {
+      if ($("recChannelInput")) $("recChannelInput").value = "";
+      if ($("v15HubChannelSelect")) $("v15HubChannelSelect").value = "";
+    };
+    if ($("clearQueryBtn")) $("clearQueryBtn").onclick = () => {
+      if ($("recQueryInput")) $("recQueryInput").value = "";
+    };
+    if ($("resetSearchFiltersBtn")) $("resetSearchFiltersBtn").onclick = () => {
+      if ($("recChannelInput")) $("recChannelInput").value = "";
+      if ($("recQueryInput")) $("recQueryInput").value = "";
+      if ($("v15HubChannelSelect")) $("v15HubChannelSelect").value = "";
+      if ($("recSortBySelect")) $("recSortBySelect").value = "views";
+      if ($("recDurationSelect")) $("recDurationSelect").value = "all";
+      if ($("v15HubPlaylistMode")) $("v15HubPlaylistMode").value = "auto";
+      if ($("recMinViewsSelect")) $("recMinViewsSelect").value = "0";
+      if ($("recMaxResultsSelect")) $("recMaxResultsSelect").value = "60";
+      if ($("recHighQualityOnlyToggle")) $("recHighQualityOnlyToggle").checked = false;
+      if ($("liveRecSearchInput")) $("liveRecSearchInput").value = "";
+      applyLiveClientFilters();
+      showStatus("🔄 כל שדות החיפוש והסינון אופסו");
+    };
+
+    if ($("recUseAiFilterToggle") && $("aiFilterWrap")) {
+      $("recUseAiFilterToggle").addEventListener("change", () => {
+        $("aiFilterWrap").style.display = $("recUseAiFilterToggle").checked ? "block" : "none";
+      });
+    }
+
+    for (const id of ["recDurationSelect", "recMinViewsSelect", "recHighQualityOnlyToggle", "liveRecSearchInput"]) {
+      const el = $(id);
+      if (el) {
+        el.addEventListener("change", applyLiveClientFilters);
+        el.addEventListener("input", applyLiveClientFilters);
+      }
     }
 
     const urlInput = $("urlInput");
-    if (urlInput && !$("v15TopSimilarBtn")) {
-      urlInput.placeholder = "https://www.youtube.com/watch?v=... או מזהה 11 תווים בלבד (למשל BwSMOsc_J3A)";
-      const wrap = document.createElement("div");
-      wrap.style.cssText = "display:flex;gap:8px;align-items:center;";
-      urlInput.parentNode.insertBefore(wrap, urlInput);
-      wrap.appendChild(urlInput);
-      const simBtn = document.createElement("button");
-      simBtn.id = "v15TopSimilarBtn";
-      simBtn.type = "button";
-      simBtn.className = "btn small";
-      simBtn.style.cssText = "white-space:nowrap;padding:10px 12px;border-color:var(--accent);color:var(--accent);font-weight:600;";
-      simBtn.textContent = "🔍 חפש דומים";
-      simBtn.addEventListener("click", () => {
-        const vid = extract11Id(urlInput.value);
-        if (!vid) return showStatus("❌ הזן קישור או מזהה 11 תווים בתיבה", true);
-        triggerSimilarSearch(vid, ($("previewTitle") && $("previewTitle").textContent) || vid);
-      });
-      wrap.appendChild(simBtn);
+    if (urlInput) {
       const onUrlInput = () => {
         const raw = urlInput.value.trim(), vid = extract11Id(raw);
         if (vid && !raw.startsWith("http") && raw.split(/[\s,]+/).length === 1) {
@@ -310,147 +300,24 @@
       urlInput.addEventListener("paste", () => setTimeout(onUrlInput, 30));
     }
 
-    const emailToggle = $("emailToggle");
-    if (emailToggle && !$("translateTitleDlToggle")) {
-      const lbl = document.createElement("label");
-      lbl.style.cssText = "display:flex;align-items:center;gap:6px;cursor:pointer;";
-      lbl.className = "small";
-      lbl.innerHTML = `<input type="checkbox" id="translateTitleDlToggle" class="switch" checked/><span>🔤 תרגם שם לעברית</span>`;
-      emailToggle.closest("div").appendChild(lbl);
-    }
-
-    const topicChips = $("topicChips");
-    if (topicChips && !$("v15SportsPlaylistHub")) {
-      const hub = document.createElement("div");
-      hub.id = "v15SportsPlaylistHub";
-      hub.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:12px;background:rgba(16,185,129,0.07);border:1px solid rgba(16,185,129,0.28);border-radius:12px;";
-      hub.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;">
-          <span style="font-weight:700;font-size:13.5px;color:var(--ok);">🏟️ אינדקס פלייליסט העלאות — כל 65 ערוצי הספורט והפודקאסטים (ישראל והעולם):</span>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1.5fr 1.1fr;gap:8px;">
-          <select id="v15HubCatSelect" class="input small" style="padding:7px 10px;">
-            <option value="all">🌟 כל הקטגוריות (65 ערוצים)</option>
-            <option value="il_media">🇮🇱 תקצירים וגופי שידור בישראל</option>
-            <option value="il_pod">🎙️ פודקאסטים ותוכניות ספורט בישראל</option>
-            <option value="il_clubs">⚽ מועדוני ספורט רשמיים בישראל</option>
-            <option value="world_leagues">🌍 ליגות וארגוני ספורט בעולם</option>
-            <option value="world_media">📺 רשתות, אולפנים ופודקאסטים בעולם</option>
-            <option value="world_clubs">👑 מועדוני על בעולם</option>
-          </select>
-          <select id="v15HubChannelSelect" class="input small" style="padding:7px 10px;"></select>
-          <select id="v15HubPlaylistMode" class="input small" style="padding:7px 10px;">
-            <option value="uulp">🔥 פופולריים בכל הזמנים (UULP + UU)</option>
-            <option value="uu_all">📂 כל ההעלאות מהחדש לישן (UU המלא)</option>
-            <option value="streams">🔴 שידורים חיים ופודקאסטים (/streams)</option>
-          </select>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="btn btn--primary small" id="v15LoadChannelPlaylistBtn" style="flex:2;padding:8px 12px;">🚀 טען פלייליסט העלאות של הערוץ לתוצאות למטה</button>
-          <button type="button" class="btn small" id="v15SendChannelToTopBtn" style="flex:1;padding:8px 12px;">📥 העבר ערוץ לתיבת ההורדה למעלה</button>
-        </div>
-        <div id="v15QuickChannelsBar" style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;"></div>`;
-      topicChips.insertAdjacentElement("afterend", hub);
-
-      const catSel = $("v15HubCatSelect"), chSel = $("v15HubChannelSelect"), plModeSel = $("v15HubPlaylistMode"), quickBar = $("v15QuickChannelsBar");
-      const populate = () => {
-        const list = catSel.value === "all" ? ALL_CHANNELS : ALL_CHANNELS.filter((x) => x.cat === catSel.value);
-        chSel.innerHTML = list.map((x) => `<option value="${x.handle}">${x.label} (${x.handle})</option>`).join("");
-        quickBar.innerHTML = `<span class="small muted" style="font-weight:600;">⚡ גישה מהירה:</span>` +
-          list.slice(0, 14).map((x) => `<button type="button" class="btn small v15-ch" data-h="${x.handle}" style="padding:2px 8px;font-size:11px;border-radius:999px;">${x.label.replace(/^[^\s]+\s*/, "").split(" - ")[0].split(" (")[0]}</button>`).join("");
-        quickBar.querySelectorAll(".v15-ch").forEach((b) => b.addEventListener("click", () => { chSel.value = b.dataset.h; $("v15LoadChannelPlaylistBtn").click(); }));
-      };
-      catSel.addEventListener("change", populate);
-      populate();
-
-      $("v15LoadChannelPlaylistBtn").addEventListener("click", () => {
-        if (!chSel.value || !$("recChannelInput") || !$("findRecsBtn")) return;
-        $("recChannelInput").value = "https://www.youtube.com/" + chSel.value;
-        if ($("recSortBySelect")) $("recSortBySelect").value = (plModeSel.value === "uu_all" || plModeSel.value === "streams") ? "date_desc" : "views";
-        $("findRecsBtn").click();
-      });
-
-      $("v15SendChannelToTopBtn").addEventListener("click", () => {
-        if (!chSel.value || !$("urlInput")) return;
-        const sfx = plModeSel.value === "streams" ? "/streams" : "/videos";
-        $("urlInput").value = "https://www.youtube.com/" + chSel.value + sfx;
-        if ($("collectionToggle")) $("collectionToggle").checked = true;
-        showStatus(`📥 הועבר לתיבת ההורדה: ${chSel.value}${sfx}`);
-        window.scrollTo({ top: 0, behavior: "smooth" });
+    if ($("v15TopSimilarBtn")) {
+      $("v15TopSimilarBtn").addEventListener("click", () => {
+        const vid = extract11Id($("urlInput") && $("urlInput").value);
+        if (!vid) return showStatus("❌ הזן קישור או מזהה 11 תווים בתיבה למעלה", true);
+        triggerSimilarSearch(vid, ($("previewTitle") && $("previewTitle").textContent) || vid);
       });
     }
 
-    const recSortSelect = $("recSortBySelect");
-    if (recSortSelect && !recSortSelect.querySelector('option[value="quality_score"]')) {
-      const opt = document.createElement("option");
-      opt.value = "quality_score";
-      opt.textContent = "💎 איכות ודירוג משוקלל (Full HD 1080p/4K + לייקים + צפיות)";
-      recSortSelect.appendChild(opt);
-    }
-
-    const recFilterInput = $("recFilterPromptInput");
-    if (recFilterInput && !$("v15SearchToggles")) {
-      const wrap = document.createElement("div");
-      wrap.id = "v15SearchToggles";
-      wrap.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:10px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.25);border-radius:10px;";
-      wrap.innerHTML = `
-        <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600;" class="small"><input type="checkbox" id="recHighQualityOnlyToggle" class="switch"/><span>💎 רק איכותיים מאוד (Full HD 1080p/4K • ללא Shorts)</span></label>
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600;" class="small"><input type="checkbox" id="recTranslateTitlesToggle" class="switch" checked/><span>🔤 תרגם שמות תוצאות לעברית נקייה</span></label>
-          <button class="btn small" id="translateVisibleRecsBtn" type="button" style="margin-inline-start:auto;padding:4px 10px;">🔤 תרגם תוצאות מוצגות לעברית</button>
-        </div>
-        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
-          <span class="small muted" style="font-weight:600;">📝 כתוביות בהורדה מהרשימה:</span>
-          <select id="v15ListSubsSelect" class="input small" style="width:auto;padding:4px 10px;flex:1;">
-            <option value="default">לפי הבחירה למעלה (ברירת מחדל)</option>
-            <option value="embed">🎬+📝 הטמע כתוביות בעברית בתוך הווידאו (Embed)</option>
-            <option value="files">📄 הורד קובץ כתוביות SRT בעברית לצד הווידאו</option>
-            <option value="only">📝 הורד כתוביות בעברית בלבד (SRT ללא וידאו)</option>
-          </select>
-          <span class="small muted" style="font-weight:600;">⏱ סינון אורך:</span>
-          <button type="button" class="btn small v15-dur" data-d="all" style="padding:3px 8px;font-size:11.5px;border-color:var(--accent);">הכל</button>
-          <button type="button" class="btn small v15-dur" data-d="short" style="padding:3px 8px;font-size:11.5px;">⏱ תקצירים (עד 20 דק')</button>
-          <button type="button" class="btn small v15-dur" data-d="long" style="padding:3px 8px;font-size:11.5px;">🏟️ משחקים מלאים / פודקאסטים (+20 דק')</button>
-        </div>`;
-      recFilterInput.parentElement.insertAdjacentElement("afterend", wrap);
-      wrap.querySelectorAll(".v15-dur").forEach((btn) => btn.addEventListener("click", () => {
-        wrap.querySelectorAll(".v15-dur").forEach((b) => { b.style.borderColor = ""; });
-        btn.style.borderColor = "var(--accent)";
-        const m = btn.dataset.d, recList = $("recList");
-        if (!recList) return;
-        for (const card of recList.children) {
-          const md = (card.textContent || "").match(/⏱\s*(\d+):(\d+)/);
-          const mins = md ? parseInt(md[1], 10) : 0;
-          card.style.display = m === "all" ? "" : (m === "short" ? (mins < 20 ? "" : "none") : (mins >= 20 ? "" : "none"));
-        }
-      }));
-    }
-
-    const clearHistBtn = $("clearHistBtn");
-    if (clearHistBtn && !$("translateHistAllBtn")) {
-      const btn = document.createElement("button");
-      btn.id = "translateHistAllBtn";
-      btn.type = "button";
-      btn.className = "btn small";
-      btn.textContent = "🔤 תרגם שמות לעברית";
-      clearHistBtn.insertAdjacentElement("beforebegin", btn);
-    }
-  }
-
-  function wireV15Events() {
-    const purgeHandler = async () => {
-      const btn = $("purgeAllRepoBtn");
-      if (btn) btn.disabled = true;
+    if ($("cleanCloudBtn")) $("cleanCloudBtn").addEventListener("click", async () => {
+      $("cleanCloudBtn").disabled = true;
       showStatus("⏳ מוחק את כל הריצות והשחרורים מהמאגר...");
       try {
         const res = await chrome.runtime.sendMessage({ type: "PURGE_ALL_CLOUD" });
         if (res && res.ok) showStatus(`✅ נמחקו ${res.deletedReleases || 0} שחרורים ו-${res.deletedRuns || 0} ריצות!`);
         else showStatus("❌ שגיאה במחיקה", true);
       } catch (e) { showStatus("❌ שגיאה: " + e.message, true); }
-      finally { if (btn) btn.disabled = false; }
-    };
-    if ($("purgeAllRepoBtn")) $("purgeAllRepoBtn").addEventListener("click", purgeHandler);
-    if ($("cleanCloudBtn")) $("cleanCloudBtn").addEventListener("click", purgeHandler);
+      finally { $("cleanCloudBtn").disabled = false; }
+    });
 
     if ($("copyGhTokenBtn")) $("copyGhTokenBtn").addEventListener("click", async () => {
       const cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
@@ -459,22 +326,11 @@
       showStatus("✅ ה-GitHub Token הועתק ללוח!");
     });
 
-    if ($("copyYtCookiesBtn")) $("copyYtCookiesBtn").addEventListener("click", async () => {
-      const res = await chrome.runtime.sendMessage({ type: "EXPORT_COOKIES" });
-      if (res && res.ok && res.raw) { await navigator.clipboard.writeText(res.raw); showStatus(`✅ הועתקו ${res.count || ""} עוגיות YouTube ללוח!`); }
-      else showStatus("❌ לא נמצאו עוגיות YouTube", true);
-    });
-
     if ($("copyYtCookiesEncBtn")) $("copyYtCookiesEncBtn").addEventListener("click", async () => {
       const res = await chrome.runtime.sendMessage({ type: "EXPORT_COOKIES" });
       if (res && res.ok && res.encrypted) { await navigator.clipboard.writeText(res.encrypted); showStatus("✅ העוגיות המוצפנות הועתקו ללוח!"); }
       else showStatus("❌ שגיאה בהצפנת עוגיות", true);
     });
-
-    if ($("recFilterPromptInput")) {
-      const fp = $("recFilterPromptInput");
-      fp.value = fp.value.replace(/\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP)\]/gi, "").trim();
-    }
 
     if ($("translateVisibleRecsBtn")) $("translateVisibleRecsBtn").addEventListener("click", async () => {
       const recList = $("recList");
@@ -484,8 +340,7 @@
       showStatus(`⏳ מתרגם ומנקה ${els.length} כותרות לעברית...`);
       await Promise.all(els.map(async (el) => {
         const pfx = (el.textContent.match(/^#\d+\s*•\s*/) || [""])[0];
-        const raw = el.textContent.replace(/^#\d+\s*•\s*/, "").trim();
-        el.title = raw;
+        const raw = el.title || el.textContent.replace(/^#\d+\s*•\s*/, "").trim();
         const he = await translateSingleToHebrew(raw);
         if (he) el.textContent = pfx + he;
       }));
@@ -499,7 +354,6 @@
     });
   }
 
-  // פונקציית שדרוג כרטיסים מהירה (0% עומס CPU, ללא קריאת innerHTML וללא לולאת MutationObserver!)
   let enhanceScheduled = false;
   function scheduleEnhanceCards() {
     if (enhanceScheduled) return;
@@ -511,10 +365,13 @@
         if (!box) continue;
         for (const card of box.children) {
           if (card.dataset.v15Done === "1") continue;
-          card.dataset.v15Done = "1"; // מסומן מיד בשורה הראשונה למניעת לולאה אינסופית!
+          card.dataset.v15Done = "1";
 
           const imgEl = card.querySelector("img");
-          if (imgEl) { imgEl.loading = "lazy"; imgEl.onerror = () => { if (self.NETFREE_SAFE_THUMB_SVG && imgEl.src !== self.NETFREE_SAFE_THUMB_SVG) imgEl.src = self.NETFREE_SAFE_THUMB_SVG; }; }
+          if (imgEl) {
+            imgEl.loading = "lazy";
+            imgEl.onerror = () => { if (self.NETFREE_SAFE_THUMB_SVG && imgEl.src !== self.NETFREE_SAFE_THUMB_SVG) imgEl.src = self.NETFREE_SAFE_THUMB_SVG; };
+          }
 
           const titleEl = Array.from(card.querySelectorAll("a, div, span")).find((el) => /^#\d+\s*•/.test((el.textContent || "").trim()) && el.children.length === 0);
           if (titleEl) {
@@ -534,10 +391,6 @@
 
           let vid11 = "";
           if (imgEl && imgEl.src && !imgEl.src.startsWith("data:")) vid11 = extract11Id(imgEl.src);
-          if (!vid11) {
-            const linkEl = card.querySelector("a[href]");
-            if (linkEl) vid11 = extract11Id(linkEl.href);
-          }
           if (!vid11) vid11 = extract11Id(card.textContent || "");
 
           if (vid11) {
@@ -552,7 +405,6 @@
                 subDlBtn.textContent = "🎬+📝 עם כתוביות";
                 subDlBtn.addEventListener("click", (e) => {
                   e.stopPropagation();
-                  lockCardScroll(card);
                   const cleanT = titleEl ? titleEl.textContent.replace(/^#\d+\s*•\s*/, "").trim() : vid11;
                   chrome.runtime.sendMessage({
                     type: "START_DOWNLOAD",
@@ -591,12 +443,12 @@
           }
         }
       }
+      applyLiveClientFilters();
     });
   }
 
   function init() {
-    injectV15Controls();
-    wireV15Events();
+    initHubAndEvents();
     const obs = new MutationObserver(scheduleEnhanceCards);
     if ($("recList")) obs.observe($("recList"), { childList: true });
     if ($("historyList")) obs.observe($("historyList"), { childList: true });

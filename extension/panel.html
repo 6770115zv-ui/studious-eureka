@@ -2,7 +2,7 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v15.3 — חיפושים מקבילים, עד 500 תוצאות ומתרגם כתוביות</title>
+  <title>YouTube Cloud Ultra v16 — מערכת הורדה וסריקת ערוצים חכמה</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body style="overflow-anchor:none;">
@@ -10,24 +10,35 @@
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div style="flex:1;">
-        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra v15.3</h1>
+        <h1 style="margin:0;font-size:18px;">YouTube Cloud Ultra</h1>
         <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
         </div>
       </div>
-      <button class="btn" id="cleanCloudBtn" type="button" title="מחק מיד את כל ה-Releases והריצות ב-GitHub">🧹 ניקוי ענן</button>
-      <button class="btn" id="settingsBtn" type="button">⚙ הגדרות</button>
+      <div id="v15QuickBar" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <button class="btn small" id="copyGhTokenBtn" type="button" title="העתק GitHub Token">🔑 טוקן</button>
+        <button class="btn small" id="copyYtCookiesEncBtn" type="button" title="העתק עוגיות מוצפנות">🔐 עוגיות</button>
+        <button class="btn btn--danger small" id="cleanCloudBtn" type="button" title="מחק את כל ה-Releases והריצות ב-GitHub">🧹 ניקוי ענן</button>
+        <button class="btn small" id="settingsBtn" type="button">⚙ הגדרות</button>
+      </div>
     </header>
+    <div id="v15QuickStatus" class="small" style="text-align:center;font-weight:700;color:var(--ok);min-height:4px;"></div>
 
+    <!-- כרטיס 1: הורדה ישירה -->
     <section class="card">
-      <label class="small muted" style="font-weight:600;">קישור למדיה, אוסף או רשימת קישורים (מופרדים ברווח/שורה):</label>
-      <input id="urlInput" class="input" dir="ltr" placeholder="https://www.youtube.com/watch?v=..."/>
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <label class="small muted" style="font-weight:700;color:var(--text);">📥 הורדה ישירה (קישור לסרטון, מזהה 11 תווים, פלייליסט או מספר קישורים):</label>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input id="urlInput" class="input" dir="ltr" placeholder="https://www.youtube.com/watch?v=... או מזהה 11 תווים"/>
+        <button class="btn small" id="v15TopSimilarBtn" type="button" style="white-space:nowrap;padding:10px 14px;border-color:var(--accent);color:var(--accent);">🔍 חפש דומים</button>
+      </div>
 
       <div id="videoPreview" class="preview-box" style="display:none;">
         <img id="previewThumb" src="" alt="Thumbnail"/>
         <div style="flex:1;overflow:hidden;">
-          <div id="previewTitle" style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+          <div id="previewTitle" style="font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
           <div id="previewAuthor" class="small muted"></div>
         </div>
       </div>
@@ -38,205 +49,278 @@
           <select id="formatSelect" class="input"></select>
         </div>
         <div>
-          <label class="small muted">כתוביות בעברית (ניקוי כפילויות + תרגום אוטומטי לעברית):</label>
+          <label class="small muted">כתוביות בעברית (ניקוי כפילויות + תרגום לעברית):</label>
           <select id="subsSelect" class="input">
             <option value="none">ללא כתוביות</option>
-            <option value="embed">הטמע כתוביות בעברית בתוך הווידאו</option>
-            <option value="files">הורד כקובץ SRT בעברית לצד הווידאו</option>
-            <option value="only">📝 הורד כתוביות בעברית בלבד (ללא הווידאו - SRT)</option>
+            <option value="embed">🎬+📝 הטמע כתוביות בעברית בתוך הווידאו</option>
+            <option value="files">📄 הורד קובץ SRT בעברית לצד הווידאו</option>
+            <option value="only">📝 הורד כתוביות בעברית בלבד (SRT ללא וידאו)</option>
           </select>
         </div>
       </div>
 
-      <div class="grid-2">
+      <div class="grid-4">
         <div>
-          <label class="small muted">חיתוך: זמן התחלה (אופציונלי)</label>
-          <input id="clipStart" class="input" dir="ltr" placeholder="למשל 00:01:15 (ריק = מתחילת הסרטון)"/>
+          <label class="small muted">חיתוך מהתחלה:</label>
+          <input id="clipStart" class="input" dir="ltr" placeholder="ריק = מההתחלה"/>
         </div>
         <div>
-          <label class="small muted">חיתוך: זמן סיום (אופציונלי)</label>
-          <input id="clipEnd" class="input" dir="ltr" placeholder="למשל 00:03:45 (ריק = עד סוף הסרטון)"/>
+          <label class="small muted">חיתוך עד סיום:</label>
+          <input id="clipEnd" class="input" dir="ltr" placeholder="ריק = עד הסוף"/>
         </div>
-      </div>
-
-      <div class="grid-2">
         <div>
-          <label class="small muted">אזור עקיפת חסימה גיאוגרפית (Geo-Bypass):</label>
+          <label class="small muted">עקיפת מדינה (Geo):</label>
           <select id="geoSelect" class="input">
-            <option value="IL">ישראל + גיבוי עולמי אוטומטי (מומלץ)</option>
-            <option value="US">ארצות הברית (US)</option>
-            <option value="GB">בריטניה / אירופה (GB)</option>
+            <option value="IL">ישראל + עולמי</option>
+            <option value="US">ארה"ב (US)</option>
+            <option value="GB">אירופה / בריטניה</option>
             <option value="DE">גרמניה (DE)</option>
           </select>
         </div>
         <div>
-          <label class="small muted">מהירות השמעה מובנית בקובץ:</label>
+          <label class="small muted">מהירות השמעה:</label>
           <select id="speedSelect" class="input">
             <option value="1" selected>רגילה (1.0x)</option>
-            <option value="1.25">מהירה קלה (1.25x)</option>
-            <option value="1.5">מהירה להרצאות (1.5x)</option>
-            <option value="1.75">מהירה מאוד (1.75x)</option>
-            <option value="2.0">כפולה (2.0x)</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="1.75">1.75x</option>
+            <option value="2.0">2.0x</option>
           </select>
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding-top:2px;">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
-          <input type="checkbox" id="collectionToggle" class="switch"/>
-          <span>אוסף שלם (ZIP)</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
-          <input type="checkbox" id="sponsorToggle" class="switch"/>
-          <span>SponsorBlock</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
-          <input type="checkbox" id="chaptersToggle" class="switch"/>
-          <span>פיצול פרקים</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
-          <input type="checkbox" id="normToggle" class="switch"/>
-          <span>נרמול שמע</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" class="small">
-          <input type="checkbox" id="emailToggle" class="switch"/>
-          <span>📧 שלח גם למייל הקבוע</span>
-        </label>
+      <div class="toggles-bar">
+        <label class="toggle-item"><input type="checkbox" id="collectionToggle" class="switch"/><span>אוסף / פלייליסט (ZIP)</span></label>
+        <label class="toggle-item"><input type="checkbox" id="sponsorToggle" class="switch"/><span>SponsorBlock</span></label>
+        <label class="toggle-item"><input type="checkbox" id="chaptersToggle" class="switch"/><span>פיצול פרקים</span></label>
+        <label class="toggle-item"><input type="checkbox" id="normToggle" class="switch"/><span>נרמול שמע</span></label>
+        <label class="toggle-item"><input type="checkbox" id="emailToggle" class="switch"/><span>📧 שלח למייל</span></label>
+        <label class="toggle-item"><input type="checkbox" id="translateTitleDlToggle" class="switch" checked/><span>🔤 תרגם שם לעברית</span></label>
       </div>
 
       <div id="emailInputWrap" style="display:none;">
-        <label class="small muted">כתובת מייל (השאר ריק לשליחה אוטומטית למייל הקבוע שב-GitHub Secrets):</label>
-        <input id="emailToInput" class="input" dir="ltr" placeholder="השאר ריק לשליחה למייל הקבוע ב-GitHub Secrets..."/>
+        <input id="emailToInput" class="input" dir="ltr" placeholder="כתובת מייל (השאר ריק לשליחה למייל הקבוע שב-Secrets)..."/>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn btn--primary" id="downloadBtn" type="button" style="flex:2;padding:11px;font-size:14px;">🚀 התחל הורדה בענן GitHub</button>
-        <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:600;border-color:var(--ok);color:var(--ok);" title="מוריד קובץ כתוביות נקי ומתורגם לעברית ללא הווידאו">📝 הורד כתוביות בעברית (SRT)</button>
+        <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:11px;font-weight:700;border-color:var(--ok);color:var(--ok);">📝 הורד כתוביות בעברית בלבד (SRT)</button>
       </div>
-      <p id="hint" class="small muted" style="margin:0;text-align:center;height:20px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></p>
+      <p id="hint" class="small muted" style="margin:0;text-align:center;min-height:18px;"></p>
     </section>
 
-    <section class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-        <div>
-          <h2 style="margin:0;font-size:15px;">🌐 מתרגם קובצי כתוביות לעברית (העלאת קובץ SRT / VTT מהמחשב)</h2>
-          <p class="small muted" style="margin:2px 0 0;">העלה קובץ כתוביות באנגלית או בכל שפה מהמחשב — המערכת תנקה שורות כפולות ותתרגם אותו לעברית חלקה</p>
-        </div>
-      </div>
-
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-        <input type="file" id="localSrtInput" accept=".srt,.vtt,.txt" multiple class="input" style="flex:2;padding:7px 10px;"/>
-        <button class="btn btn--primary" id="translateLocalSrtBtn" type="button" style="flex:1;padding:10px;">🔄 תרגם קובץ לעברית ושמור</button>
-      </div>
-
-      <div id="srtTransProgWrap" style="display:none;flex-direction:column;gap:6px;height:36px;min-height:36px;max-height:36px;overflow:hidden;">
-        <div class="progress-track" style="flex-shrink:0;">
-          <div id="srtTransProgBar" class="progress-bar" style="width:0%;"></div>
-        </div>
-        <div id="srtTransStatus" class="small muted" style="height:20px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
-      </div>
-    </section>
-
+    <!-- כרטיס 2: תור הורדות פעיל -->
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="margin:0;font-size:15px;">תור הורדות פעיל (אחוז הורדה למחשב + נתיב קבצים זמניים ובנייה)</h2>
+        <h2 style="margin:0;font-size:15px;">⚡ תור הורדות פעיל</h2>
         <button class="btn small" id="clearJobsBtn" type="button">נקה שהושלמו</button>
       </div>
       <div id="jobList" style="display:flex;flex-direction:column;gap:10px;"></div>
     </section>
 
-    <section class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+    <!-- כרטיס 3: פאנל סריקת ערוצים וחיפוש מילים מאוחד וחדש לחלוטין -->
+    <section class="card search-master-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;">
         <div>
-          <h2 style="margin:0;font-size:15px;">🎯 חיפוש במקביל לפי ערוץ או נושא (עד 500 תוצאות • פופולריים היסטורית)</h2>
-          <p class="small muted" style="margin:2px 0 0;">ניתן לשגר מספר חיפושים במקביל ללא דריסה — כל חיפוש נשמר בלשונית נפרדת עם עד 500 תוצאות</p>
+          <h2 style="margin:0;font-size:16px;color:var(--accent);">🎯 מרכז סריקת ערוצים וחיפוש חכם (ערוץ בלבד • מילים בלבד • או שילוב של שניהם)</h2>
+          <p class="small muted" style="margin:2px 0 0;">בחר ערוץ מהאינדקס או הקלד ערוץ/מילות חיפוש, הגדר את הסינונים המדויקים ולחץ על כפתור הסריקה</p>
         </div>
-        <button class="btn small" id="clearDoneRecsBtn" type="button" style="display:none;">🧹 נקה חיפושים שהושלמו</button>
+        <div style="display:flex;gap:6px;">
+          <button class="btn small" id="resetSearchFiltersBtn" type="button" title="אפס את כל שדות החיפוש והסינון">🔄 איפוס סינון</button>
+          <button class="btn small" id="clearDoneRecsBtn" type="button" style="display:none;">🧹 סגור לשוניות ישנות</button>
+        </div>
+      </div>
+
+      <!-- שלב א: אינדקס מהיר לבחירת ערוץ ספורט/פודקאסט -->
+      <div class="sub-panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+          <span class="small" style="font-weight:700;color:var(--ok);">🏟️ שלב 1 (אופציונלי): בחירה מהירה מאינדקס 65 ערוצי הספורט והפודקאסטים</span>
+          <span class="small muted">בחירה מהאינדקס ממלאת את שדה הערוץ למטה (תוכל להוסיף גם מילות חיפוש או לסרוק מיד)</span>
+        </div>
+        <div class="grid-3">
+          <div>
+            <label class="small muted">קטגוריית ערוצים:</label>
+            <select id="v15HubCatSelect" class="input small">
+              <option value="all">🌟 כל הקטגוריות (65 ערוצים)</option>
+              <option value="il_media">🇮🇱 תקצירים וגופי שידור בישראל</option>
+              <option value="il_pod">🎙️ פודקאסטים ותוכניות ספורט בישראל</option>
+              <option value="il_clubs">⚽ מועדוני ספורט בישראל</option>
+              <option value="world_leagues">🌍 ליגות וארגונים בעולם</option>
+              <option value="world_media">📺 רשתות ופודקאסטים בעולם</option>
+              <option value="world_clubs">👑 מועדוני על בעולם</option>
+            </select>
+          </div>
+          <div>
+            <label class="small muted">בחר ערוץ מהרשימה:</label>
+            <select id="v15HubChannelSelect" class="input small"></select>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:6px;">
+            <button type="button" class="btn btn--primary small" id="v15LoadChannelPlaylistBtn" style="flex:1;height:38px;">⚡ סרוק ערוץ זה עכשיו</button>
+            <button type="button" class="btn small" id="v15SendChannelToTopBtn" style="height:38px;" title="העבר את כתובת הערוץ לתיבת ההורדה הישירה למעלה">📥 להורדה</button>
+          </div>
+        </div>
+        <div id="v15QuickChannelsBar" style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;padding-top:4px;"></div>
+      </div>
+
+      <!-- שלב ב: שדות החיפוש הראשיים (ערוץ + מילות חיפוש שעובדים יחד ולחוד) -->
+      <div class="grid-2">
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+            <label class="small" style="font-weight:700;">📺 ערוץ לסריקה (@handle / URL / השאר ריק לחיפוש כללי ביוטיוב):</label>
+            <button type="button" id="clearChannelBtn" class="link-btn">✕ נקה ערוץ</button>
+          </div>
+          <input id="recChannelInput" class="input" dir="ltr" placeholder="ריק = כל יוטיוב, או למשל @FCBarcelona"/>
+        </div>
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+            <label class="small" style="font-weight:700;">🔎 מילות חיפוש (אופציונלי — מסנן לפי מילים בתוך הערוץ או בכל יוטיוב):</label>
+            <button type="button" id="clearQueryBtn" class="link-btn">✕ נקה מילים</button>
+          </div>
+          <input id="recQueryInput" class="input" placeholder="למשל: Orian Goren, תקציר, דני אבדיה (או השאר ריק לכל הערוץ)"/>
+        </div>
       </div>
 
       <div id="topicChips" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
 
-      <div class="grid-2">
+      <!-- שלב ג: לוח הסינון והמיון המלא (6 פרמטרים ברורים בשתי שורות של 3) -->
+      <div class="filter-grid">
         <div>
-          <label class="small muted" style="font-weight:600;">📺 שם ערוץ או מזהה (@handle / קישור לערוץ):</label>
-          <input id="recChannelInput" class="input" placeholder="למשל: @ChannelName או שם הערוץ..."/>
-        </div>
-        <div>
-          <label class="small muted">נושא לחיפוש (אופציונלי אם הוזן ערוץ):</label>
-          <input id="recQueryInput" class="input" placeholder="למשל: בנייה, נגרות, אלקטרוניקה..."/>
-        </div>
-      </div>
-
-      <div style="display:grid;grid-template-columns:1.3fr 0.85fr 0.85fr;gap:8px;">
-        <div>
-          <label class="small muted" style="font-weight:600;">📊 אופן מיון התוצאות:</label>
-          <select id="recSortBySelect" class="input">
-            <option value="views" selected>👁 כמות צפיות היסטורית (כל הזמנים)</option>
+          <label class="small" style="font-weight:700;color:var(--accent);">📊 1. אופן מיון התוצאות:</label>
+          <select id="recSortBySelect" class="input small">
+            <option value="views" selected>👁 כמות צפיות (מהגבוה לנמוך)</option>
+            <option value="date_desc">📅 תאריך העלאה (מהחדש לישן)</option>
+            <option value="date_asc">🕰 תאריך העלאה (מהישן לחדש)</option>
             <option value="likes">👍 כמות לייקים (האהובים ביותר)</option>
-            <option value="date_desc">📅 תאריך העלאה: מהחדש לישן</option>
-            <option value="date_asc">🕰 תאריך העלאה: מהישן לחדש</option>
+            <option value="quality_score">💎 דירוג איכות משוקלל (1080p/4K + לייקים)</option>
           </select>
         </div>
+
         <div>
-          <label class="small muted">כמות תוצאות:</label>
-          <select id="recMaxResultsSelect" class="input">
-            <option value="30">עד 30 תוצאות</option>
+          <label class="small" style="font-weight:700;color:var(--accent);">⏱ 2. סינון לפי אורך סרטון:</label>
+          <select id="recDurationSelect" class="input small">
+            <option value="all" selected>הכל (כל האורכים)</option>
+            <option value="no_shorts">🚫 ללא Shorts (מעל דקה וחצי)</option>
+            <option value="clips">⚡ קליפים ותקצירים (1 עד 20 דקות)</option>
+            <option value="long">🏟️ משחקים מלאים ופודקאסטים (מעל 20 דקות)</option>
+            <option value="short5">⏱ קצרים בלבד (עד 5 דקות)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="small" style="font-weight:700;color:var(--accent);">📂 3. סוג מאגר בערוץ:</label>
+          <select id="v15HubPlaylistMode" class="input small">
+            <option value="auto" selected>✨ אוטומטי (מותאם למיון שבחרת)</option>
+            <option value="uulp">🔥 הפופולריים ביותר בערוץ (UULP)</option>
+            <option value="uu_all">📂 כל ההעלאות מהחדש לישן (UU המלא)</option>
+            <option value="streams">🔴 שידורים חיים ופודקאסטים (/streams)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="small" style="font-weight:700;">👁 4. מינימום צפיות (סינון קשיח):</label>
+          <select id="recMinViewsSelect" class="input small">
+            <option value="0" selected>ללא הגבלה (הצג הכל)</option>
+            <option value="1000">מעל 1,000 צפיות</option>
+            <option value="10000">מעל 10,000 צפיות</option>
+            <option value="50000">מעל 50,000 צפיות</option>
+            <option value="100000">מעל 100,000 צפיות</option>
+            <option value="500000">מעל 500,000 צפיות</option>
+            <option value="1000000">מעל 1,000,000 צפיות</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="small" style="font-weight:700;">🔢 5. כמות תוצאות מקסימלית:</label>
+          <select id="recMaxResultsSelect" class="input small">
+            <option value="30">עד 30 תוצאות (מהיר)</option>
             <option value="60" selected>עד 60 תוצאות</option>
             <option value="120">עד 120 תוצאות</option>
             <option value="250">עד 250 תוצאות</option>
-            <option value="500">עד 500 תוצאות (סריקה מלאה)</option>
+            <option value="500">עד 500 תוצאות (סריקת עומק)</option>
           </select>
         </div>
+
         <div>
-          <label class="small muted">מינימום צפיות:</label>
-          <select id="recMinViewsSelect" class="input">
-            <option value="0" selected>ללא הגבלה</option>
-            <option value="10000">מעל 10,000</option>
-            <option value="50000">מעל 50,000</option>
-            <option value="100000">מעל 100,000</option>
-            <option value="500000">מעל 500,000</option>
-            <option value="1000000">מעל 1,000,000</option>
+          <label class="small" style="font-weight:700;">📝 6. כתוביות בהורדה מהתוצאות:</label>
+          <select id="v15ListSubsSelect" class="input small">
+            <option value="default">לפי הבחירה בכרטיס העליון</option>
+            <option value="embed">🎬+📝 הטמע כתוביות בעברית בווידאו</option>
+            <option value="files">📄 הורד קובץ SRT בעברית לצד הווידאו</option>
+            <option value="only">📝 הורד כתוביות בעברית בלבד (SRT)</option>
           </select>
         </div>
       </div>
 
-      <div>
-        <label class="small muted" style="font-weight:600;">🤖 הנחיית סינון ונקיות למודל הבינה המלאכותית בענן (מה לכלול ומה לפסול):</label>
-        <input id="recFilterPromptInput" class="input" value="הבא רק תוצאות מקצועיות שעוסקות ישירות בנושא או בערוץ המבוקש, ללא דמויות אחרות, ללא תכנים זרים וללא תכנים שאינם מתאימים למגזר שומר תורה ומצוות"/>
+      <!-- שלב ד: מתגים חכמים + סינון AI -->
+      <div class="toggles-bar" style="justify-content:space-between;">
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
+          <label class="toggle-item"><input type="checkbox" id="recHighQualityOnlyToggle" class="switch"/><span>💎 רק איכות גבוהה (1080p/4K • סנן Shorts)</span></label>
+          <label class="toggle-item"><input type="checkbox" id="recTranslateTitlesToggle" class="switch" checked/><span>🔤 תרגם את כל כותרות התוצאות לעברית</span></label>
+          <label class="toggle-item"><input type="checkbox" id="recUseAiFilterToggle" class="switch"/><span>🤖 הפעל סינון AI מתקדם</span></label>
+        </div>
+        <button class="btn small" id="translateVisibleRecsBtn" type="button" style="padding:5px 10px;">🔤 תרגם תוצאות מוצגות כעת</button>
       </div>
 
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:1;">🔍 שגר חיפוש חדש (במקביל)</button>
+      <div id="aiFilterWrap" style="display:none;">
+        <label class="small muted">הנחיית סינון למודל ה-AI (מופעל רק כשמתג סינון ה-AI דלוק):</label>
+        <input id="recFilterPromptInput" class="input small" value="הבא רק תוצאות מקצועיות שעוסקות ישירות בנושא או בערוץ המבוקש, ללא תכנים זרים"/>
+      </div>
+
+      <!-- כפתור השיגור הראשי והברור -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button class="btn btn--primary" id="findRecsBtn" type="button" style="flex:2;padding:12px;font-size:14.5px;">🔍 הפעל סריקה וחיפוש לפי ההגדרות למעלה</button>
         <button class="btn small" id="selectTop30RecsBtn" type="button" style="display:none;">☑ סמן 30</button>
         <button class="btn small" id="selectTop100RecsBtn" type="button" style="display:none;">☑ סמן 100</button>
         <button class="btn small" id="selectAllRecsBtn" type="button" style="display:none;">☑ סמן הכל</button>
-        <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים בריצה אחת</button>
+        <button class="btn btn--primary small" id="batchRecsBtn" type="button" style="display:none;">📦 הורד מסומנים</button>
       </div>
 
-      <!-- סרגל לשוניות חיפושים פעילים והושלמו -->
-      <div id="recSessionsTabs" style="display:none;flex-wrap:wrap;gap:6px;padding:6px;background:rgba(0,0,0,0.22);border-radius:10px;border:1px solid var(--border);"></div>
+      <!-- סרגל לשוניות חיפושים -->
+      <div id="recSessionsTabs" style="display:none;"></div>
 
-      <div id="recStatusText" class="small muted" style="font-weight:600;"></div>
+      <!-- שורת סטטוס + חיפוש/סינון מיידי בתוך התוצאות שכבר ירדו -->
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div id="recStatusText" class="small" style="font-weight:700;"></div>
+        <input id="liveRecSearchInput" class="input small" placeholder="⚡ סינון מיידי בתוך התוצאות שמוצגות למטה..." style="max-width:280px;padding:6px 10px;"/>
+      </div>
 
       <div id="recLogWrap" style="display:none;flex-direction:column;gap:6px;background:rgba(0,0,0,0.28);padding:10px;border-radius:10px;border:1px solid var(--border);">
         <div style="display:flex;align-items:center;justify-content:space-between;">
-          <span class="small muted" style="font-weight:600;">📋 יומן אבחון חי לחיפוש הנבחר:</span>
+          <span class="small muted" style="font-weight:600;">📋 יומן התקדמות בענן:</span>
           <div style="display:flex;gap:6px;">
-            <button class="btn small" id="openRecRunBtn" type="button" style="display:none;padding:3px 8px;font-size:11.5px;">🔗 פתח ריצה ב-GitHub</button>
+            <button class="btn small" id="openRecRunBtn" type="button" style="display:none;padding:3px 8px;font-size:11.5px;">🔗 פתח ב-GitHub</button>
             <button class="btn small" id="copyRecLogBtn" type="button" style="padding:3px 8px;font-size:11.5px;">📋 העתק לוג</button>
           </div>
         </div>
-        <pre id="recDebugLog" dir="ltr" style="margin:0;max-height:140px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.45;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
+        <pre id="recDebugLog" dir="ltr" style="margin:0;max-height:110px;overflow-y:auto;font-family:Consolas,monospace;font-size:11px;line-height:1.45;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;"></pre>
       </div>
 
-      <div id="recList" style="display:flex;flex-direction:column;gap:10px;"></div>
+      <div id="recList" style="display:flex;flex-direction:column;gap:8px;"></div>
     </section>
 
+    <!-- כרטיס 4: מתרגם קובצי כתוביות מהמחשב -->
+    <section class="card">
+      <div>
+        <h2 style="margin:0;font-size:15px;">🌐 מתרגם קובצי כתוביות מקומיים לעברית (SRT / VTT מהמחשב)</h2>
+        <p class="small muted" style="margin:2px 0 0;">העלה קובץ כתוביות מכל שפה — המערכת תאחד משפטים קטועים ותתרגם לעברית נקייה</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <input type="file" id="localSrtInput" accept=".srt,.vtt,.txt" multiple class="input" style="flex:2;padding:7px 10px;"/>
+        <button class="btn btn--primary" id="translateLocalSrtBtn" type="button" style="flex:1;padding:10px;">🔄 תרגם קובץ לעברית ושמור</button>
+      </div>
+      <div id="srtTransProgWrap" style="display:none;flex-direction:column;gap:6px;">
+        <div class="progress-track"><div id="srtTransProgBar" class="progress-bar" style="width:0%;"></div></div>
+        <div id="srtTransStatus" class="small muted"></div>
+      </div>
+    </section>
+
+    <!-- כרטיס 5: ארכיון והיסטוריית הורדות -->
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
         <h2 style="margin:0;font-size:15px;">📜 ארכיון והיסטוריית הורדות</h2>
         <div style="display:flex;gap:8px;align-items:center;">
           <input id="histSearchInput" class="input small" placeholder="סנן היסטוריה..." style="width:180px;padding:6px 10px;"/>
+          <button class="btn small" id="translateHistAllBtn" type="button">🔤 תרגם היסטוריה לעברית</button>
           <button class="btn btn--danger small" id="clearHistBtn" type="button">מחק היסטוריה</button>
         </div>
       </div>
