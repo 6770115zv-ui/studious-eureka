@@ -4,8 +4,7 @@
   const FIELDS = ["owner", "repo", "workflow", "ref", "token", "cookieKey", "updateOwner", "updateRepo"];
   async function load() {
     let cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
-    if (cfg && cfg.cookieKey === "") {
-      await chrome.runtime.sendMessage({ type: "RESET_CONFIG" });
+);
       cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
     }
     if (!cfg) return;
@@ -22,8 +21,7 @@
   el("save").onclick = async () => {
     const patch = {};
     for (const f of FIELDS) {
-      const v = el(f).value.trim();
-      if (v) patch[f] = v;
+      patch[f] = el(f).value.trim();
     }
     await chrome.runtime.sendMessage({ type: "SET_CONFIG", patch });
     el("msg").textContent = "ההגדרות נשמרו בהצלחה!";
