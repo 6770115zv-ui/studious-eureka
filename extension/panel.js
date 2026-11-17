@@ -1,7 +1,5 @@
 "use strict";
 (() => {
-  chrome.runtime.sendMessage({ type: "GET_CONFIG" }).then((c) => {
-    if (c && c.cookieKey === "") chrome.runtime.sendMessage({ type: "RESET_CONFIG" }).catch(() => {});
   }).catch(() => {});
   const el = (id) => document.getElementById(id);
   const formatSelect = el("formatSelect");
@@ -370,12 +368,6 @@
   });
 
   el("settingsBtn").onclick = () => chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" });
-
-  el("cleanCloudBtn").onclick = async () => {
-    el("hint").textContent = "מפעיל ניקוי ענן ב-GitHub...";
-    const res = await chrome.runtime.sendMessage({ type: "RUN_CLEANUP" });
-    el("hint").textContent = res && res.ok ? "ניקוי הענן הופעל בהצלחה!" : ((res && res.error) || "שגיאה בניקוי");
-  };
 
   el("clearJobsBtn").onclick = async () => {
     await chrome.runtime.sendMessage({ type: "CLEAR_COMPLETED_JOBS" });
