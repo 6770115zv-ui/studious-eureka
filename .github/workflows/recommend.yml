@@ -53,7 +53,7 @@ jobs:
           query = os.environ.get("QUERY", "").strip()
           channel_input = os.environ.get("CHANNEL", "").strip()
           sort_raw = os.environ.get("SORT_BY", "views").strip()
-          max_results = max(10, min(500, int(os.environ.get("MAX_RESULTS", "60") or 60)))
+          max_results = max(10, min(2500, int(os.environ.get("MAX_RESULTS", "60") or 60)))
           min_views = int(os.environ.get("MIN_VIEWS", "0") or 0)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
@@ -66,8 +66,22 @@ jobs:
           playlist_mode = "streams" if "[pl_streams]" in fp_low else ("uu_all" if "[pl_uu]" in fp_low else ("uulp" if "[pl_uulp]" in fp_low else "auto"))
           m_dur = re.search(r"\[dur:([a-z0-9_]+)\]", fp_low)
           dur_filter = m_dur.group(1) if m_dur else "all"
+          m_season = re.search(r"\[season:([a-z0-9_]+)\]", fp_low)
+          season_filter = m_season.group(1) if m_season else "all"
+          SEASON_RANGES = {
+              "2026_2027": ("20260801", "20270731", "after:2026-07-31"),
+              "2025_2026": ("20250801", "20260731", "after:2025-07-31 before:2026-08-01"),
+              "2024_2025": ("20240801", "20250731", "after:2024-07-31 before:2025-08-01"),
+              "2023_2024": ("20230801", "20240731", "after:2023-07-31 before:2024-08-01"),
+              "2022_2023": ("20220801", "20230731", "after:2022-07-31 before:2023-08-01"),
+              "year_2025": ("20250101", "20251231", "after:2024-12-31 before:2026-01-01"),
+              "year_2024": ("20240101", "20241231", "after:2023-12-31 before:2025-01-01"),
+              "year_2023": ("20230101", "20231231", "after:2022-12-31 before:2024-01-01"),
+              "before_2023": ("19900101", "20221231", "before:2023-01-01"),
+          }
+          season_info = SEASON_RANGES.get(season_filter)
           sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "views"
-          filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+)\]", "", filter_prompt, flags=re.I).strip()
+          filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+)\]", "", filter_prompt, flags=re.I).strip()
 
           cookie_file = Path("/tmp/rec_cookies.txt")
           cookie_dict = {"SOCS": "CAISHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiAo_CmBg", "CONSENT": "YES+cb"}
@@ -167,7 +181,8 @@ jobs:
                   for v in vids:
                       if v["id"] not in seen_vids: seen_vids.add(v["id"]); collected.append(v)
                   pages = 0
-                  while toks and len(collected) < target_count and pages < 6:
+                  max_s_pages = max(10, min(45, (target_count // 18) + 4))
+                  while toks and len(collected) < target_count and pages < max_s_pages:
                       nt = toks.pop(0)
                       if nt in visited: continue
                       visited.add(nt); pages += 1
@@ -261,7 +276,7 @@ jobs:
                   except Exception: pass
               return base, uc_id, name
 
-          def fetch_playlist_browse(browse_id: str, ch_title: str, max_pages: int = 14, target_count: int = 450):
+          def fetch_playlist_browse(browse_id: str, ch_title: str, max_pages: int = 90, target_count: int = 2500):
               api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
               collected, seen_vids, visited = [], set(), set()
@@ -320,7 +335,8 @@ jobs:
                           if not active:
                               add_items(iv); active = ig[:]
                           pages = 0
-                          while active and len(collected) < target_count and pages < 18:
+                          max_c_pages = max(25, min(95, (target_count // 25) + 10))
+                          while active and len(collected) < target_count and pages < max_c_pages:
                               nt = active.pop(0)
                               if nt in visited: continue
                               visited.add(nt); pages += 1
@@ -334,7 +350,7 @@ jobs:
                           if len(collected) < 15 and iv: add_items(iv)
                   except Exception: pass
               if uc_id and (len(collected) < max_results or playlist_mode == "uu_all"):
-                  add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, 20, max(target_count, 600)))
+                  add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, max(35, min(95, (target_count // 25) + 15)), max(target_count, 800)))
               if len(collected) < 25:
                   if uc_id: add_items(fetch_yt_json(f"https://www.youtube.com/playlist?list=UU{uc_id[2:]}", str(max(target_count, 450))))
                   if base_url:
@@ -356,28 +372,37 @@ jobs:
           if related_videos: raw.extend(related_videos)
           resolved_ch = channel_input
 
+          date_op = f" {season_info[2]}" if season_info else ""
           if channel_input:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
-              if clean_q:
-                  q_term = f"{resolved_ch} {clean_q}".strip()
-                  raw.extend(fetch_search(q_term, sp_code, max(120, max_results * 2)))
-                  if en_query: raw.extend(fetch_search(f"{resolved_ch} {en_query}", sp_code, max(120, max_results * 2)))
-                  ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, 450)
-                  q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
-                  for v in ch_all:
-                      vt = str(v.get("title") or "").lower()
-                      if any(w in vt for w in q_words):
-                          raw.append(v)
+              if clean_q or season_info:
+                  q_term = f"{resolved_ch} {clean_q}{date_op}".strip()
+                  raw.extend(fetch_search(q_term, sp_code, max(200, max_results)))
+                  if clean_q:
+                      raw.extend(fetch_search(f"{resolved_ch} {clean_q}".strip(), "", max(160, max_results)))
+                  if en_query:
+                      raw.extend(fetch_search(f"{resolved_ch} {en_query}{date_op}".strip(), sp_code, max(160, max_results)))
+                  ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 150, 900))
+                  if clean_q:
+                      q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
+                      for v in ch_all:
+                          vt = str(v.get("title") or "").lower()
+                          if any(w in vt for w in q_words):
+                              raw.append(v)
+                  else:
+                      raw.extend(ch_all)
               else:
-                  raw.extend(fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 80, 450)))
+                  raw.extend(fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 600)))
                   if len(raw) < 10:
-                      raw.extend(fetch_search(resolved_ch, sp_code, 120))
+                      raw.extend(fetch_search(resolved_ch, sp_code, 150))
           else:
-              jobs = [(clean_q or query, ""), (clean_q or query, sp_code)]
+              q_main = f"{clean_q or query}{date_op}".strip()
+              jobs = [(q_main, ""), (q_main, sp_code)]
               if en_query and en_query.lower() != (clean_q or query).lower():
-                  jobs.extend([(en_query, ""), (en_query, sp_code)])
+                  en_main = f"{en_query}{date_op}".strip()
+                  jobs.extend([(en_main, ""), (en_main, sp_code)])
               with ThreadPoolExecutor(max_workers=4) as ex:
-                  for b in ex.map(lambda j: fetch_search(j[0], j[1], max(140, max_results + 40)), jobs): raw.extend(b)
+                  for b in ex.map(lambda j: fetch_search(j[0], j[1], max(200, max_results + 60)), jobs): raw.extend(b)
 
           seen_ids = {direct_vid} if (is_similar and direct_vid) else (set() if (channel_input or direct_vid) else set(exclude))
           cands = []
@@ -455,7 +480,7 @@ jobs:
               except Exception: pass
 
           if selected_pool:
-              with ThreadPoolExecutor(max_workers=16) as ex: list(ex.map(enrich, selected_pool))
+              with ThreadPoolExecutor(max_workers=24) as ex: list(ex.map(enrich, selected_pool[:320]))
 
           import datetime
           today_ymd = datetime.datetime.utcnow().strftime("%Y%m%d")
@@ -484,6 +509,12 @@ jobs:
 
           if high_quality_only:
               selected_pool = [c for c in selected_pool if (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
+
+          if season_info:
+              s_min, s_max, _ = season_info
+              season_matched = [c for c in selected_pool if not c.get("upload_date") or (s_min <= str(c.get("upload_date")) <= s_max)]
+              if season_matched:
+                  selected_pool = season_matched
 
           if min_views > 0:
               selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]

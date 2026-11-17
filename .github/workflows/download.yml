@@ -683,13 +683,51 @@ jobs:
               def get_stage_files():
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
 
+              def discover_working_il_proxies():
+                  cand_proxies = []
+                  env_px = os.environ.get("IL_PROXY", "").strip()
+                  if env_px:
+                      cand_proxies.append(env_px)
+                  sources = [
+                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=IL&ssl=all&anonymity=all",
+                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=IL",
+                      "https://www.proxy-list.download/api/v1/get?type=http&country=IL",
+                      "https://www.proxy-list.download/api/v1/get?type=socks5&country=IL",
+                      "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+                  ]
+                  for src in sources[:4]:
+                      try:
+                          r = requests.get(src, timeout=6)
+                          if r.status_code == 200:
+                              proto = "socks5://" if "socks5" in src else "http://"
+                              for ln in r.text.splitlines():
+                                  ln = ln.strip()
+                                  if re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", ln):
+                                      cand_proxies.append(proto + ln)
+                      except Exception:
+                          pass
+                  # בדיקת מהירות מקבילית למציאת פרוקסי ישראלי חי
+                  working = []
+                  def test_px(px):
+                      try:
+                          tr = requests.get("https://www.youtube.com/generate_204", proxies={"http": px, "https": px}, timeout=3.5)
+                          if tr.status_code in (200, 204):
+                              working.append(px)
+                      except Exception:
+                          pass
+                  if cand_proxies:
+                      with ThreadPoolExecutor(max_workers=16) as ex:
+                          list(ex.map(test_px, cand_proxies[:45]))
+                  return working + [p for p in cand_proxies if p not in working][:6]
+
               for u_idx, cur_url in enumerate(target_urls, 1):
                   print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
                   downloaded_media_for_url = None
+                  il_geo_blocked = False
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
                       if att_idx > 1:
-                          time.sleep(3)
+                          time.sleep(2)
 
                       if stage_dir.exists():
                           shutil.rmtree(stage_dir, ignore_errors=True)
@@ -706,7 +744,15 @@ jobs:
                       ] + args + get_fmt_args(strict_hd, prefer_hls) + extra_args + [cur_url]
 
                       print(f"=== Trying ({att_idx}/{len(attempts)}): {label} (StrictHD={strict_hd}) ===", flush=True)
-                      subprocess.run(cmd, check=False)
+                      proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                      if proc.stdout:
+                          print(proc.stdout[-1800:], flush=True)
+                      if proc.stderr:
+                          print(proc.stderr[-1800:], flush=True)
+
+                      combined_out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                      if "available in Israel" in combined_out or "not made this video available in your country" in combined_out:
+                          il_geo_blocked = True
 
                       s_files = get_stage_files()
                       media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
@@ -718,6 +764,45 @@ jobs:
                                   downloaded_media_for_url = dest_f
                           print(f"=== Success with: {label} ===", flush=True)
                           break
+
+                      # אם יוטיוב החזיר חסימת מדינה לישראל בלבד (כמו ב-ONE / ספורט 5), קופצים מיד למנוע הפרוקסי הישראלי בלי לבזבז זמן על שאר הקליינטים מארה"ב!
+                      if il_geo_blocked:
+                          print(">>> Detected Israel-Only Geo-Restriction! Engaging Israel Proxy Tunnel...", flush=True)
+                          break
+
+                  if not downloaded_media_for_url and il_geo_blocked:
+                      il_proxies = discover_working_il_proxies()
+                      print(f">>> Found {len(il_proxies)} candidate Israel proxies. Testing download...", flush=True)
+                      for px_idx, px_url in enumerate(il_proxies[:8], 1):
+                          if stage_dir.exists():
+                              shutil.rmtree(stage_dir, ignore_errors=True)
+                          stage_dir.mkdir(parents=True, exist_ok=True)
+                          px_cmd = [
+                              "python3", "-m", "yt_dlp",
+                              "--ignore-config", "--rm-cache-dir",
+                              "--proxy", px_url,
+                              "--xff", "IL",
+                              "--impersonate", "chrome",
+                              "--ffmpeg-location", "/usr/bin/ffmpeg",
+                              "--concurrent-fragments", "3",
+                              "--socket-timeout", "15",
+                              "--retries", "4",
+                              "--extractor-args", "youtube:player_client=web_safari,ios,android_vr,web;fetch_pot=always",
+                              "--extractor-args", pot_ep,
+                              "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
+                          ] + (["--cookies", str(cookie_file)] if has_ck else []) + get_fmt_args(False, True) + extra_args + [cur_url]
+                          print(f"=== Trying Israel Proxy #{px_idx}: {px_url} ===", flush=True)
+                          subprocess.run(px_cmd, check=False)
+                          s_files = get_stage_files()
+                          media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
+                          if media_files:
+                              for f in s_files:
+                                  dest_f = out_dir / f.name
+                                  shutil.move(str(f), str(dest_f))
+                                  if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
+                                      downloaded_media_for_url = dest_f
+                              print(f"=== Success via Israel Proxy #{px_idx}! ===", flush=True)
+                              break
 
                   if downloaded_media_for_url and subtitles in ("embed", "files"):
                       time.sleep(2)

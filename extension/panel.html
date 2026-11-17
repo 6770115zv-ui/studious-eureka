@@ -234,21 +234,39 @@
           <select id="recMaxResultsSelect" class="input small">
             <option value="30">עד 30 תוצאות (מהיר)</option>
             <option value="60" selected>עד 60 תוצאות</option>
-            <option value="120">עד 120 תוצאות</option>
-            <option value="250">עד 250 תוצאות</option>
-            <option value="500">עד 500 תוצאות (סריקת עומק)</option>
+            <option value="150">עד 150 תוצאות</option>
+            <option value="350">עד 350 תוצאות</option>
+            <option value="600">עד 600 תוצאות</option>
+            <option value="1200">עד 1,200 תוצאות (עונה שלמה)</option>
+            <option value="2500">עד 2,500 תוצאות (ארכיון רב-עונתי עמוק)</option>
           </select>
         </div>
 
         <div>
-          <label class="small" style="font-weight:700;">📝 6. כתוביות בהורדה מהתוצאות:</label>
-          <select id="v15ListSubsSelect" class="input small">
-            <option value="default">לפי הבחירה בכרטיס העליון</option>
-            <option value="embed">🎬+📝 הטמע כתוביות בעברית בווידאו</option>
-            <option value="files">📄 הורד קובץ SRT בעברית לצד הווידאו</option>
-            <option value="only">📝 הורד כתוביות בעברית בלבד (SRT)</option>
+          <label class="small" style="font-weight:700;color:var(--ok);">📅 6. עונה / טווח שנים (לחיפוש אחורה בזמן):</label>
+          <select id="recSeasonSelect" class="input small">
+            <option value="all" selected>כל הזמנים (ללא הגבלת שנה)</option>
+            <option value="2026_2027">⚽ עונת 2026/27 (העונה הנוכחית)</option>
+            <option value="2025_2026">⚽ עונת 2025/26 (לפני שנה: 08/2025–07/2026)</option>
+            <option value="2024_2025">⚽ עונת 2024/25 (לפני שנתיים: 08/2024–07/2025)</option>
+            <option value="2023_2024">⚽ עונת 2023/24 (לפני 3 שנים: 08/2023–07/2024)</option>
+            <option value="2022_2023">⚽ עונת 2022/23 (08/2022–07/2023)</option>
+            <option value="year_2025">📆 שנת 2025 בלבד</option>
+            <option value="year_2024">📆 שנת 2024 בלבד</option>
+            <option value="year_2023">📆 שנת 2023 בלבד</option>
+            <option value="before_2023">🕰 ארכיון קלאסי (עד סוף 2022)</option>
           </select>
         </div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:10px;background:rgba(15,23,42,0.5);padding:8px 12px;border-radius:12px;border:1px solid var(--border);">
+        <label class="small" style="font-weight:700;white-space:nowrap;">📝 7. מצב כתוביות בהורדה מתוצאות החיפוש:</label>
+        <select id="v15ListSubsSelect" class="input small" style="flex:1;padding:6px 10px;">
+          <option value="default">לפי הבחירה בכרטיס ההורדה העליון</option>
+          <option value="embed">🎬+📝 הטמע כתוביות בעברית בתוך הווידאו (Embed)</option>
+          <option value="files">📄 הורד קובץ SRT בעברית לצד הווידאו</option>
+          <option value="only">📝 הורד כתוביות בעברית בלבד (SRT ללא וידאו)</option>
+        </select>
       </div>
 
       <!-- שלב ד: מתגים חכמים + סינון AI -->
