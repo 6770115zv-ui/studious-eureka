@@ -1,7 +1,7 @@
 "use strict";
 (() => {
   chrome.runtime.sendMessage({ type: "GET_CONFIG" }).then((c) => {
-    if (c && c.cookieKey === "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3") chrome.runtime.sendMessage({ type: "RESET_CONFIG" }).catch(() => {});
+    if (c && c.cookieKey === "") chrome.runtime.sendMessage({ type: "RESET_CONFIG" }).catch(() => {});
   }).catch(() => {});
   const el = (id) => document.getElementById(id);
   const formatSelect = el("formatSelect");
