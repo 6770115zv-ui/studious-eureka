@@ -107,7 +107,16 @@ jobs:
 
           UA_STR = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
           def build_headers(referer="https://www.youtube.com/"):
-              return {"Content-Type": "application/json", "User-Agent": UA_STR, "Origin": "https://www.youtube.com", "Referer": referer, "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": "2.20261101.00.00"}
+              return {
+                  "Content-Type": "application/json",
+                  "User-Agent": UA_STR,
+                  "Origin": "https://www.youtube.com",
+                  "Referer": referer,
+                  "X-YouTube-Client-Name": "1",
+                  "X-YouTube-Client-Version": "2.20261101.00.00",
+                  "X-Forwarded-For": "212.179.112.1",
+                  "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"
+              }
 
           def parse_views_text(v_str) -> int:
               if isinstance(v_str, (int, float)): return int(v_str)
@@ -226,7 +235,7 @@ jobs:
 
           def fetch_yt_json(target_url, limit_str, forced_uc: str = "", forced_name: str = ""):
               for use_ck in ([False, True] if has_ck else [False]):
-                  cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--dump-json", "--flat-playlist", "--playlist-end", str(limit_str), "--ignore-errors", "--no-warnings", "--js-runtimes", "deno"]
+                  cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--xff", "IL", "--dump-json", "--flat-playlist", "--playlist-end", str(limit_str), "--ignore-errors", "--no-warnings", "--js-runtimes", "deno"]
                   if use_ck: cmd += ["--cookies", str(cookie_file)]
                   cmd.append(target_url)
                   r = subprocess.run(cmd, capture_output=True, text=True)
@@ -412,15 +421,29 @@ jobs:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
               target_uc_id = uc_id
               if season_info or clean_q:
-                  # 1. חיפוש ישיר בתוך כתובת הערוץ ביוטיוב דרך yt-dlp (100% מתוך הערוץ בלבד!)
+                  # 1. חיפוש ישיר בתוך כתובת הערוץ ביוטיוב דרך yt-dlp עם --xff IL (שואב גם את כל התקצירים החסומים גיאוגרפית לישראל בלבד!)
                   if ch_base:
-                      ch_s_term = f"{clean_q} {season_info[0][:4]}".strip() if season_info else clean_q
-                      if ch_s_term:
-                          raw.extend(fetch_yt_json(f"{ch_base}/search?query={urllib.parse.quote(ch_s_term)}", "250", uc_id, resolved_ch))
-                      if season_info and not clean_q:
+                      yt_ch_queries = []
+                      if clean_q and season_info:
                           s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
-                          for sq in (f"תקציר {s_y1}", f"תקציר {s_y2}", f"{s_y1}/{s_y2[-2:]}"):
-                              raw.extend(fetch_yt_json(f"{ch_base}/search?query={urllib.parse.quote(sq)}", "150", uc_id, resolved_ch))
+                          yt_ch_queries = [f"{clean_q} {s_y1}", f"{clean_q} {s_y2}", clean_q]
+                      elif clean_q:
+                          yt_ch_queries = [clean_q]
+                      elif season_info:
+                          s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
+                          yt_ch_queries = [
+                              f"תקציר מורחב {s_y1}", f"תקציר מורחב {s_y2}",
+                              f"תקציר {s_y1}", f"תקציר {s_y2}",
+                              f"ברצלונה {s_y1}", f"ברצלונה {s_y2}",
+                              f"ריאל מדריד {s_y1}", f"ריאל מדריד {s_y2}",
+                              f"מכבי {s_y1}", f"מכבי {s_y2}",
+                              f"מחזור {s_y1}", f"מחזור {s_y2}",
+                              f"{s_y1}/{s_y2[-2:]}"
+                          ]
+                      if yt_ch_queries:
+                          with ThreadPoolExecutor(max_workers=6) as ex:
+                              for b in ex.map(lambda sq: fetch_yt_json(f"{ch_base}/search?query={urllib.parse.quote(sq)}", "180", uc_id, resolved_ch), yt_ch_queries):
+                                  raw.extend(b)
 
                   # 2. מנוע Multi-Slice Deep Harvester: פירוק העונה לתתי-תקופות חודשיות + מילות מפתח של קבוצות ומחזורים במקביל!
                   s_queries = []
@@ -473,8 +496,50 @@ jobs:
                               it_b["matched_date_op"] = True
                           raw.extend(b)
 
-              # 3. אם לא נבחרה עונה ישנה (או שצריך השלמה מהפלייליסט של הערוץ)
-              if not season_info:
+              # 3. שאיבת כל הפלייליסטים הרשמיים של הערוץ (ליגה ספרדית, איטלקית, ליגת העל וכו') — חושף גם תקצירים מוגבלי-מדינה לישראל מכל השנים!
+              def fetch_channel_playlists_videos(uc_id_str: str, ch_title_str: str):
+                  if not uc_id_str: return []
+                  api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
+                  ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
+                  pl_ids = []
+                  try:
+                      r = requests.post(api_url, headers=build_headers(), json={"context": ctx, "browseId": uc_id_str, "params": "EglwbGF5bGlzdHPyBgQKAkIA"}, timeout=15)
+                      if r.status_code == 200:
+                          for m_pl in re.finditer(r'"playlistId"\s*:\s*"(PL[a-zA-Z0-9_-]{16,})"', r.text):
+                              pid = m_pl.group(1)
+                              if pid not in pl_ids:
+                                  pl_ids.append(pid)
+                  except Exception:
+                      pass
+                  if not pl_ids:
+                      return []
+                  out_pl_vids = []
+                  with ThreadPoolExecutor(max_workers=8) as ex:
+                      for b in ex.map(lambda pid: fetch_playlist_browse("VL" + pid, ch_title_str, uc_id_str, 15, 350), pl_ids[:18]):
+                          out_pl_vids.extend(b)
+                  return out_pl_vids
+
+              if season_info and uc_id:
+                  pl_vids = fetch_channel_playlists_videos(uc_id, resolved_ch)
+                  if clean_q:
+                      q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
+                      for v in pl_vids:
+                          if any(w in str(v.get("title") or "").lower() for w in q_words):
+                              raw.append(v)
+                  else:
+                      raw.extend(pl_vids)
+
+                  # סריקת לשונית הווידאו של הערוץ גם מהישן לחדש (oldest) וגם בפופולריים כדי לתפוס סרטונים מ-2023/24
+                  for s_mode in ("views", "date_asc"):
+                      ch_part = fetch_channel_vids(ch_base, uc_id, resolved_ch, s_mode, 600)
+                      if clean_q:
+                          q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
+                          for v in ch_part:
+                              if any(w in str(v.get("title") or "").lower() for w in q_words):
+                                  raw.append(v)
+                      else:
+                          raw.extend(ch_part)
+              else:
                   ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 600))
                   if clean_q:
                       q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
