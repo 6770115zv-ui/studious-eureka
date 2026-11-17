@@ -88,6 +88,57 @@
     if (hEl) hEl.textContent = "";
   }
 
+  async function harvestLocalIsraeliIds(chInput, qInput, seasonMode) {
+    const ch = String(chInput || "").trim();
+    const q = String(qInput || "").trim();
+    if (!ch && !q) return [];
+    const SEASON_OPS = {
+      "2026_2027": "after:2026-07-31",
+      "2025_2026": "after:2025-07-31 before:2026-08-01",
+      "2024_2025": "after:2024-07-31 before:2025-08-01",
+      "2023_2024": "after:2023-07-31 before:2024-08-01",
+      "2022_2023": "after:2022-07-31 before:2023-08-01",
+      "year_2025": "after:2024-12-31 before:2026-01-01",
+      "year_2024": "after:2023-12-31 before:2025-01-01",
+      "year_2023": "after:2022-12-31 before:2024-01-01",
+      "before_2023": "before:2023-01-01"
+    };
+    const dateOp = SEASON_OPS[seasonMode] || "";
+    const chObj = ALL_CHANNELS.find((x) => x.handle.toLowerCase() === ch.toLowerCase());
+    const chName = chObj ? chObj.label.replace(/^[^\s]+\s*/, "").split(" (")[0].trim() : ch.replace(/^@/, "");
+
+    const queries = [];
+    if (ch && seasonMode && seasonMode !== "all") {
+      queries.push(`${chName} ${q} ${dateOp}`.trim());
+      queries.push(`${chName} תקציר ${dateOp}`.trim());
+      queries.push(`${chName} מחזור ${dateOp}`.trim());
+      queries.push(`${chName} ברצלונה ${dateOp}`.trim());
+      queries.push(`${chName} ריאל מדריד ${dateOp}`.trim());
+      queries.push(`${chName} מכבי ${dateOp}`.trim());
+    } else if (ch || q) {
+      queries.push(`${chName} ${q} ${dateOp}`.trim());
+    }
+
+    const foundIds = new Set();
+    const ctx = { client: { clientName: "WEB", clientVersion: "2.20261101.00.00", hl: "he", gl: "IL" } };
+    await Promise.all(queries.slice(0, 6).map(async (qStr) => {
+      try {
+        const res = await fetch("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ context: ctx, query: qStr })
+        });
+        if (!res.ok) return;
+        const txt = await res.text();
+        const rx = /"videoRenderer"\s*:\s*\{\s*"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"/g;
+        let m;
+        while ((m = rx.exec(txt)) !== null) {
+          foundIds.add(m[1]);
+        }
+      } catch {}
+    }));
+    return Array.from(foundIds);
+  }
   const origSend = chrome.runtime.sendMessage.bind(chrome.runtime);
   chrome.runtime.sendMessage = function (msg, ...rest) {
     if (msg && msg.type === "START_DOWNLOAD" && msg.payload) {
@@ -100,24 +151,35 @@
       }
     }
     if (msg && msg.type === "START_RECOMMEND" && msg.payload) {
-      const useAi = $("recUseAiFilterToggle") && $("recUseAiFilterToggle").checked;
-      const basePrompt = useAi ? String(msg.payload.filterPrompt || "").replace(/\[[A-Z0-9_:]+\]/gi, "").trim() : "";
-      const tags = [];
-      if ($("recHighQualityOnlyToggle") && $("recHighQualityOnlyToggle").checked) tags.push("[HQ_ONLY]");
-      if (!$("recTranslateTitlesToggle") || $("recTranslateTitlesToggle").checked) tags.push("[TR_HE]");
-      const plMode = ($("v15HubPlaylistMode") && $("v15HubPlaylistMode").value) || "auto";
-      if (plMode === "uu_all") tags.push("[PL_UU]");
-      else if (plMode === "streams") tags.push("[PL_STREAMS]");
-      else if (plMode === "uulp") tags.push("[PL_UULP]");
+      return (async () => {
+        const useAi = $("recUseAiFilterToggle") && $("recUseAiFilterToggle").checked;
+        const basePrompt = useAi ? String(msg.payload.filterPrompt || "").replace(/\[[A-Z0-9_,:]+\]/gi, "").trim() : "";
+        const tags = [];
+        if ($("recHighQualityOnlyToggle") && $("recHighQualityOnlyToggle").checked) tags.push("[HQ_ONLY]");
+        if (!$("recTranslateTitlesToggle") || $("recTranslateTitlesToggle").checked) tags.push("[TR_HE]");
+        const plMode = ($("v15HubPlaylistMode") && $("v15HubPlaylistMode").value) || "auto";
+        if (plMode === "uu_all") tags.push("[PL_UU]");
+        else if (plMode === "streams") tags.push("[PL_STREAMS]");
+        else if (plMode === "uulp") tags.push("[PL_UULP]");
 
-      const durMode = ($("recDurationSelect") && $("recDurationSelect").value) || "all";
-      if (durMode !== "all") tags.push("[DUR:" + durMode.toUpperCase() + "]");
+        const durMode = ($("recDurationSelect") && $("recDurationSelect").value) || "all";
+        if (durMode !== "all") tags.push("[DUR:" + durMode.toUpperCase() + "]");
 
-      const isSimQuery = String(msg.payload.query || "").toUpperCase().startsWith("SIMILAR:");
-      const seasonMode = ($("recSeasonSelect") && $("recSeasonSelect").value) || "all";
-      if (seasonMode !== "all" && !isSimQuery) tags.push("[SEASON:" + seasonMode.toUpperCase() + "]");
+        const isSimQuery = String(msg.payload.query || "").toUpperCase().startsWith("SIMILAR:");
+        const seasonMode = ($("recSeasonSelect") && $("recSeasonSelect").value) || "all";
+        if (seasonMode !== "all" && !isSimQuery) tags.push("[SEASON:" + seasonMode.toUpperCase() + "]");
 
-      msg.payload.filterPrompt = (basePrompt + " " + tags.join(" ")).trim();
+        // גשר חיפוש היברידי מה-IP הישראלי של הדפדפן: חושף סרטונים שחסומים גיאוגרפית לשרתי ארה"ב ב-GitHub!
+        try {
+          const ilIds = await harvestLocalIsraeliIds(msg.payload.channel, msg.payload.query, seasonMode);
+          if (ilIds.length > 0) {
+            tags.push("[IL_IDS:" + ilIds.slice(0, 180).join(",") + "]");
+          }
+        } catch {}
+
+        msg.payload.filterPrompt = (basePrompt + " " + tags.join(" ")).trim();
+        return origSend(msg, ...rest);
+      })();
     }
     return origSend(msg, ...rest);
   };
