@@ -42,7 +42,7 @@ async function getConfig() {
   if (self.DEFAULT_CONFIG && self.DEFAULT_CONFIG.token && !cfg.token) {
     cfg.token = self.DEFAULT_CONFIG.token;
   }
-  for (const k of Object.keys(BUILTIN_CONFIG)) cfg[k] = String(cfg[k] ?? "").trim();
+  for (const k of Object.keys(BUILTIN_CONFIG)) if (cfg[k] === undefined || cfg[k] === null) cfg[k] = "";
   if (!cfg.workflow) cfg.workflow = "download.yml";
   if (!cfg.ref) cfg.ref = "main";
   if (!cfg.autoCleanRelease) cfg.autoCleanRelease = "true";
