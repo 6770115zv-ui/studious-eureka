@@ -34,7 +34,12 @@ jobs:
           if command -v docker >/dev/null 2>&1; then
             docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest >/dev/null 2>&1 &
           fi
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y --no-install-recommends ffmpeg zip curl &
+          fi
           python3 -m pip install --break-system-packages --no-cache-dir -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests deep-translator mutagen
+          wait
+          which ffmpeg && ffmpeg -version | head -n 1
           for i in $(seq 1 14); do
             if curl -s http://127.0.0.1:4416/ping >/dev/null 2>&1 || curl -s http://127.0.0.1:4416 >/dev/null 2>&1; then
               echo "BgUtils PO Token Server is ready on port 4416."
@@ -409,12 +414,12 @@ jobs:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
               subprocess.run(base_sub_cmd + ["--write-subs", "--sub-langs", "he,iw", video_url], check=False)
-              he_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
+              he_srts = [p for p in list(subs_dir.glob("*.srt")) + list(subs_dir.glob("*.vtt")) if p.stat().st_size > 20]
               if he_srts:
                   src_f = he_srts[0]
                   clean_cues = clean_and_reconstruct_sentences(src_f.read_text(encoding="utf-8", errors="replace"))
                   if clean_cues:
-                      clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_f.stem)
+                      clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_f.stem)
                       final_he = subs_dir / f"{clean_stem}.he.srt"
                       final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
                       for p in he_srts:
@@ -424,10 +429,10 @@ jobs:
 
               for lang_code in ["en-orig", "en", "en.*"]:
                   subprocess.run(base_sub_cmd + ["--write-subs", "--write-auto-subs", "--sub-langs", lang_code, video_url], check=False)
-                  en_srts = [p for p in subs_dir.glob("*.srt") if p.stat().st_size > 20]
+                  en_srts = [p for p in list(subs_dir.glob("*.srt")) + list(subs_dir.glob("*.vtt")) if p.stat().st_size > 20]
                   if en_srts:
                       src_en = en_srts[0]
-                      clean_stem = re.sub(r"\.[a-zA-Z0-9_-]+$", "", src_en.stem)
+                      clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_en.stem)
                       clean_en_cues = clean_and_reconstruct_sentences(src_en.read_text(encoding="utf-8", errors="replace"))
                       for p in en_srts:
                           p.unlink(missing_ok=True)

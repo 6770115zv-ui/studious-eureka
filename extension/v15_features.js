@@ -35,6 +35,30 @@
     });
   }
   slimStoredSessions();
+  if (chrome && chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(["ytproxy_rec_sessions", "ytproxy_history"], (d) => {
+      if (d && d.ytproxy_rec_sessions) {
+        const seenTabKeys = new Set();
+        const cleanedSessions = {};
+        const sorted = Object.entries(d.ytproxy_rec_sessions).sort((a, b) => ((b[1] && b[1].startedAt) || 0) - ((a[1] && a[1].startedAt) || 0));
+        for (const [k, s] of sorted) {
+          if (!s) continue;
+          const key = (s.tabTitle || s.channel || s.query || "").trim().toLowerCase();
+          if (seenTabKeys.has(key) && s.status !== "running") continue;
+          seenTabKeys.add(key);
+          cleanedSessions[k] = s;
+        }
+        chrome.storage.local.set({ ytproxy_rec_sessions: cleanedSessions });
+      }
+      if (d && Array.isArray(d.ytproxy_history)) {
+        const cleanedHist = d.ytproxy_history.map((h) => ({
+          ...h,
+          title: String(h.title || "").replace(/[\u2066-\u2069]/g, "").replace(/\.f\d+(?:-\d+)?(?=\.[a-z0-9]{2,5}$|$)/i, "")
+        }));
+        chrome.storage.local.set({ ytproxy_history: cleanedHist });
+      }
+    });
+  }
 
   const HUB_GROUPS = {
     il_media: [
@@ -187,10 +211,10 @@
   }
 
   function showStatus(msg, isErr = false) {
-    for (const id of ["hint", "v15QuickStatus"]) {
-      const el = $(id);
-      if (el) { el.textContent = msg; el.style.color = isErr ? "var(--fail)" : "var(--ok)"; }
-    }
+    const qEl = $("v15QuickStatus");
+    if (qEl) { qEl.textContent = msg; qEl.style.color = isErr ? "var(--fail)" : "var(--ok)"; }
+    const hEl = $("hint");
+    if (hEl) { hEl.textContent = ""; }
   }
 
   let lastPreviewVid = "";

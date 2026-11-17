@@ -912,6 +912,12 @@ async function startRecommendations(payload) {
 
   const shortLabel = (channel || query).replace(/^https?:\/\/(www\.)?youtube\.com\//i, "").slice(0, 26);
   const sessions = await getRecSessions();
+  for (const [oldId, oldSess] of Object.entries(sessions)) {
+    if (oldSess && (oldSess.status === "completed" || oldSess.status === "failed") &&
+        oldSess.channel === channel && oldSess.query === query && oldSess.sortBy === sortBy) {
+      delete sessions[oldId];
+    }
+  }
   sessions[requestId] = {
     status: "running",
     requestId,
@@ -1106,7 +1112,8 @@ chrome.action.onClicked.addListener(async () => {
 // === V15_SAFE_FUNCTIONS ===
 function v15CleanWindowsFilename(rawName) {
   let s = String(rawName || "download.mp4").trim();
-  // חילוץ סיומת הקובץ (.mp4, .he.srt, .srt, .mp3, .zip וכו')
+  // הסרת סיומות ערוצים פנימיות של yt-dlp כגון .f137, .f140-5, .f299 לפני הסיומת
+  s = s.replace(/\.f\d+(?:-\d+)?(?=\.[a-zA-Z0-9]{2,5}$)/i, "");
   let ext = ".mp4";
   const mExt = s.match(/(\.he\.srt|\.[a-zA-Z0-9]{2,5})$/i);
   if (mExt) {
@@ -1114,24 +1121,24 @@ function v15CleanWindowsFilename(rawName) {
     if (ext === ".txt" && /\.he\.txt$/i.test(s)) ext = ".he.srt";
     s = s.slice(0, -mExt[1].length);
   }
-  // חילוץ מזהה 11 תווים אם קיים
+  s = s.replace(/\.f\d+(?:-\d+)?$/i, "");
   let idPart = "";
   const mId = s.match(/\[([a-zA-Z0-9_-]{11})\]/);
   if (mId) {
     idPart = " [" + mId[1] + "]";
     s = s.replace(mId[0], "");
   }
-  // הסרת רצפי \uXXXX שבורים (כגון \ud83e\udd2f), האשטאגים, אימוג'ים, נקודות כפולות ותווים אסורים ב-Windows
   s = s
     .replace(/\\u[0-9a-fA-F]{4}/g, " ")
     .replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, " ")
     .replace(/[\uD800-\uDFFF]/g, "")
-    .replace(/[\u2000-\u206F\u2190-\u2BFF\u3000-\u303F\uFE00-\uFEFF]/g, " ")
-    .replace(/[<>:"/\\|?*\x00-\x1f#~%&{}^`!@$+=;]+/g, " ")
+    .replace(/[\u2000-\u206F\u2190-\u2BFF\u3000-\u303F\uFE00-\uFEFF\uFF00-\uFFEF]/g, " ")
+    .replace(/[<>:"/\\|?*\x00-\x1f#~%&{}^`!@$+=;●🚨🍿💥🪄💎⚽🔵🔴]+/g, " ")
+    .replace(/\.f\d+(?:-\d+)?\b/gi, " ")
     .replace(/\.{2,}/g, " ")
     .replace(/\s+/g, " ")
     .replace(/^[.\s\-_]+|[.\s\-_]+$/g, "")
-    .slice(0, 75)
+    .slice(0, 80)
     .replace(/^[.\s\-_]+|[.\s\-_]+$/g, "");
 
   if (!s) s = "youtube-media";

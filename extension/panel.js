@@ -710,11 +710,12 @@
       tEl.textContent = "#" + (idx + 1) + " • " + item.title;
       const subEl = document.createElement("div");
       subEl.className = "small muted";
+      const cleanCh = String(item.channel || "").replace(/\s*•\s*📅\s*[^•]+/g, "").trim();
       const likesPart = item.likes ? (" • 👍 " + formatNumber(item.likes)) : "";
-      const dateStr = formatUploadDate(item.upload_date);
+      const dateStr = formatUploadDate(item.upload_date) || item.date_formatted || "";
       const datePart = dateStr ? (" • 📅 " + dateStr) : "";
       const durPart = item.duration ? (" • ⏱ " + formatDuration(item.duration)) : "";
-      subEl.textContent = item.channel + " • 👁 " + formatNumber(item.views) + likesPart + datePart + durPart;
+      subEl.textContent = cleanCh + " • 👁 " + formatNumber(item.views) + likesPart + datePart + durPart;
       meta.append(tEl, subEl);
 
       const dlBtn = document.createElement("button");
@@ -763,7 +764,7 @@
       const title = document.createElement("div");
       title.className = "small";
       title.style.cssText = "flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;";
-      title.textContent = h.title + (h.actualQuality ? (" — [" + h.actualQuality + "]") : "");
+      const cleanHT = String(h.title || "").replace(/[\u2066-\u2069]/g, "").replace(/\.f\d+(?:-\d+)?(?=\.[a-z0-9]{2,5}$)/i, ""); title.textContent = cleanHT + (h.actualQuality && h.actualQuality !== "תקין" ? (" — [" + h.actualQuality + "]") : "");
 
       const btns = document.createElement("div");
       btns.style.cssText = "display:flex;gap:6px;";
@@ -870,7 +871,7 @@
       topRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;";
       const title = document.createElement("div");
       title.style.fontWeight = "600";
-      title.textContent = (j.files && j.files[0]) || j.title || j.url;
+      title.textContent = String((j.files && j.files[0]) || j.title || j.url).replace(/[\u2066-\u2069]/g, "").replace(/\.f\d+(?:-\d+)?(?=\.[a-z0-9]{2,5}$)/i, "");
       const badge = document.createElement("span");
       badge.className = "small muted";
       const localPctStr = typeof j.localDlPct === "number" ? (" • הורדה למחשב: " + j.localDlPct + "%") : "";
@@ -901,10 +902,10 @@
         const pathBox = document.createElement("div");
         pathBox.className = "small";
         pathBox.dir = "ltr";
-        pathBox.style.cssText = "background:rgba(0,0,0,0.25);padding:6px 9px;border-radius:8px;border:1px dashed var(--border);font-family:Consolas,monospace;font-size:11.5px;color:var(--accent);word-break:break-all;";
-        pathBox.textContent = j.finalDiskPath
-          ? ("📁 Saved Path: " + j.finalDiskPath + (j.tempPath ? ("  (Built via: " + j.tempPath + ")") : ""))
-          : ("⚙ Temp / Build Path: " + j.tempPath);
+        pathBox.style.cssText = "background:rgba(7,11,20,0.55);padding:6px 10px;border-radius:8px;border:1px solid var(--border);font-family:Consolas,monospace;font-size:11.5px;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        const cleanSaved = String(j.finalDiskPath || "").replace(/\.f\d+(?:-\d+)?(?=\.[a-z0-9]+$)/i, "");
+        pathBox.textContent = cleanSaved ? ("📁 " + cleanSaved) : ("⚙ " + j.tempPath);
+        pathBox.title = cleanSaved || j.tempPath;
         card.append(pathBox);
       }
 

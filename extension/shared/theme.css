@@ -259,3 +259,20 @@ select.input option {
   background: #0f172a;
   color: #f8fafc;
 }
+#recSessionsTabs {
+  display: flex;
+  flex-wrap: nowrap !important;
+  overflow-x: auto;
+  gap: 8px !important;
+  padding: 8px 10px !important;
+  scrollbar-width: thin;
+}
+#recSessionsTabs > div {
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+#recList > div:hover, #historyList > div:hover {
+  border-color: rgba(56, 189, 248, 0.38) !important;
+  background: rgba(30, 44, 76, 0.85) !important;
+}

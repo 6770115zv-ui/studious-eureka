@@ -579,7 +579,7 @@ jobs:
               mh = int(item.get("max_height") or 0)
               qb = "4K" if mh >= 2160 else ("1440p" if mh >= 1440 else ("1080p HD" if mh >= 1080 else ("720p" if mh >= 720 else (f"{mh}p" if mh > 0 else ""))))
               item["quality_badge"] = qb
-              item["channel"] = " • ".join(p for p in [item["channel"], f"📅 {d_disp}" if d_disp else "", f"🎬 {qb}" if qb else ""] if p)
+              item["channel"] = " • ".join(p for p in [item["channel"], f"🎬 {qb}" if qb else ""] if p)
               if translate_titles and item.get("title_he"): item["title"] = item["title_he"]
 
           payload_bytes = json.dumps({"query": query, "channel": resolved_ch or channel_input, "sort_by": sort_by, "items": pool}, ensure_ascii=False).encode("utf-8")
