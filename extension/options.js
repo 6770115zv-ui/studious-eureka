@@ -4,9 +4,6 @@
   const FIELDS = ["owner", "repo", "workflow", "ref", "token", "cookieKey", "updateOwner", "updateRepo"];
   async function load() {
     let cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
-);
-      cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
-    }
     if (!cfg) return;
     for (const f of FIELDS) el(f).value = cfg[f] || "";
   }
