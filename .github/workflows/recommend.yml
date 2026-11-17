@@ -207,7 +207,7 @@ jobs:
                   walk_items(r.json(), vids, toks, _)
                   for v in vids:
                       if v["id"] in seen_vids: continue
-                      if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc:
+                      if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc and v["channel_id"] not in allowed_uc_ids:
                           continue
                       if must_match_name and not v.get("channel_id") and v.get("channel") and v["channel"].strip().lower() != must_match_name.strip().lower():
                           continue
@@ -224,7 +224,7 @@ jobs:
                       walk_items(rn.json(), mv, mt, _)
                       for v in mv:
                           if v["id"] in seen_vids: continue
-                          if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc:
+                          if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc and v["channel_id"] not in allowed_uc_ids:
                               continue
                           if must_match_name and not v.get("channel_id") and v.get("channel") and v["channel"].strip().lower() != must_match_name.strip().lower():
                               continue
@@ -418,11 +418,37 @@ jobs:
           for il_vid in il_seed_ids: raw.append({"id": il_vid, "title": il_vid, "channel": "", "channel_id": "", "view_count": 0, "duration": 0, "matched_date_op": True})
           resolved_ch = channel_input
           target_uc_id = ""
+          allowed_uc_ids = set()
+          allowed_ch_names = set()
+
+          NETWORK_CLUSTERS = {
+              "@one-1004": ["@one-1004", "@one4576", "@one5353", "@onepodcasts3641"],
+              "@one4576": ["@one4576", "@one-1004", "@one5353"],
+              "@one5353": ["@one5353", "@one-1004", "@one4576"],
+              "@hapodium_podcast": ["@hapodium_podcast", "@hapodium_sport"],
+              "@hapodium_sport": ["@hapodium_sport", "@hapodium_podcast"],
+          }
 
           date_op = f" {season_info[2]}" if season_info else ""
           if channel_input:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
               target_uc_id = uc_id
+              if uc_id: allowed_uc_ids.add(uc_id)
+              if resolved_ch: allowed_ch_names.add(resolved_ch.strip().lower())
+              ch_key = channel_input.strip().lower()
+              for net_k, net_list in NETWORK_CLUSTERS.items():
+                  if net_k in ch_key:
+                      for sib_h in net_list:
+                          if sib_h.lower() != ch_key:
+                              try:
+                                  s_base, s_uc, s_name = resolve_channel(sib_h)
+                                  if s_uc: allowed_uc_ids.add(s_uc)
+                                  if s_name: allowed_ch_names.add(s_name.strip().lower())
+                                  if season_info and s_uc:
+                                      raw.extend(fetch_channel_vids(s_base, s_uc, s_name or resolved_ch, sort_by, 400))
+                              except Exception:
+                                  pass
+                      break
               if season_info or clean_q:
                   # 1. חיפוש ישיר בתוך כתובת הערוץ ביוטיוב דרך yt-dlp עם --xff IL (שואב גם את כל התקצירים החסומים גיאוגרפית לישראל בלבד!)
                   if ch_base:
@@ -518,7 +544,7 @@ jobs:
                       return []
                   out_pl_vids = []
                   with ThreadPoolExecutor(max_workers=8) as ex:
-                      for b in ex.map(lambda pid: fetch_playlist_browse("VL" + pid, ch_title_str, uc_id_str, 15, 350), pl_ids[:18]):
+                      for b in ex.map(lambda pid: fetch_playlist_browse("VL" + pid, ch_title_str, uc_id_str, 25, 500), pl_ids[:30]):
                           out_pl_vids.extend(b)
                   return out_pl_vids
 
@@ -572,7 +598,7 @@ jobs:
               e_cid = str(e.get("channel_id") or "").strip()
               e_ch = str(e.get("channel") or e.get("uploader") or "").strip()
               # נעילת ערוץ הרמטית:
-              if target_uc_id and e_cid and e_cid != target_uc_id:
+              if target_uc_id and e_cid and e_cid != target_uc_id and e_cid not in allowed_uc_ids:
                   continue
               if channel_input and resolved_ch and not e_cid and e_ch and e_ch.strip().lower() != resolved_ch.strip().lower():
                   continue
@@ -660,8 +686,8 @@ jobs:
               with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:900]))
 
           # 1. נעילת ערוץ הרמטית 100% לאחר ה-enrich: זורק כל סרטון שאינו שייך ל-target_uc_id!
-          if target_uc_id:
-              selected_pool = [c for c in selected_pool if c.get("channel_id") == target_uc_id]
+          if allowed_uc_ids:
+              selected_pool = [c for c in selected_pool if c.get("channel_id") in allowed_uc_ids or str(c.get("channel") or "").strip().lower() in allowed_ch_names]
           elif channel_input and resolved_ch:
               selected_pool = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
 
@@ -686,7 +712,7 @@ jobs:
               if high_quality_only and ("#shorts" in t_low or (0 < d < 65)):
                   return False
               if dur_filter == "no_shorts":
-                  return d == 0 or d >= 90
+                  return d == 0 or d >= 61
               if dur_filter == "clips":
                   return d == 0 or (60 <= d <= 1200)
               if dur_filter == "long":

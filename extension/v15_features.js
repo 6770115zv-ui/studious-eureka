@@ -213,7 +213,7 @@
       const views = mViews ? parseInt(mViews[1].replace(/,/g, ""), 10) : 0;
 
       let show = true;
-      if (durMode === "no_shorts" && totalSec > 0 && totalSec < 90) show = false;
+      if (durMode === "no_shorts" && totalSec > 0 && totalSec <= 60) show = false;
       else if (durMode === "clips" && totalSec > 0 && (totalSec < 60 || mins > 20)) show = false;
       else if (durMode === "long" && totalSec > 0 && mins < 20) show = false;
       else if (durMode === "short5" && totalSec > 0 && mins > 5) show = false;
@@ -543,11 +543,22 @@
     chrome.storage.local.get(["ytproxy_rec_sessions"], (d) => {
       if (!d || !d.ytproxy_rec_sessions) return;
       const next = {};
+      const seenSig = new Set();
       let changed = false;
-      for (const [k, s] of Object.entries(d.ytproxy_rec_sessions)) {
-        if (s && s.status === "completed" && (!s.items || s.items.length === 0)) {
+      const sorted = Object.entries(d.ytproxy_rec_sessions).sort((a, b) => ((b[1] && b[1].startedAt) || 0) - ((a[1] && a[1].startedAt) || 0));
+      for (const [k, s] of sorted) {
+        if (!s) continue;
+        if (s.status === "completed" && (!s.items || s.items.length === 0)) {
           changed = true;
           continue;
+        }
+        if (s.status === "completed") {
+          const sig = `${(s.tabTitle || s.channel || s.query || "").trim().toLowerCase()}|${(s.items || []).length}`;
+          if (seenSig.has(sig)) {
+            changed = true;
+            continue;
+          }
+          seenSig.add(sig);
         }
         next[k] = s;
       }
