@@ -40,7 +40,6 @@ jobs:
           FILTER_PROMPT: ${{ inputs.filter_prompt }}
           COOKIES_ENC: ${{ inputs.cookies_enc }}
           COOKIE_KEY: ${{ secrets.COOKIE_KEY }}
-          COOKIE_KEY_FALLBACK: "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3"
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -61,7 +60,6 @@ jobs:
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
           cookies_enc = os.environ.get("COOKIES_ENC", "").strip()
           secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
-          fallback_key_env = os.environ.get("COOKIE_KEY_FALLBACK", "").strip()
 
           high_quality_only = "[hq_only]" in filter_prompt.lower() or "|hq" in sort_raw.lower() or sort_raw.lower() == "quality_score"
           translate_titles = "[tr_he]" in filter_prompt.lower() or "|tr" in sort_raw.lower()
@@ -75,7 +73,7 @@ jobs:
           if cookies_enc:
               try:
                   raw_enc = base64.b64decode(cookies_enc)
-                  for kh in (fallback_key_env, secret_key_env):
+                  for kh in (secret_key_env,):
                       if len(kh) == 64:
                           try:
                               pt = AESGCM(bytes.fromhex(kh)).decrypt(raw_enc[:12], raw_enc[12:], None).decode("utf-8", errors="replace")
