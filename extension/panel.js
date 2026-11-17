@@ -121,7 +121,9 @@
 
       const textLines = [];
       for (let i = tsIdx + 1; i < lines.length; i++) {
-        const cl = lines[i].replace(/<[^>]+>/g, "").replace(/\{\\an\d+\}/g, "").trim();
+        const txtArea = document.createElement("textarea");
+        txtArea.innerHTML = lines[i].replace(/<[^>]+>/g, " ").replace(/\{\\[^}]+\}/g, " ");
+        const cl = txtArea.value.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "").replace(/\s+/g, " ").trim();
         if (cl && !/^(WEBVTT|Kind:|Language:)/i.test(cl)) {
           if (!textLines.length || textLines[textLines.length - 1] !== cl) textLines.push(cl);
         }
@@ -316,7 +318,28 @@
 
           const flatCues = translatedCues.flat();
           const hebrewCount = flatCues.filter((c) => hasHebrew(c[2])).length;
-          const srtLines = flatCues.map((c, idx) => (idx + 1) + "\r\n" + msToTs(c[0]) + " --> " + msToTs(c[1]) + "\r\n" + c[2]);
+          const formatRtlCue = (rawStr) => {
+            const ta = document.createElement("textarea");
+            ta.innerHTML = String(rawStr || "");
+            const clean = ta.value.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "").replace(/\s+/g, " ").trim();
+            if (!hasHebrew(clean)) return clean;
+            if (clean.length > 46 && clean.includes(" ")) {
+              const words = clean.split(" ");
+              const mid = Math.floor(clean.length / 2);
+              let cur = 0, splitIdx = 1;
+              for (let w = 0; w < words.length; w++) {
+                cur += words[w].length + 1;
+                if (cur >= mid) { splitIdx = Math.max(1, w + 1); break; }
+              }
+              if (splitIdx < words.length) {
+                const l1 = words.slice(0, splitIdx).join(" ");
+                const l2 = words.slice(splitIdx).join(" ");
+                return "\u202B\u200F" + l1 + "\u200F\u202C\r\n\u202B\u200F" + l2 + "\u200F\u202C";
+              }
+            }
+            return "\u202B\u200F" + clean + "\u200F\u202C";
+          };
+          const srtLines = flatCues.map((c, idx) => (idx + 1) + "\r\n" + msToTs(c[0]) + " --> " + msToTs(c[1]) + "\r\n" + formatRtlCue(c[2]));
           const finalSrtContent = "\uFEFF" + srtLines.join("\r\n\r\n") + "\r\n";
 
           const blob = new Blob([finalSrtContent], { type: "text/plain;charset=utf-8" });

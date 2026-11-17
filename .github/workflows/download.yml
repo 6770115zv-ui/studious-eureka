@@ -64,7 +64,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           python3 - << 'EOF'
-          import os, sys, re, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
+          import os, sys, re, html, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -220,7 +220,7 @@ jobs:
 
                   text_lines = []
                   for ln in lines[ts_line_idx + 1:]:
-                      cl = re.sub(r"<[^>]+>", "", ln)
+                      cl = html.unescape(html.unescape(re.sub(r"<[^>]+>", " ", ln)))
                       cl = re.sub(r"\{\\an\d+\}", "", cl).strip()
                       if cl and not re.match(r"^(WEBVTT|Kind:|Language:)", cl, re.I):
                           if not text_lines or text_lines[-1] != cl:
@@ -300,11 +300,51 @@ jobs:
 
               return merged
 
+          def sanitize_subtitle_text(raw_txt: str) -> str:
+              t = html.unescape(html.unescape(str(raw_txt or "")))
+              # הסרת תגי VTT/HTML, חותמות זמן פנימיות (<00:01:02.000>), קודי בקרה ותווים משובשים
+              t = re.sub(r"<[^>]+>", " ", t)
+              t = re.sub(r"\{\\[^}]+\}", " ", t)
+              t = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", t)
+              t = re.sub(r"\\u[0-9a-fA-F]{4}", " ", t)
+              t = re.sub(r"\s*(?:>>|>>>|♪|♫|\[מוזיקה\]|\[Music\]|\[Applause\])\s*", " ", t, flags=re.I)
+              t = re.sub(r"\s+", " ", t).strip()
+              return t
+
+          def format_rtl_hebrew_line(line: str) -> str:
+              clean = sanitize_subtitle_text(line)
+              if not clean:
+                  return ""
+              # אם יש אותיות בעברית בשורה, עוטפים ב-RLE (\u202B) + RLM (\u200F) כדי שכל נגן יציג מימין לשמאל מדויק!
+              if any("\u0590" <= ch <= "\u05FF" for ch in clean):
+                  # פיצול שורה ארוכה מ-46 תווים לשתי שורות מאוזנות ונוחות לקריאה
+                  if len(clean) > 46 and " " in clean:
+                      words = clean.split(" ")
+                      mid = len(clean) // 2
+                      cur_len = 0
+                      split_idx = 0
+                      for w_i, w in enumerate(words):
+                          cur_len += len(w) + 1
+                          if cur_len >= mid:
+                              split_idx = max(1, w_i + 1)
+                              break
+                      if 0 < split_idx < len(words):
+                          l1 = " ".join(words[:split_idx]).strip()
+                          l2 = " ".join(words[split_idx:]).strip()
+                          return f"\u202b\u200f{l1}\u200f\u202c\r\n\u202b\u200f{l2}\u200f\u202c"
+                  return f"\u202b\u200f{clean}\u200f\u202c"
+              return clean
+
           def build_srt_string(cues_list) -> str:
               out = []
-              for idx, (s_ms, e_ms, txt) in enumerate(cues_list, 1):
-                  out.append(f"{idx}\n{ms_to_ts(s_ms)} --> {ms_to_ts(e_ms)}\n{txt}")
-              return "\ufeff" + "\n\n".join(out) + "\n"
+              idx_num = 1
+              for s_ms, e_ms, txt in cues_list:
+                  formatted = format_rtl_hebrew_line(txt)
+                  if not formatted:
+                      continue
+                  out.append(f"{idx_num}\r\n{ms_to_ts(s_ms)} --> {ms_to_ts(e_ms)}\r\n{formatted}")
+                  idx_num += 1
+              return "\ufeff" + "\r\n\r\n".join(out) + "\r\n"
 
           HTTP_HEADERS = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -513,6 +553,12 @@ jobs:
                       sort_res = f"res:{req_h}"
 
                   if prefer_hls:
+                      fmt = (
+                          f"bv*[protocol*=m3u8][height<={req_h}]+ba[protocol*=m3u8]/"
+                          f"b[protocol*=m3u8][height<={req_h}]/"
+                          f"bv*[protocol*=m3u8]+ba/"
+                          f"b[protocol*=m3u8]/{fmt}"
+                      )
                       sort_str = f"proto:m3u8_native,{sort_res},fps,vcodec:h264:vp9:av01,ext:mp4"
                   elif quality in ("2160", "1440"):
                       sort_str = f"{sort_res},fps,vcodec:vp9:av01:h264,acodec:m4a:aac:opus,ext:mp4:m4a"
@@ -587,58 +633,49 @@ jobs:
               pot_ep = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
               attempts = []
 
-              # ניסיון 1: ללא עוגיות עם Impersonate Chrome + Android VR / iOS / Web Safari (עוקף 403 על עוגיות מסומנות ב-IP של ענן!)
-              attempts.append((
-                  "Cloud Stealth HD (Chrome TLS Impersonation + web_safari,ios,android_vr + PO-Token)", [
-                      "--impersonate", "chrome",
-                      "--xff", geo,
-                      "--concurrent-fragments", "3",
-                      "--http-chunk-size", "10M",
-                      "--extractor-args", "youtube:player_client=web_safari,ios,android_vr,web;fetch_pot=always",
-                      "--extractor-args", pot_ep
-                  ], True, False
-              ))
-
               if has_ck:
-                  attempts.extend([
-                      ("Auth Chrome TLS + Web / Web Safari / TV + PO-Token", [
+                  # ניסיון 1: HLS Stream עם עוגיות (m3u8_native ב-web_safari/mweb — לעולם לא נחתך ב-1.1% כי הוא מבוסס סגמנטים של m3u8 ולא Range Request!)
+                  attempts.append((
+                      "Auth HLS Segment Stream (web_safari + mweb m3u8 — Zero 403 Cutoff)", [
                           "--cookies", str(cookie_file),
                           "--impersonate", "chrome",
                           "--xff", geo,
-                          "--concurrent-fragments", "3",
-                          "--extractor-args", "youtube:player_client=web_safari,web,tv,web_creator;fetch_pot=always",
+                          "--concurrent-fragments", "4",
+                          "--extractor-args", "youtube:player_client=web_safari,mweb,web_creator;fetch_pot=always",
                           "--extractor-args", pot_ep
-                      ], True, False),
-                      ("Auth HLS Stream Bypass (m3u8_native + Safari/iOS/MWeb)", [
+                      ], True, True
+                  ))
+                  # ניסיון 2: Direct DASH עם עוגיות ללא פיצול Chunks של 10M (שגרם לניתוק ב-10MB)
+                  attempts.append((
+                      "Auth Continuous Stream (tv + web_creator + web_embedded + PO-Token)", [
                           "--cookies", str(cookie_file),
                           "--impersonate", "chrome",
                           "--xff", geo,
                           "--concurrent-fragments", "2",
-                          "--extractor-args", "youtube:player_client=web_safari,ios,mweb;fetch_pot=always",
+                          "--extractor-args", "youtube:player_client=tv,web_creator,web_embedded;fetch_pot=always",
                           "--extractor-args", pot_ep
-                      ], True, True),
-                  ])
+                      ], True, False
+                  ))
 
-              # ניסיון 4: מצב HLS מבוסס m3u8 ללא עוגיות (פותר סרטונים שמחזירים Only images are available)
+              # ניסיון 3: ללא עוגיות (Android VR + iOS + Web Safari בזרם רציף ללא 10M chunk cutoff)
               attempts.append((
-                  "No-Cookies HLS Manifest Bypass (web_safari + ios + tv)", [
+                  "Cloud Stealth Continuous Stream (android_vr + ios + web_safari)", [
                       "--impersonate", "chrome",
-                      "--xff", "US",
-                      "--concurrent-fragments", "2",
-                      "--extractor-args", "youtube:player_client=web_safari,ios,tv;fetch_pot=always",
+                      "--xff", geo,
+                      "--concurrent-fragments", "3",
+                      "--extractor-args", "youtube:player_client=android_vr,ios,web_safari;fetch_pot=always",
                       "--extractor-args", pot_ep
                   ], True, True
               ))
 
-              # ניסיון 5: Universal Fallback גמיש לכל איכות קיימת (כולל סרטונים ישנים או מוגבלים)
+              # ניסיון 4: Fallback אוניברסלי גמיש (HLS + כל פורמט זמין)
               attempts.append((
-                  "Universal Resilient Fallback (All Formats + Chrome TLS)",
+                  "Universal Resilient Fallback (All Formats + HLS)",
                   (["--cookies", str(cookie_file)] if has_ck else []) + [
                       "--impersonate", "chrome",
                       "--xff", geo,
-                      "--concurrent-fragments", "1",
-                      "--http-chunk-size", "10M",
-                      "--extractor-args", "youtube:player_client=web,web_safari,ios,android_vr;fetch_pot=always",
+                      "--concurrent-fragments", "2",
+                      "--extractor-args", "youtube:player_client=web_safari,mweb,tv,web;fetch_pot=always",
                       "--extractor-args", pot_ep
                   ], False, True
               ))
@@ -690,7 +727,7 @@ jobs:
                           if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 400 * 1024 * 1024:
                               emb_tmp = downloaded_media_for_url.with_name("sub_" + downloaded_media_for_url.name)
                               sub_c = "mov_text" if downloaded_media_for_url.suffix.lower() == ".mp4" else "srt"
-                              ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c", "copy", "-c:s", sub_c, "-movflags", "+faststart", str(emb_tmp)]
+                              ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew", "-movflags", "+faststart", str(emb_tmp)]
                               if subprocess.run(ff_sub, check=False).returncode == 0 and emb_tmp.exists():
                                   emb_tmp.replace(downloaded_media_for_url)
                               else:
