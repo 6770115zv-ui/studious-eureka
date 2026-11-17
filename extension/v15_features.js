@@ -145,10 +145,27 @@
       else if (durMode === "long" && totalSec > 0 && mins < 20) show = false;
       else if (durMode === "short5" && totalSec > 0 && mins > 5) show = false;
 
+      // 1. נעילת ערוץ חיה בדפדפן: אם לשונית החיפוש היא של ערוץ ספציפי (מופיע "ערוץ: X" בשורת הסטטוס), הסתר מיד כל כרטיס מערוץ זר!
+      const stEl = $("recStatusText");
+      const mActiveCh = stEl && (stEl.textContent || "").match(/ערוץ:\s*([^•(]+)/);
+      if (show && mActiveCh) {
+        const expectedCh = mActiveCh[1].trim().toLowerCase();
+        const subMeta = card.querySelector(".small.muted");
+        if (subMeta) {
+          const cardCh = (subMeta.textContent || "").split("•")[0].trim().toLowerCase();
+          if (expectedCh && cardCh && !cardCh.includes(expectedCh) && !expectedCh.includes(cardCh)) {
+            show = false;
+          }
+        }
+      }
+
+      // 2. סינון קשיח לפי עונה (כולל הסתרת כרטיסים חסרי תאריך מ-2026 כשנבחרה עונה היסטורית!)
       const seasonMode = ($("recSeasonSelect") && $("recSeasonSelect").value) || "all";
       if (show && seasonMode !== "all") {
         const mDate = txt.match(/📅\s*(\d{2})\/(\d{2})\/(\d{4})/);
-        if (mDate) {
+        if (!mDate) {
+          show = false;
+        } else {
           const ymd = parseInt(mDate[3] + mDate[2] + mDate[1], 10);
           const ranges = {
             "2026_2027": [20260801, 20270731],
