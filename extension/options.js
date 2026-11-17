@@ -4,7 +4,7 @@
   const FIELDS = ["owner", "repo", "workflow", "ref", "token", "cookieKey", "updateOwner", "updateRepo"];
   async function load() {
     let cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
-    if (cfg && cfg.cookieKey === "ea1641dc747be6a7af79e7152865d3f8d566fd74ec00c02cb13db642d05fddc3") {
+    if (cfg && cfg.cookieKey === "") {
       await chrome.runtime.sendMessage({ type: "RESET_CONFIG" });
       cfg = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
     }
