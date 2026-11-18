@@ -447,7 +447,7 @@ jobs:
               out_tmpl = f"/tmp/subs/{base_stem}.%(ext)s" if base_stem else "/tmp/subs/%(title).120B [%(id)s].%(ext)s"
               base_sub_cmd = [
                   "python3", "-m", "yt_dlp",
-                  "--ignore-config", "--rm-cache-dir", "--force-ipv4", "--no-check-certificates",
+                  "--ignore-config", "--rm-cache-dir", "--force-ipv4",
                   "--skip-download", "--ignore-errors",
                   "--sleep-requests", "1",
                   "--js-runtimes", "deno",
@@ -610,7 +610,6 @@ jobs:
               extra_args = [
                   "--force-ipv4",
                   "--no-mtime",
-                  "--no-check-certificates",
                   "--js-runtimes", "deno",
                   "--sleep-requests", "1.2",
                   "--socket-timeout", "25",
@@ -790,7 +789,7 @@ jobs:
                               "--extractor-args", "youtube:player_client=web_safari,ios,android_vr,web;fetch_pot=always",
                               "--extractor-args", pot_ep,
                               "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
-                          ] + (["--cookies", str(cookie_file)] if has_ck else []) + get_fmt_args(False, True) + extra_args + [cur_url]
+                          ] + get_fmt_args(False, True) + extra_args + [cur_url]
                           print(f"=== Trying Israel Proxy #{px_idx}: {px_url} ===", flush=True)
                           subprocess.run(px_cmd, check=False)
                           s_files = get_stage_files()
@@ -1011,8 +1010,15 @@ jobs:
           rel_cmd = ["gh", "release", "create", tag] + [str(z) for z in zip_paths] + ["--repo", repo, "--title", tag, "--notes", notes]
           rel_proc = subprocess.run(rel_cmd, capture_output=True, text=True, check=False)
           if rel_proc.returncode != 0:
+              print("gh release create failed:", rel_proc.stderr, flush=True)
+              upload_ok = True
               for z in zip_paths:
-                  subprocess.run(["gh", "release", "upload", tag, str(z), "--repo", repo, "--clobber"], check=False)
+                  up_proc = subprocess.run(["gh", "release", "upload", tag, str(z), "--repo", repo, "--clobber"], capture_output=True, text=True, check=False)
+                  if up_proc.returncode != 0:
+                      print("gh release upload failed:", up_proc.stderr, flush=True)
+                      upload_ok = False
+              if not upload_ok:
+                  raise SystemExit("::error::Release creation and upload failed; triggering backup artifact")
           EOF
 
       - name: Upload Backup Artifact
