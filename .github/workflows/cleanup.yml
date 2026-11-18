@@ -1,6 +1,8 @@
 name: Cleanup Cloud Releases and Runs
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
 permissions:
   contents: write
   actions: write
@@ -9,28 +11,87 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Delete All Releases, Tags and Workflow Runs
+      - name: Safe Cloud Cleanup (Public Repo Hygiene)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           CUR_RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          for page in 1 2 3 4 5; do
-            RELEASES=$(gh api "repos/${GH_REPO}/releases?per_page=100" --jq '.[].tag_name' || true)
-            [ -z "$RELEASES" ] && break
-            for tag in $RELEASES; do
-              gh release delete "$tag" --repo "$GH_REPO" --cleanup-tag --yes || true
-            done
-          done
-          for page in 1 2 3 4 5 6 7 8; do
-            RUNS=$(gh api "repos/${GH_REPO}/actions/runs?per_page=100" --jq '.workflow_runs[].id' || true)
-            [ -z "$RUNS" ] && break
-            DELETED=0
-            for rid in $RUNS; do
-              if [[ "$rid" != "$CUR_RUN_ID" ]]; then
-                gh api -X DELETE "repos/${GH_REPO}/actions/runs/${rid}" || true
-                DELETED=$((DELETED+1))
-              fi
-            done
-            [ "$DELETED" -eq 0 ] && break
-          done
+          python3 - << 'EOF'
+          import datetime, json, os, urllib.parse, urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["GH_REPO"]
+          cur_run_id = str(os.environ.get("CUR_RUN_ID", ""))
+          is_schedule = os.environ.get("EVENT_NAME", "") == "schedule"
+          cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+
+          def api(method, path):
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/{path}",
+                  method=method,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      body = r.read().decode("utf-8", errors="ignore")
+                      return r.status, (json.loads(body) if body else None)
+              except Exception:
+                  return 0, None
+
+          def is_old_enough(iso_ts: str) -> bool:
+              if not is_schedule:
+                  return True
+              try:
+                  dt = datetime.datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+                  return dt < cutoff
+              except Exception:
+                  return False
+
+          del_rel = 0
+          for _ in range(5):
+              st, rels = api("GET", "releases?per_page=100")
+              if st != 200 or not rels:
+                  break
+              deleted_page = 0
+              for rel in rels:
+                  if not is_old_enough(rel.get("created_at", "")):
+                      continue
+                  api("DELETE", f"releases/{rel['id']}")
+                  tag = rel.get("tag_name")
+                  if tag:
+                      api("DELETE", f"git/refs/tags/{urllib.parse.quote(tag, safe='')}")
+                  del_rel += 1
+                  deleted_page += 1
+              if deleted_page == 0:
+                  break
+
+          del_runs = 0
+          for _ in range(8):
+              st, data = api("GET", "actions/runs?per_page=100")
+              runs = (data or {}).get("workflow_runs") or []
+              if st != 200 or not runs:
+                  break
+              deleted_page = 0
+              for run in runs:
+                  rid = str(run.get("id", ""))
+                  if rid == cur_run_id:
+                      continue
+                  if is_schedule and run.get("status") != "completed":
+                      continue
+                  if not is_old_enough(run.get("created_at", "")):
+                      continue
+                  ds, _ = api("DELETE", f"actions/runs/{rid}")
+                  if ds in (200, 204):
+                      del_runs += 1
+                      deleted_page += 1
+              if deleted_page == 0:
+                  break
+
+          print(f"Cleanup finished (mode={'schedule' if is_schedule else 'manual'}): deleted {del_rel} releases, {del_runs} runs.")
+          EOF
