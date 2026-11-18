@@ -415,8 +415,7 @@ async function fetchDirectBlobsToCache(cfg, blobShas, jobId) {
       const data = await res.json();
       if (!data || !data.content) return null;
       const cleanB64 = String(data.content).replace(/\s+/g, "");
-      const binRes = await fetch("data:application/octet-stream;base64," + cleanB64);
-      blobParts.push(await binRes.blob());
+      blobParts.push(new Blob([b64ToBytes(cleanB64)]));
     }
     const mergedBlob = new Blob(blobParts, { type: "application/zip" });
     const cacheKey = "https://ytcloud.local/asset-" + jobId + "-" + Date.now() + ".zip";
@@ -488,6 +487,7 @@ function saveBlob(blobUrl, filename, jobId) {
         return;
       }
 
+      let lastDlPct = -1;
       const pollTimer = setInterval(() => {
         chrome.downloads.search({ id: downloadId }, (results) => {
           const item = results && results[0];
@@ -495,19 +495,23 @@ function saveBlob(blobUrl, filename, jobId) {
           const diskPath = item.filename || filename;
           if (item.state === "in_progress") {
             const dlPct = item.totalBytes > 0 ? Math.round((item.bytesReceived / item.totalBytes) * 100) : 100;
-            patchJob(jobId, {
-              localDlPct: dlPct,
-              tempPath: diskPath + ".crdownload (Local Disk Write)",
-              detail: "כותב קובץ לתיקיית ההורדות במחשב: " + dlPct + "%..."
-            });
-          } else if (item.state === "complete") {
+            if (dlPct !== lastDlPct) {
+              lastDlPct = dlPct;
+              patchJob(jobId, {
+                localDlPct: dlPct,
+                tempPath: diskPath + ".crdownload (Local Disk Write)",
+                detail: "כותב קובץ לתיקיית ההורדות במחשב: " + dlPct + "%..."
+              });
+            }
+          } else if (item.state === "complete" && lastDlPct !== 100) {
+            lastDlPct = 100;
             patchJob(jobId, {
               localDlPct: 100,
               finalDiskPath: diskPath
             });
           }
         });
-      }, 300);
+      }, 500);
 
       const listener = (delta) => {
         if (delta.id !== downloadId || !delta.state) return;
