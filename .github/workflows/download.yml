@@ -85,6 +85,9 @@ jobs:
           cookies_enc = str(inp.get("cookies_enc", "")).strip()
 
           secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
+          for _m in (cookies_enc, secret_key_env):
+              if _m and len(_m) >= 8:
+                  print(f"::add-mask::{_m}", flush=True)
 
           if quality == "subs_only" or subtitles == "only":
               quality = "subs_only"
@@ -938,6 +941,9 @@ jobs:
               or smtp_user
           )
           recipient = email_opt if (email_opt and "@" in email_opt) else secret_to
+          for _em in (smtp_user, smtp_pass, secret_to, recipient):
+              if _em and len(_em) >= 4:
+                  print(f"::add-mask::{_em}", flush=True)
 
           email_sent_status = ""
           if send_email_flag and smtp_user and smtp_pass and recipient and "@" in recipient:
@@ -994,9 +1000,10 @@ jobs:
                   with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=90) as srv:
                       srv.login(smtp_user, smtp_pass)
                       srv.send_message(msg)
-                  email_sent_status = f"נשלח למייל ({recipient})"
+                  email_sent_status = "נשלח למייל בהצלחה"
               except Exception as e:
-                  email_sent_status = f"שגיאת מייל: {e}"
+                  print(f"Email delivery error: {type(e).__name__}", flush=True)
+                  email_sent_status = f"שגיאת מייל ({type(e).__name__})"
 
           notes = json.dumps({
               "v": 10.6,
