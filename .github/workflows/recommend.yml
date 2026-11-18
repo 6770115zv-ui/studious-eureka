@@ -742,6 +742,37 @@ jobs:
 
           pool = selected_pool[:max_results]
 
+          gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+          if filter_prompt and gemini_key and pool:
+              try:
+                  ai_slice = pool[:120]
+                  compact_items = [{"i": idx, "t": it.get("title", ""), "c": it.get("channel", "")} for idx, it in enumerate(ai_slice)]
+                  ai_prompt = (
+                      f"Filter the following YouTube video list according to this instruction: {filter_prompt}\n"
+                      "Return ONLY a JSON array of integer indices (\"i\") of the videos that match. Example: [0, 2, 5]\n"
+                      f"Videos: {json.dumps(compact_items, ensure_ascii=False)}"
+                  )
+                  g_res = requests.post(
+                      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+                      headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key},
+                      json={
+                          "contents": [{"parts": [{"text": ai_prompt}]}],
+                          "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
+                      },
+                      timeout=25
+                  )
+                  if g_res.status_code == 200:
+                      g_txt = g_res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                      m_arr = re.search(r"\[[\d,\s]*\]", g_txt)
+                      if m_arr:
+                          keep_idxs = set(json.loads(m_arr.group(0)))
+                          filtered_pool = [it for idx, it in enumerate(ai_slice) if idx in keep_idxs]
+                          if filtered_pool:
+                              pool = filtered_pool
+                              print(f"AI filter kept {len(pool)}/{len(ai_slice)} items.", flush=True)
+              except Exception as ai_err:
+                  print(f"AI filter skipped due to error: {ai_err}", flush=True)
+
           def translate_titles_properly(items_arr):
               def pre_clean(t: str) -> str:
                   s = re.sub(r"[\u2066-\u2069]", "", str(t or ""))
@@ -791,7 +822,8 @@ jobs:
                   with ThreadPoolExecutor(max_workers=4) as ex:
                       list(ex.map(tr_batch, batches))
 
-          translate_titles_properly(pool)
+          if translate_titles:
+              translate_titles_properly(pool)
 
           for item in pool:
               item.pop("orig_pos", None)
