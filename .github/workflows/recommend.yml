@@ -59,6 +59,9 @@ jobs:
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
           cookies_enc = os.environ.get("COOKIES_ENC", "").strip()
           secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
+          for _m in (cookies_enc, secret_key_env):
+              if _m and len(_m) >= 8:
+                  print(f"::add-mask::{_m}", flush=True)
 
           fp_low = filter_prompt.lower()
           high_quality_only = "[hq_only]" in fp_low or "|hq" in sort_raw.lower() or sort_raw.lower() == "quality_score"
@@ -740,38 +743,54 @@ jobs:
           else:
               selected_pool.sort(key=lambda x: (int(x.get("views") or 0), int(x.get("likes") or 0)), reverse=True)
 
-          pool = selected_pool[:max_results]
-
+          ai_status = ""
           gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-          if filter_prompt and gemini_key and pool:
-              try:
-                  ai_slice = pool[:120]
+          if filter_prompt:
+              if not gemini_key:
+                  ai_status = "⚠️ סינון AI לא פעיל (חסר GEMINI_API_KEY ב-Secrets)"
+                  print("AI filter requested but GEMINI_API_KEY secret is missing.", flush=True)
+              elif selected_pool:
+                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 120))]
                   compact_items = [{"i": idx, "t": it.get("title", ""), "c": it.get("channel", "")} for idx, it in enumerate(ai_slice)]
                   ai_prompt = (
-                      f"Filter the following YouTube video list according to this instruction: {filter_prompt}\n"
-                      "Return ONLY a JSON array of integer indices (\"i\") of the videos that match. Example: [0, 2, 5]\n"
+                      f"Filter the following YouTube video list according to this user instruction: {filter_prompt}\n"
+                      "Return ONLY a valid JSON array of integer indices (\"i\") of the videos that match. Example: [0, 2, 5]\n"
                       f"Videos: {json.dumps(compact_items, ensure_ascii=False)}"
                   )
-                  g_res = requests.post(
-                      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-                      headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key},
-                      json={
-                          "contents": [{"parts": [{"text": ai_prompt}]}],
-                          "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
-                      },
-                      timeout=25
-                  )
-                  if g_res.status_code == 200:
-                      g_txt = g_res.json()["candidates"][0]["content"]["parts"][0]["text"]
-                      m_arr = re.search(r"\[[\d,\s]*\]", g_txt)
-                      if m_arr:
-                          keep_idxs = set(json.loads(m_arr.group(0)))
-                          filtered_pool = [it for idx, it in enumerate(ai_slice) if idx in keep_idxs]
-                          if filtered_pool:
-                              pool = filtered_pool
-                              print(f"AI filter kept {len(pool)}/{len(ai_slice)} items.", flush=True)
-              except Exception as ai_err:
-                  print(f"AI filter skipped due to error: {ai_err}", flush=True)
+                  ai_ok = False
+                  for model_name in ("gemini-2.5-flash", "gemini-2.0-flash"):
+                      try:
+                          g_res = requests.post(
+                              f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+                              headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key},
+                              json={
+                                  "contents": [{"parts": [{"text": ai_prompt}]}],
+                                  "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
+                              },
+                              timeout=30
+                          )
+                          if g_res.status_code == 200:
+                              g_txt = g_res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                              m_arr = re.search(r"\[[\d,\s]*\]", g_txt)
+                              if m_arr:
+                                  keep_idxs = set(json.loads(m_arr.group(0)))
+                                  filtered_pool = [it for idx, it in enumerate(ai_slice) if idx in keep_idxs]
+                                  if filtered_pool:
+                                      selected_pool = filtered_pool
+                                      ai_status = f"🤖 סינון AI ({len(filtered_pool)}/{len(ai_slice)})"
+                                      print(f"AI filter ({model_name}) kept {len(filtered_pool)}/{len(ai_slice)} items.", flush=True)
+                                  else:
+                                      ai_status = "🤖 סינון AI לא מצא התאמה (מוצגות כל התוצאות)"
+                                  ai_ok = True
+                                  break
+                          else:
+                              print(f"Gemini {model_name} HTTP {g_res.status_code}", flush=True)
+                      except Exception as ai_err:
+                          print(f"Gemini {model_name} error: {ai_err}", flush=True)
+                  if not ai_ok and not ai_status:
+                      ai_status = "⚠️ סינון AI נכשל זמנית"
+
+          pool = selected_pool[:max_results]
 
           def translate_titles_properly(items_arr):
               def pre_clean(t: str) -> str:
@@ -786,14 +805,39 @@ jobs:
                   s = re.sub(r"\bOrian Goren\b", "אוריין גורן", s, flags=re.I)
                   s = re.sub(r"\bLamine Yamal\b", "לאמין ימאל", s, flags=re.I)
                   s = re.sub(r"\bPau Cubars[ií]\b", "פאו קובארסי", s, flags=re.I)
+                  s = re.sub(r"\bJoan Garc[ií]a\b", "ז'ואן גרסיה", s, flags=re.I)
                   return s.strip()
+
+              def needs_he_translation(txt: str) -> bool:
+                  he_cnt = sum(1 for ch in txt if "\u0590" <= ch <= "\u05FF")
+                  non_he_letters = sum(1 for ch in txt if ch.isalpha() and not ("\u0590" <= ch <= "\u05FF"))
+                  return non_he_letters >= 2 and non_he_letters > (he_cnt * 0.4)
 
               need_tr = []
               for idx, it in enumerate(items_arr):
                   it["orig_title"] = it["title"]
                   it["title_he"] = pre_clean(it["title"])
-                  if sum(1 for ch in it["title_he"] if "a" <= ch.lower() <= "z") > 1:
+                  if needs_he_translation(it["title_he"]):
                       need_tr.append((idx, it["title_he"]))
+
+              def translate_one(text_val: str) -> str:
+                  for client_id in ("gtx", "dict-chrome-ex"):
+                      try:
+                          r = requests.post(
+                              "https://translate.googleapis.com/translate_a/single",
+                              params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
+                              data={"q": text_val},
+                              headers={"User-Agent": UA_STR, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                              timeout=10
+                          )
+                          if r.status_code == 200:
+                              sents = r.json().get("sentences") or []
+                              tr = "".join(s.get("trans", "") for s in sents if "trans" in s).strip()
+                              if tr:
+                                  return pre_clean(tr)
+                      except Exception:
+                          pass
+                  return text_val
 
               def tr_batch(batch_pairs):
                   joined = "\n".join(p[1].replace("\n", " ") for p in batch_pairs)
@@ -816,9 +860,11 @@ jobs:
                                   return
                       except Exception:
                           pass
+                  for item_idx, orig_t in batch_pairs:
+                      items_arr[item_idx]["title_he"] = translate_one(orig_t)
 
               if need_tr:
-                  batches = [need_tr[i:i + 30] for i in range(0, len(need_tr), 30)]
+                  batches = [need_tr[i:i + 15] for i in range(0, len(need_tr), 15)]
                   with ThreadPoolExecutor(max_workers=4) as ex:
                       list(ex.map(tr_batch, batches))
 
@@ -838,7 +884,7 @@ jobs:
               item["channel"] = " • ".join(p for p in [item["channel"], f"🎬 {qb}" if qb else ""] if p)
               if item.get("title_he"): item["title"] = item["title_he"]
 
-          payload_bytes = json.dumps({"query": query, "channel": resolved_ch or channel_input, "sort_by": sort_by, "items": pool}, ensure_ascii=False).encode("utf-8")
+          payload_bytes = json.dumps({"query": query, "channel": resolved_ch or channel_input, "sort_by": sort_by, "ai_status": ai_status, "items": pool}, ensure_ascii=False).encode("utf-8")
           with open("recommendations.json", "wb") as f: f.write(payload_bytes)
           gh_repo = os.environ["GH_REPO"]; gh_token = os.environ["GH_TOKEN"]
           r = requests.post(f"https://api.github.com/repos/{gh_repo}/git/blobs", headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}, json={"content": base64.b64encode(payload_bytes).decode("ascii"), "encoding": "base64"}, timeout=60)
