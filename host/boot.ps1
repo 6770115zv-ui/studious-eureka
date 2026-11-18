@@ -7,6 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
+if (-not $Token -and $env:YTPROXY_UPDATE_TOKEN) {
+  $Token = $env:YTPROXY_UPDATE_TOKEN
+}
+
 $ExtDir = Join-Path $RootDir "extension"
 $work = Join-Path $env:TEMP "ytproxy-upd"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -19,6 +23,9 @@ try {
     if (-not $Repo)  { $Repo  = [regex]::Match($t, 'updateRepo:\s*"([^"]*)"').Groups[1].Value }
   }
   if (-not $Owner -or -not $Repo) { throw "Missing updateOwner/updateRepo" }
+  if ($Owner -notmatch '^[a-zA-Z0-9._-]+$' -or $Repo -notmatch '^[a-zA-Z0-9._-]+$') {
+    throw "Invalid owner or repo name"
+  }
 
   $zip = Join-Path $work "src.zip"
   $ex = Join-Path $work "extract"
