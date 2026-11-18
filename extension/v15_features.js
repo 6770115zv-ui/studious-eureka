@@ -181,6 +181,7 @@
 
         // גשר חיפוש היברידי מה-IP הישראלי של הדפדפן: חושף סרטונים שחסומים גיאוגרפית לשרתי ארה"ב ב-GitHub!
         try {
+          showStatus("🌐 אוסף תוצאות מקומיות מישראל לפני השליחה לענן...");
           const ilIds = await harvestLocalIsraeliIds(msg.payload.channel, msg.payload.query, seasonMode);
           if (ilIds.length > 0) {
             tags.push("[IL_IDS:" + ilIds.slice(0, 180).join(",") + "]");
@@ -242,9 +243,12 @@
     }
     const st = $("recStatusText");
     if (st && recList.children.length > 0) {
-      const baseTxt = st.dataset.baseText || st.textContent.replace(/\s*\(מוצגות כעת:.*\)$/, "");
+      const curStripped = st.textContent.replace(/\s*\(מוצגות כעת:.*\)$/, "").trim();
+      const baseTxt = curStripped || st.dataset.baseText || "";
       st.dataset.baseText = baseTxt;
-      st.textContent = `${baseTxt} (מוצגות כעת: ${visibleCount} מתוך ${recList.children.length})`;
+      if (baseTxt) {
+        st.textContent = `${baseTxt} (מוצגות כעת: ${visibleCount} מתוך ${recList.children.length})`;
+      }
     }
   }
 
