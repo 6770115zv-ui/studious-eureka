@@ -831,7 +831,8 @@ async function driveRecommendations(requestId) {
       views: "צפיות היסטוריות",
       likes: "כמות לייקים",
       date_desc: "תאריך (מהחדש לישן)",
-      date_asc: "תאריך (מהישן לחדש)"
+      date_asc: "תאריך (מהישן לחדש)",
+      quality_score: "דירוג איכות משוקלל"
     };
     const sortText = sortLabels[sortBy] || sortLabels.views;
     const labelTarget = channel ? ("הערוץ \"" + channel + "\"" + (query ? (" בנושא \"" + query + "\"") : "")) : ("\"" + query + "\"");
@@ -869,15 +870,17 @@ async function driveRecommendations(requestId) {
 
     const trLabel = data.en_query ? (" (תרגום: " + data.en_query + ")") : "";
     const chResolved = data.channel ? (" • ערוץ: " + data.channel) : "";
+    const aiLabel = data.ai_status ? (" • " + data.ai_status) : "";
     const shortName = (data.channel || channel || query || "חיפוש").replace(/^https?:\/\/(www\.)?youtube\.com\//i, "");
     await patchRecSession(requestId, {
       status: "completed",
       tabTitle: shortName,
       channel: data.channel || channel,
-      detail: "התקבלו " + data.items.length + " תוצאות ממוינות לפי " + sortText + chResolved + trLabel,
+      aiStatus: data.ai_status || "",
+      detail: "התקבלו " + data.items.length + " תוצאות ממוינות לפי " + sortText + chResolved + trLabel + aiLabel,
       items: data.items,
       updatedAt: Date.now()
-    }, "COMPLETED: Loaded " + data.items.length + " items.");
+    }, "COMPLETED: Loaded " + data.items.length + " items." + (data.ai_status ? (" (" + data.ai_status + ")") : ""));
   } catch (err) {
     await patchRecSession(requestId, {
       status: "failed",
