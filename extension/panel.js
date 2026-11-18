@@ -208,7 +208,7 @@
       try {
         const body = new URLSearchParams({ q: text });
         const res = await fetch(
-          "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=en&tl=iw&dt=t&dj=1",
+          "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=auto&tl=iw&dt=t&dj=1",
           {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
@@ -234,7 +234,7 @@
         try {
           const body = new URLSearchParams({ q: joined });
           const res = await fetch(
-            "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=en&tl=iw&dt=t&dj=1",
+            "https://translate.googleapis.com/translate_a/single?client=" + clientName + "&sl=auto&tl=iw&dt=t&dj=1",
             {
               method: "POST",
               headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
@@ -621,7 +621,9 @@
     }
 
     const statusEl = el("recStatusText");
-    statusEl.textContent = (activeRec && activeRec.detail) || "";
+    const nextDetail = (activeRec && activeRec.detail) || "";
+    statusEl.dataset.baseText = nextDetail;
+    statusEl.textContent = nextDetail;
     if (activeRec && activeRec.status === "failed") {
       statusEl.style.color = "var(--fail)";
     } else if (activeRec && activeRec.status === "completed") {
@@ -846,6 +848,7 @@
     }
     selectedRecUrls.clear();
     const sortBy = el("recSortBySelect") ? el("recSortBySelect").value : "views";
+    el("recStatusText").dataset.baseText = "";
     el("recStatusText").textContent = "משגר חיפוש חדש במקביל ל-GitHub Actions...";
     const res = await chrome.runtime.sendMessage({
       type: "START_RECOMMEND",
