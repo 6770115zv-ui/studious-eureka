@@ -44,7 +44,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - << 'EOF'
-          import base64, datetime, io, json, math, os, re, subprocess, threading, urllib.parse, requests
+          import base64, datetime, io, json, math, os, re, subprocess, threading, time, urllib.parse, requests
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -605,6 +605,8 @@ jobs:
 
                   def _score_ai_chunk(pair):
                       offset, sub_items = pair
+                      if offset > 0:
+                          time.sleep(0.7)
                       compact = [{
                           "i": offset + idx,
                           "t": it.get("title", ""),
@@ -616,16 +618,16 @@ jobs:
                       ai_prompt = (
                           f"User search intent: Query=\"{query or 'N/A'}\" | Channel=\"{resolved_ch or 'Any'}\" | ContentType={content_type}\n"
                           f"Strict user filter rule: {filter_prompt}\n"
-                          "You are curating the best possible YouTube videos for this user. Evaluate each video on TWO axes:\n"
-                          "  1. Direct relevance to the user's concept/question (analytical breakdowns, documentaries, podcasts, full matches, tactical essays, highlights).\n"
-                          "  2. Valuable related discoveries (Hidden Gems): e.g. a full match or profile of a specific rising prospect, goalkeeper, or coach belonging to the exact topic even if their name wasn't typed.\n"
-                          "Drop anything clickbaity, gaming, off-topic, or non-compliant with the filter rule (score < 5).\n"
-                          "CRITICAL SCORING DISTRIBUTION: Differentiate carefully! Reserve 10 ONLY for the top ~12% most insightful/iconic matches; 8-9 for strong matches & top hidden gems; 6-7 for good secondary matches; 5 for borderline.\n"
-                          "For each kept video, also write a tiny crisp Hebrew note 'r' (STRICTLY 3 to 7 Hebrew words!) explaining WHY it's worth watching or what hidden angle it covers (e.g. 'ניתוח טקטי על הצעירים תחת פליק' or 'תגלית קשורה: משחק מלא של יעקובישווילי').\n"
+                          "You are curating a rich, high-value YouTube playlist for this user. Evaluate each video on TWO axes:\n"
+                          "  1. Direct hits: covers the user's exact concept/question (score 9-10 for exact multi-angle hits, 8 for strong hits).\n"
+                          "  2. Valuable related discoveries (Hidden Gems): covers an important component of the topic, a specific rising player/goalkeeper/coach, a tactical analysis, podcast, or full youth match tightly linked to the subject even if not every word from the query appears in the title (score 6-8).\n"
+                          "DO NOT OVER-PRUNE: Aim to keep roughly 25% to 55% of relevant videos (at least 15-30 videos per batch when valid exist). Only drop videos that are genuinely off-topic, gaming (FIFA/EA FC), clickbait spam, or violate the user's modesty/content rule.\n"
+                          "SCORING SPREAD: Reserve 10 ONLY for the top ~12% best matches; 8-9 for strong matches & top hidden gems; 6-7 for good related videos; 5 for borderline.\n"
+                          "For each kept video, write a crisp Hebrew note 'r' (3 to 7 Hebrew words) explaining why it fits or what angle it brings.\n"
                           "Return ONLY JSON: {\"keep\": [{\"i\": 0, \"s\": 9, \"r\": \"...\"}]}\n"
                           f"Videos: {json.dumps(compact, ensure_ascii=False)}"
                       )
-                      return call_gemini_json(ai_prompt, timeout_sec=38)
+                      return call_gemini_json(ai_prompt, timeout_sec=42)
 
                   score_map, reason_map, used_models = {}, {}, []
                   with ThreadPoolExecutor(max_workers=len(chunks_ai)) as ex:
@@ -635,8 +637,8 @@ jobs:
                               for r in g_data["keep"]:
                                   if isinstance(r, dict) and isinstance(r.get("i"), int):
                                       sc = int(r.get("s") or 7)
-                                      if sc >= 5:
-                                          score_map[r["i"]] = min(10, max(5, sc))
+                                      if sc >= 4:
+                                          score_map[r["i"]] = min(10, max(4, sc))
                                           rs = str(r.get("r") or "").strip()
                                           if rs: reason_map[r["i"]] = rs[:90]
                   if score_map:
