@@ -941,10 +941,10 @@ jobs:
           drive_web_link = ""
           drive_url_enc = ""
           drive_status = ""
-          gd_cid = os.environ.get("GDRIVE_CLIENT_ID", "").strip()
-          gd_sec = os.environ.get("GDRIVE_CLIENT_SECRET", "").strip()
-          gd_ref = os.environ.get("GDRIVE_REFRESH_TOKEN", "").strip()
-          gd_fld = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
+          gd_cid = re.sub(r"\s+", "", os.environ.get("GDRIVE_CLIENT_ID", ""))
+          gd_sec = re.sub(r"\s+", "", os.environ.get("GDRIVE_CLIENT_SECRET", ""))
+          gd_ref = re.sub(r"\s+", "", os.environ.get("GDRIVE_REFRESH_TOKEN", ""))
+          gd_fld = re.sub(r"\s+", "", os.environ.get("GDRIVE_FOLDER_ID", ""))
           _share_target = email_opt if (email_opt and "@" in email_opt) else (os.environ.get("EMAIL_TO", "").strip() or os.environ.get("SMTP_TO", "").strip())
           if _share_target and "@" in _share_target: print(f"::add-mask::{_share_target}", flush=True)
           has_gd_secrets = bool(gd_cid and gd_sec and gd_ref)
