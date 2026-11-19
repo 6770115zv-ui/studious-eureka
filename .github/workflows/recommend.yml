@@ -511,22 +511,45 @@ jobs:
                   rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00","hl":"en","gl":"IL"}},"videoId":vid}, timeout=10)
                   if rn.status_code == 200:
                       rt = rn.text
+                      try:
+                          rn_json = rn.json()
+                          res_contents = ((((rn_json.get("contents") or {}).get("twoColumnWatchNextResults") or {}).get("results") or {}).get("results") or {}).get("contents") or []
+                          for rc in res_contents:
+                              if not isinstance(rc, dict): continue
+                              p_info = rc.get("videoPrimaryInfoRenderer")
+                              if isinstance(p_info, dict):
+                                  if not c.get("title") or c.get("title") == vid:
+                                      t_runs = (p_info.get("title") or {}).get("runs") or []
+                                      t_val = "".join(str(x.get("text") or "") for x in t_runs).strip() or str((p_info.get("title") or {}).get("simpleText") or "").strip()
+                                      if t_val: c["title"] = t_val
+                                  if not c.get("upload_date"):
+                                      raw_dt = str((p_info.get("dateText") or {}).get("simpleText") or "").replace("Premiered ", "").replace("Streamed live on ", "").strip()
+                                      if raw_dt:
+                                          p_dt = parse_dt(raw_dt)
+                                          if p_dt: c["upload_date"] = p_dt
+                                          else: c["published_rel"] = raw_dt
+                                  if not c.get("views"):
+                                      vc_r = (p_info.get("viewCount") or {}).get("videoViewCountRenderer") or {}
+                                      vc_s = str((vc_r.get("viewCount") or {}).get("simpleText") or "")
+                                      if vc_s: c["views"] = parse_views_text(vc_s)
+                                  if c["likes"] == 0:
+                                      ml = re.search(r'"likeCount"\s*:\s*(\d+)', json.dumps(p_info.get("videoActions") or {}, ensure_ascii=False))
+                                      if ml: c["likes"] = int(ml.group(1))
+                              s_info = rc.get("videoSecondaryInfoRenderer")
+                              if isinstance(s_info, dict) and not c.get("channel_id"):
+                                  owner = (s_info.get("owner") or {}).get("videoOwnerRenderer") or {}
+                                  bid = str(((owner.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId") or "")
+                                  if bid.startswith("UC"): c["channel_id"] = bid
+                      except Exception:
+                          pass
                       if not c.get("channel_id"):
                           mc = re.search(r'"videoOwnerRenderer"\s*:\s*\{.*?"browseId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', rt)
                           if mc: c["channel_id"] = mc.group(1)
                       if not c.get("title") or c.get("title") == vid:
-                          mt = re.search(r'"videoPrimaryInfoRenderer"\s*:\s*\{\s*"title"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"]+)"', rt)
-                          if mt: c["title"] = mt.group(1)
-                      if not c.get("upload_date"):
-                          md = re.search(r'"dateText"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"', rt)
-                          if md:
-                              raw_dt = md.group(1).replace("Premiered ","").replace("Streamed live on ","").strip()
-                              p_dt = parse_dt(raw_dt)
-                              if p_dt: c["upload_date"] = p_dt
-                              else: c["published_rel"] = raw_dt
-                      if not c.get("views"):
-                          mv = re.search(r'"viewCount"\s*:\s*\{\s*"videoViewCountRenderer"\s*:\s*\{\s*"viewCount"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"', rt)
-                          if mv: c["views"] = parse_views_text(mv.group(1))
+                          mt = re.search(r'"videoPrimaryInfoRenderer"\s*:\s*\{\s*"title"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"', rt)
+                          if mt:
+                              try: c["title"] = json.loads(f'"{mt.group(1)}"')
+                              except Exception: c["title"] = mt.group(1)
                       if c["likes"] == 0:
                           ml = re.search(r'"likeCount"\s*:\s*(\d+)', rt)
                           if ml: c["likes"] = int(ml.group(1))
