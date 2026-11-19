@@ -349,9 +349,16 @@ jobs:
               if gemini_key and not is_similar:
                   lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
                   exp_prompt = (
-                      f"Topic: \"{clean_q}\" | Languages: {lang_desc} | Preferred content: {content_type}.\n"
-                      "1. Generate 6 diverse YouTube search queries across the requested languages (native club/player spellings, highlights/documentaries/related angles; no FIFA/EA FC/PES).\n"
-                      "2. Generate 8 clickable follow-up search suggestions in natural Israeli Hebrew (4 closely related + 4 broader interesting sports angles).\n"
+                      f"Current date: November 2026 (Current sports season: 2026/27; recent season: 2025/26).\n"
+                      f"User topic: \"{clean_q}\" | Languages: {lang_desc} | Content preference: {content_type}.\n"
+                      "Task 1 - Search Queries: Generate 6 diverse YouTube search queries across the requested languages (native club/player spellings, highlights/documentaries/recent 2025-2026 videos; exclude FIFA/EA FC/PES).\n"
+                      "Task 2 - Clickable YouTube Follow-Up Suggestions (Hebrew): Generate 14 SHORT, punchy, REAL YouTube search terms in Hebrew (STRICTLY 2 to 5 words each!).\n"
+                      "NEVER write long questions, essay titles, or phrases starting with 'איך...', 'הסיפור מאחורי...', 'ההשוואה בין...', 'השפעת...'. No question marks!\n"
+                      "Cover ALL 4 diverse angles:\n"
+                      "  a) 4 fresh 2026 / 2025-26 queries (e.g. '<topic> 2026', '<topic> 2026/27', 'כישרונות חדשים <topic> 2026', 'שערים <topic> 2026').\n"
+                      "  b) 4 specific current/rising players, coaches, or sub-teams directly related to the topic (real 2025/2026 names!).\n"
+                      "  c) 3 specific video formats (e.g. 'תקציר ...', 'משחק מלא ...', 'אימון ...', 'ליגת האלופות לנוער ...', 'ראיון ...').\n"
+                      "  d) 3 broader/alternative exciting angles (derbies, classic matches, academy vs academy, podcasts).\n"
                       "Return ONLY JSON: {\"queries\": [...], \"suggestions_he\": [...]}"
                   )
                   g_exp, _ = call_gemini_json(exp_prompt, timeout_sec=20)
@@ -361,7 +368,7 @@ jobs:
                               qs = str(q_c or "").strip()
                               if qs and qs.lower() not in [x.lower() for x in expanded_queries]: expanded_queries.append(qs)
                       if isinstance(g_exp.get("suggestions_he"), list):
-                          suggested_searches = [str(x).strip() for x in g_exp["suggestions_he"] if str(x).strip()][:8]
+                          suggested_searches = [str(x).strip() for x in g_exp["suggestions_he"] if str(x).strip()][:16]
               if len(expanded_queries) < 3:
                   def _tr_lg(lg):
                       tr = gtrans_simple(clean_q, lg)
@@ -594,15 +601,21 @@ jobs:
 
           pool = selected_pool[:max_results]
 
-          # 100% תרגום עברית מלא (כולל שמות קבוצות, שחקנים וטורנירים + סיבוב אימות שני!)
+          # 100% תרגום עברית מלא (כולל ספרדית/צרפתית/אנגלית + שמות קבוצות, שחקנים וטורנירים)
           def strip_noise(t: str) -> str:
-              return re.sub(r"\s+", " ", re.sub(r"#[a-zA-Z0-9_\u0590-\u05FF]+", "", re.sub(r"[\u2066-\u2069\u200e\u200f]", "", str(t or "")))).strip()
+              s = re.sub(r"[\u2066-\u2069\u200e\u200f]", "", str(t or ""))
+              s = re.sub(r"^\s*\[(?:ESP|ENG|CAT|FR|ITA|DE|PT|AR|HD|4K)\]\s*", "", s, flags=re.I)
+              s = re.sub(r"#[a-zA-Z0-9_\u0590-\u05FF]+", "", s)
+              return re.sub(r"\s+", " ", s).strip()
 
           HE_POST = [
               (r"\bEXTENDED HIGHLIGHTS\b", "תקציר מורחב"), (r"\b(?:HIGHLIGHTS|HHIHLIGHTS|RESUMEN)\b", "תקציר"),
               (r"\b(?:FULL MATCH|PARTIDO COMPLETO|PARTIDO ENTERO)\b", "משחק מלא"), (r"\bFIRST TEAM\b", "הקבוצה הבוגרת"),
               (r"\bBEST OF\b", "מיטב הרגעים של"), (r"\bFINAL\b", "גמר"), (r"\bVS\.?\b", "נגד"),
-              (r"\bFC Barcelona\b|\bBarça\b|\bBarcelona\b", "ברצלונה"), (r"\bReal Madrid\b", "ריאל מדריד"),
+              (r"\bTorneo\b", "טורניר"), (r"\bAlev[ií]n\b", "ילדים"), (r"\bInfantil\b", "נערים"),
+              (r"\bJuvenil\b", "נוער"), (r"\bCadete\b", "קדטים"), (r"\bBenjam[ií]n\b", "טרום-ילדים"),
+              (r"\bEntrenamiento\b", "אימון"), (r"\bGoles\b", "שערים"), (r"\bBar[cç]a Atl[eè]tic\b", "ברצלונה אתלטיק"),
+              (r"\bFC Barcelona\b|\bBar[cç]a\b|\bBarcelona\b", "ברצלונה"), (r"\bReal Madrid\b", "ריאל מדריד"),
               (r"\bAtl[eé]tico de Madrid\b", "אתלטיקו מדריד"), (r"\bValencia\b", "ולנסיה"), (r"\bSevilla\b", "סביליה"),
               (r"\bReal Betis\b", "ריאל בטיס"), (r"\bGirona\s*FC\b|\bGirona\b", "ג'ירונה"), (r"\bVillarreal\b", "ויאריאל"),
               (r"\bMalaga\s*CF\b|\bM[aá]laga\b", "מלאגה"), (r"\bAtalanta\b", "אטאלנטה"), (r"\bAl Ahly\b", "אל-אהלי"),
@@ -619,8 +632,11 @@ jobs:
               for pat, rep in HE_POST: s = re.sub(pat, rep, s, flags=re.I)
               return re.sub(r"\s+", " ", s).strip()
 
+          def count_foreign_alpha(txt: str) -> int:
+              return sum(1 for ch in str(txt or "") if ch.isalpha() and not ("\u0590" <= ch <= "\u05FF"))
+
           def has_foreign_words(txt: str) -> bool:
-              return sum(1 for ch in txt if ch.isalpha() and not ("\u0590" <= ch <= "\u05FF")) >= 3
+              return count_foreign_alpha(txt) >= 3
 
           def gtrans_post(q_txt: str, sl: str = "auto") -> str:
               for cid in ("gtx", "dict-chrome-ex"):
@@ -632,6 +648,28 @@ jobs:
                   except Exception: pass
               return ""
 
+          def translate_one_pure_he(orig_s: str) -> str:
+              best = polish_he(gtrans_post(orig_s, "auto") or orig_s)
+              if not has_foreign_words(best):
+                  return best
+              # נסה שפות מקור מפורשות (ספרדית / אנגלית / צרפתית / ערבית) על הטקסט המקורי הנקי!
+              guess_langs = []
+              if re.search(r"[\u0600-\u06FF]", orig_s): guess_langs.append("ar")
+              if re.search(r"[áéíóúñ¡¿çèà]|\b(el|la|los|las|del|en|al|gana|contra|partido|torneo|final|goles|juvenil|alev[ií]n|infantil|ni[ñn]o)\b", orig_s, re.I):
+                  guess_langs.append("es")
+              for lg in ("es", "en", "fr"):
+                  if lg not in guess_langs: guess_langs.append(lg)
+              best_score = count_foreign_alpha(best)
+              for sl in guess_langs:
+                  cand = polish_he(gtrans_post(orig_s, sl) or "")
+                  if cand:
+                      sc = count_foreign_alpha(cand)
+                      if sc < best_score:
+                          best, best_score = cand, sc
+                          if best_score < 3:
+                              break
+              return best
+
           if translate_titles and pool:
               need_tr = []
               for idx, it in enumerate(pool):
@@ -642,47 +680,32 @@ jobs:
 
               remaining = []
               if gemini_key and need_tr:
-                  for b_s in range(0, len(need_tr), 40):
-                      batch = need_tr[b_s:b_s + 40]
+                  for b_s in range(0, len(need_tr), 35):
+                      batch = need_tr[b_s:b_s + 35]
                       tr_prompt = (
-                          "Translate EVERY SINGLE WORD of every YouTube video title below into 100% pure, natural Israeli Hebrew.\n"
-                          "CRITICAL RULES:\n"
-                          "- Translate/transliterate ALL team names (Valencia->ולנסיה, Sevilla->סביליה, Real Betis->ריאל בטיס, Girona->ג'ירונה, Atalanta->אטאלנטה, Malaga->מלאגה, Al Ahly->אל-אהלי, FC Barcelona->ברצלונה, Real Madrid->ריאל מדריד).\n"
-                          "- Transliterate ALL player names cleanly to Hebrew (Ansu Fati->אנסו פאטי, Gavi->גאבי, Marc Bernal->מארק ברנאל, Dani Olmo->דני אולמו, Fermín->פרמין, Eric García->אריק גרסיה, Andrés Iniesta->אנדרס אינייסטה, Héctor Fort->הקטור פורט, Carles Puyol->קרלס פויול, Joan García->ז'ואן גרסיה, Lamine Yamal->לאמין ימאל).\n"
-                          "- Translate ALL tournament/football words (Highlights->תקציר, Full Match->משחק מלא, Final->גמר, First Team->הקבוצה הבוגרת, Skills & Goals->מהלכים ושערים, Copa del Rey Juvenil->גביע המלך לנוער).\n"
-                          "- Leave ZERO English, Spanish, French, or Arabic words untranslated!\n"
-                          f"Return ONLY a JSON array of exactly {len(batch)} Hebrew strings in the exact same order.\n"
+                          "Translate EVERY SINGLE WORD of every YouTube title below (English, Spanish, Catalan, French, Arabic, etc.) into 100% pure, natural Israeli Hebrew.\n"
+                          "RULES:\n"
+                          "- Translate ALL Spanish/English youth football words (Torneo->טורניר, Alevín->ילדים, Infantil->נערים, Juvenil->נוער, gana al->מנצחת את, en la final->בגמר, Highlights->תקציר, Full Match->משחק מלא).\n"
+                          "- Transliterate ALL club & player names cleanly into Hebrew.\n"
+                          "- Leave ZERO untranslated Spanish, English, or French words!\n"
+                          f"Return ONLY JSON object: {{\"titles\": [exactly {len(batch)} Hebrew strings in exact order]}}.\n"
                           f"Titles: {json.dumps([p[1] for p in batch], ensure_ascii=False)}"
                       )
                       g_tr, _ = call_gemini_json(tr_prompt, timeout_sec=35)
-                      if isinstance(g_tr, list) and len(g_tr) == len(batch):
-                          for (item_idx, orig_s), he_t in zip(batch, g_tr):
+                      arr_tr = g_tr.get("titles") if isinstance(g_tr, dict) else (g_tr if isinstance(g_tr, list) else None)
+                      if isinstance(arr_tr, list) and len(arr_tr) == len(batch):
+                          for (item_idx, orig_s), he_t in zip(batch, arr_tr):
                               cleaned_he = polish_he(str(he_t or ""))
                               pool[item_idx]["title_he"] = cleaned_he
                               if has_foreign_words(cleaned_he): remaining.append((item_idx, orig_s))
                       else: remaining.extend(batch)
               else: remaining = need_tr
 
-              # סיבוב גיבוי ואימות דרך Google Translate על מקור נקי לכל כותרת שנותרו בה מילים זרות
-              def _tr_g_batch(bp):
-                  full_tr = gtrans_post("\n".join(p[1].replace("\n"," ") for p in bp), "auto")
-                  lines = [ln.strip() for ln in full_tr.splitlines() if ln.strip()] if full_tr else []
-                  if len(lines) == len(bp):
-                      for (i_idx, orig_s), tr_l in zip(bp, lines):
-                          out_he = polish_he(tr_l)
-                          if has_foreign_words(out_he):
-                              tr2 = gtrans_post(out_he, "en")
-                              if tr2: out_he = polish_he(tr2)
-                          pool[i_idx]["title_he"] = out_he
-                      return
-                  for i_idx, orig_s in bp:
-                      t1 = polish_he(gtrans_post(orig_s, "auto") or orig_s)
-                      if has_foreign_words(t1): t1 = polish_he(gtrans_post(t1, "en") or t1)
-                      pool[i_idx]["title_he"] = t1
-
               if remaining:
-                  with ThreadPoolExecutor(max_workers=4) as ex:
-                      list(ex.map(_tr_g_batch, [remaining[i:i+15] for i in range(0, len(remaining), 15)]))
+                  with ThreadPoolExecutor(max_workers=6) as ex:
+                      tr_out = list(ex.map(lambda p: translate_one_pure_he(p[1]), remaining))
+                  for (i_idx, _), he_res in zip(remaining, tr_out):
+                      pool[i_idx]["title_he"] = he_res
 
           # ====================================================================
           # הזרמת תמונות ממוזערות חדות (hqdefault 480x360 -> Crop 16:9 -> WebP 82% Base64!)
@@ -716,7 +739,7 @@ jobs:
           # הצעות חיפוש גיבוי אם Gemini לא החזיר
           if not suggested_searches and (clean_q or resolved_ch):
               base_t = clean_q or resolved_ch
-              suggested_searches = [f"{base_t} תקציר", f"{base_t} דוקומנטרי", f"{base_t} שערים ומהלכים", f"{base_t} משחק מלא", f"{base_t} ראיון"]
+              suggested_searches = [f"{base_t} 2026", f"{base_t} 2025/26", f"{base_t} תקציר", f"{base_t} כישרונות חדשים", f"{base_t} שערים ומהלכים", f"{base_t} משחק מלא", f"{base_t} אימון", f"{base_t} דוקומנטרי"]
 
           for item in pool:
               item.pop("orig_pos", None); item.pop("matched_date_op", None); item.pop("channel_id", None)
