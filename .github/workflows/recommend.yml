@@ -48,6 +48,8 @@ jobs:
           GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
           GEMINI_API_KEY_5: ${{ secrets.GEMINI_API_KEY_5 }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           python3 - << 'EOF'
           import base64, datetime, io, json, math, os, re, subprocess, threading, time, urllib.parse, requests
@@ -131,23 +133,25 @@ jobs:
 
           class AIRouter:
               PREFERRED_GEMINI = [
+                  "gemini-3.5-flash-lite",
+                  "gemini-3.1-flash-lite",
                   "gemini-3.8-flash",
                   "gemini-3.7-flash",
                   "gemini-3.6-flash",
-                  "gemini-3.5-flash-lite",
-                  "gemini-3.1-flash-lite",
                   "gemini-4-hydrogen",
                   "gemini-3.5-flash",
               ]
-              GITHUB_MODELS = ["openai/gpt-4.1-mini", "openai/gpt-4o-mini"]
               GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+              CEREBRAS_MODELS = ["llama-3.3-70b", "qwen-3-32b"]
+              OPENROUTER_MODELS = ["google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free"]
 
               def __init__(self):
                   self.lock = threading.Lock()
                   self.gemini_keys = self._collect_gemini_keys()
-                  self.gh_token = os.environ.get("GH_TOKEN", "").strip()
                   self.groq_key = os.environ.get("GROQ_API_KEY", "").strip().strip("\"'")
-                  for k in self.gemini_keys + ([self.groq_key] if self.groq_key else []):
+                  self.cerebras_key = os.environ.get("CEREBRAS_API_KEY", "").strip().strip("\"'")
+                  self.openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip().strip("\"'")
+                  for k in self.gemini_keys + [x for x in (self.groq_key, self.cerebras_key, self.openrouter_key) if x]:
                       if k and len(k) >= 8:
                           print(f"::add-mask::{k}", flush=True)
 
@@ -156,8 +160,10 @@ jobs:
                       self.key_stats[f"Gemini#{idx}"] = {"alias": f"Gemini#{idx}", "provider": "gemini", "status": "ready", "ok": 0, "fail": 0, "last_error": ""}
                   if self.groq_key:
                       self.key_stats["Groq#1"] = {"alias": "Groq#1", "provider": "groq", "status": "ready", "ok": 0, "fail": 0, "last_error": ""}
-                  if self.gh_token:
-                      self.key_stats["GitHub-Models"] = {"alias": "GitHub-Models", "provider": "github_models", "status": "standby", "ok": 0, "fail": 0, "last_error": ""}
+                  if self.cerebras_key:
+                      self.key_stats["Cerebras#1"] = {"alias": "Cerebras#1", "provider": "cerebras", "status": "ready", "ok": 0, "fail": 0, "last_error": ""}
+                  if self.openrouter_key:
+                      self.key_stats["OpenRouter#1"] = {"alias": "OpenRouter#1", "provider": "openrouter", "status": "ready", "ok": 0, "fail": 0, "last_error": ""}
 
                   self.dead_keys = set()
                   self.dead_models = set()
@@ -186,7 +192,7 @@ jobs:
                   return out
 
               def has_any_provider(self) -> bool:
-                  return bool(self.gemini_keys or self.groq_key or self.gh_token)
+                  return bool(self.gemini_keys or self.groq_key or self.cerebras_key or self.openrouter_key)
 
               def _get_client(self, key_alias: str, api_key: str, timeout_sec: int):
                   if _genai is None or _gtypes is None:
@@ -207,6 +213,7 @@ jobs:
                   if not self.gemini_keys:
                       return []
                   found = []
+                  bad_toks = ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "computer-use", "deep-research", "omni", "preview", "exp", "nano", "1.0", "1.5", "2.0", "2.5")
                   try:
                       cl = self._get_client("Gemini#1", self.gemini_keys[0], 10)
                       if cl is not None:
@@ -216,25 +223,17 @@ jobs:
                               if not name or (actions and "generateContent" not in actions):
                                   continue
                               low = name.lower()
-                              if not low.startswith("gemini-"):
-                                  continue
-                              if any(bad in low for bad in ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "computer-use", "deep-research", "omni", "preview", "exp", "1.0", "1.5", "2.0", "2.5")):
-                                  continue
-                              found.append(name)
+                              if low.startswith("gemini-") and not any(b in low for b in bad_toks):
+                                  found.append(name)
                       else:
-                          r = requests.get(
-                              "https://generativelanguage.googleapis.com/v1beta/models",
-                              headers={"x-goog-api-key": self.gemini_keys[0]},
-                              timeout=10
-                          )
+                          r = requests.get("https://generativelanguage.googleapis.com/v1beta/models", headers={"x-goog-api-key": self.gemini_keys[0]}, timeout=10)
                           if r.status_code == 200:
                               for m in (r.json().get("models") or []):
                                   name = str(m.get("name") or "").replace("models/", "").strip()
                                   methods = m.get("supportedGenerationMethods") or []
-                                  if name.startswith("gemini-") and "generateContent" in methods:
-                                      low = name.lower()
-                                      if not any(bad in low for bad in ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "1.0", "1.5")):
-                                          found.append(name)
+                                  low = name.lower()
+                                  if low.startswith("gemini-") and "generateContent" in methods and not any(b in low for b in bad_toks):
+                                      found.append(name)
                   except Exception as e:
                       self.errors.append(f"model_discovery: {type(e).__name__}: {str(e)[:80]}")
 
@@ -246,14 +245,10 @@ jobs:
                   for pref in self.PREFERRED_GEMINI:
                       if pref in found and pref not in ranked:
                           ranked.append(pref)
-                      else:
-                          pref_match = next((x for x in found if x.startswith(pref) and "exp" not in x and x not in ranked), None)
-                          if pref_match:
-                              ranked.append(pref_match)
                   for extra in found:
-                      if ("flash" in extra.lower()) and ("exp" not in extra.lower()) and extra not in ranked:
+                      if ("flash" in extra.lower()) and extra not in ranked:
                           ranked.append(extra)
-                  print(f"AIRouter discovered {len(found)} live Gemini models -> active ladder: {ranked[:6]}", flush=True)
+                  print(f"AIRouter live ladder: {ranked[:6]}", flush=True)
                   return ranked[:6] or list(self.PREFERRED_GEMINI[:5])
 
               def _thinking_cfg(self, model_name: str):
@@ -264,14 +259,15 @@ jobs:
                   try:
                       if "gemini-3" in low or "gemini-4" in low:
                           if "thinking_level" in fields:
-                              return _gtypes.ThinkingConfig(thinking_level="minimal")
-                          if "thinking_budget" in fields:
-                              return _gtypes.ThinkingConfig(thinking_budget=0)
-                      elif "gemini-2.5" in low and "pro" not in low:
+                              return _gtypes.ThinkingConfig(thinking_level="MINIMAL")
                           if "thinking_budget" in fields:
                               return _gtypes.ThinkingConfig(thinking_budget=0)
                   except Exception:
-                      return None
+                      try:
+                          if "thinking_budget" in fields:
+                              return _gtypes.ThinkingConfig(thinking_budget=0)
+                      except Exception:
+                          return None
                   return None
 
               def _call_gemini_once(self, key_alias: str, api_key: str, model_name: str, prompt_text: str, timeout_sec: int):
@@ -301,11 +297,6 @@ jobs:
                       return _parse_json_lenient(txt_out)
                   else:
                       gen_cfg = {"temperature": 0.15, "responseMimeType": "application/json"}
-                      if model_name not in self.no_thinking_models:
-                          if "gemini-2.5" in model_name.lower() and "pro" not in model_name.lower():
-                              gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
-                          elif "gemini-3" in model_name.lower():
-                              gen_cfg["thinkingConfig"] = {"thinkingLevel": "minimal"}
                       r = requests.post(
                           f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
                           headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
@@ -329,7 +320,7 @@ jobs:
                           "temperature": 0.15,
                           "response_format": {"type": "json_object"},
                           "messages": [
-                              {"role": "system", "content": "You are a precise JSON API. Return ONLY a single valid JSON object matching the requested schema, with no markdown fences."},
+                              {"role": "system", "content": "You are a strict JSON API. Return ONLY a single valid JSON object, no markdown."},
                               {"role": "user", "content": prompt_text},
                           ],
                       },
@@ -340,10 +331,7 @@ jobs:
                   raw_body = (r.text or "").strip()
                   if not raw_body:
                       raise RuntimeError("HTTP 200 empty body")
-                  try:
-                      data_j = json.loads(raw_body)
-                  except Exception:
-                      raise RuntimeError(f"non-JSON HTTP 200: {raw_body[:100]}")
+                  data_j = json.loads(raw_body)
                   content = ((((data_j.get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
                   if not content:
                       raise RuntimeError("empty_choices_content")
@@ -372,18 +360,20 @@ jobs:
                       if msg_he not in self.alerts_he:
                           self.alerts_he.append(msg_he)
 
-              def call_json(self, prompt_text: str, timeout_sec: int = 34, stage: str = "general"):
-                  now = time.time()
-                  # 1. ניסיון דרך מאגר מפתחות ודגמי Gemini (עם רוטציית מפתחות ו-Circuit Breaker)
+              def call_json(self, prompt_text: str, timeout_sec: int = 24, stage: str = "general"):
+                  # 1. מאגר מפתחות ודגמי Gemini (דגמי Lite מהירים ראשונים + Cooldown קצר בלי נעילה עצמית)
                   if self.gemini_keys and self.gemini_models:
                       with self.lock:
                           start_k = self.rr_cursor % len(self.gemini_keys)
                           self.rr_cursor += 1
                       key_indices = [(start_k + i) % len(self.gemini_keys) for i in range(len(self.gemini_keys))]
 
-                      max_rounds = 1 if len(self.gemini_models) >= 4 else 2
-                      for round_i in range(max_rounds):
-                          for m_name in self.gemini_models:
+                      for pass_i in range(2):
+                          now = time.time()
+                          tried_any = False
+                          # בסיבוב 2 מנסים רק את 2 דגמי ה-Lite הכי מהירים אחרי השהיה קצרה
+                          models_to_try = self.gemini_models if pass_i == 0 else self.gemini_models[:2]
+                          for m_name in models_to_try:
                               if m_name in self.dead_models:
                                   continue
                               for k_idx in key_indices:
@@ -391,23 +381,24 @@ jobs:
                                   if alias in self.dead_keys:
                                       continue
                                   cd_until = self.cooldowns.get((alias, m_name), 0)
-                                  if cd_until > now:
+                                  if pass_i == 0 and cd_until > now:
                                       continue
+                                  tried_any = True
                                   t0 = time.time()
+                                  m_timeout = timeout_sec if "lite" in m_name else min(timeout_sec + 4, 28)
                                   try:
-                                      res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, timeout_sec)
+                                      res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
                                       self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
                                       return res, m_name
                                   except Exception as e:
                                       ms = (time.time() - t0) * 1000
                                       es = f"{type(e).__name__}: {str(e)}"
                                       low_e = es.lower()
-                                      # אם המודל דחה thinking_config — מנסים מיד שוב בלעדיו!
                                       if ("400" in low_e or "invalid_argument" in low_e) and ("thinking" in low_e or "budget" in low_e or "level" in low_e) and m_name not in self.no_thinking_models:
                                           self.no_thinking_models.add(m_name)
                                           t_r = time.time()
                                           try:
-                                              res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, timeout_sec)
+                                              res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
                                               self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t_r) * 1000)
                                               return res, m_name
                                           except Exception as e2:
@@ -422,57 +413,47 @@ jobs:
                                       elif "404" in low_e or "not_found" in low_e:
                                           self.dead_models.add(m_name)
                                       elif "429" in low_e or "resource_exhausted" in low_e or "quota" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 45
+                                          self.cooldowns[(alias, m_name)] = time.time() + 30
                                           self.key_stats[alias]["status"] = "quota_429"
                                           if len(self.gemini_keys) == 1:
-                                              self._add_alert("⚠️ מפתח Gemini הגיע למגבלת קצב/מכסה (429) — מומלץ להוסיף GEMINI_API_KEY_2 ב-Secrets לרוטציה.")
-                                      elif "504" in low_e or "deadline_exceeded" in low_e or "deadline expired" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 60
+                                              self._add_alert("⚠️ מפתח Gemini בודד הגיע ל-429/עומס — מומלץ להוסיף GEMINI_API_KEY_2 או GROQ_API_KEY ב-Secrets.")
+                                      elif "504" in low_e or "deadline_exceeded" in low_e or "timeout" in low_e:
+                                          self.cooldowns[(alias, m_name)] = time.time() + 12
                                           self.key_stats[alias]["status"] = "busy_503"
                                       elif "503" in low_e or "unavailable" in low_e or "high demand" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 25
+                                          self.cooldowns[(alias, m_name)] = time.time() + 8
                                           self.key_stats[alias]["status"] = "busy_503"
-                                      elif "timeout" in low_e or "timed out" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 45
-                          if round_i == 0:
-                              time.sleep(0.8)
-                              now = time.time()
-
-                  # 2. גיבוי אוטומטי חינמי: GitHub Models API (דרך GH_TOKEN + permissions: models: read)
-                  if self.gh_token and "GitHub-Models" not in self.dead_keys:
-                      gh_h = {"Authorization": f"Bearer {self.gh_token}"}
-                      gh_targets = [
-                          ("https://models.github.ai/inference/chat/completions", "openai/gpt-4.1-mini"),
-                          ("https://models.inference.ai.azure.com/chat/completions", "gpt-4o-mini"),
-                      ]
-                      for g_url, gm in gh_targets:
-                          t0 = time.time()
-                          try:
-                              res = self._call_openai_compat(g_url, gh_h, gm, prompt_text, min(timeout_sec, 22))
-                              self._record(stage, "github_models", gm, "GitHub-Models", "ok", (time.time() - t0) * 1000)
-                              self._add_alert(f"🛡️ שרתי Gemini היו בעומס — בוצע מעבר אוטומטי וחלק ל-GitHub Models ({gm})!")
-                              return res, f"gh:{gm.split('/')[-1]}"
-                          except Exception as e:
-                              es = f"{type(e).__name__}: {str(e)}"
-                              self._record(stage, "github_models", gm, "GitHub-Models", "fail", (time.time() - t0) * 1000, es)
-                              print(f"AIRouter [{stage}] GitHub-Models/{gm} failed: {es[:130]}", flush=True)
-                              if "401" in es or "403" in es or "empty body" in es.lower():
-                                  self.dead_keys.add("GitHub-Models")
-                                  self.key_stats["GitHub-Models"]["status"] = "denied"
+                          if pass_i == 0:
+                              # אם יש ספק גיבוי חינמי מוגדר — נעבור אליו מיד במקום לחכות
+                              if self.groq_key or self.cerebras_key or self.openrouter_key:
                                   break
+                              time.sleep(2.5 if tried_any else 3.0)
 
-                  # 3. גיבוי אופציונלי: Groq API (אם הוגדר GROQ_API_KEY ב-Secrets)
+                  # 2. גיבוי מהיר וחינמי: Groq / Cerebras / OpenRouter (אם הוגדר Secret)
+                  backups = []
                   if self.groq_key and "Groq#1" not in self.dead_keys:
-                      gr_h = {"Authorization": f"Bearer {self.groq_key}"}
-                      for grm in self.GROQ_MODELS:
-                          t0 = time.time()
-                          try:
-                              res = self._call_openai_compat("https://api.groq.com/openai/v1/chat/completions", gr_h, grm, prompt_text, min(timeout_sec, 25))
-                              self._record(stage, "groq", grm, "Groq#1", "ok", (time.time() - t0) * 1000)
-                              self._add_alert(f"⚡ בוצע מעבר אוטומטי לגיבוי Groq ({grm})!")
-                              return res, f"groq:{grm}"
-                          except Exception as e:
-                              self._record(stage, "groq", grm, "Groq#1", "fail", (time.time() - t0) * 1000, f"{type(e).__name__}: {str(e)}")
+                      for m in self.GROQ_MODELS:
+                          backups.append(("groq", "Groq#1", "https://api.groq.com/openai/v1/chat/completions", {"Authorization": f"Bearer {self.groq_key}"}, m))
+                  if self.cerebras_key and "Cerebras#1" not in self.dead_keys:
+                      for m in self.CEREBRAS_MODELS:
+                          backups.append(("cerebras", "Cerebras#1", "https://api.cerebras.ai/v1/chat/completions", {"Authorization": f"Bearer {self.cerebras_key}"}, m))
+                  if self.openrouter_key and "OpenRouter#1" not in self.dead_keys:
+                      for m in self.OPENROUTER_MODELS:
+                          backups.append(("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", {"Authorization": f"Bearer {self.openrouter_key}"}, m))
+
+                  for prov, alias, url, hdrs, m_name in backups:
+                      t0 = time.time()
+                      try:
+                          res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 22)
+                          self._record(stage, prov, m_name, alias, "ok", (time.time() - t0) * 1000)
+                          self._add_alert(f"⚡ שרתי Gemini היו בעומס — בוצע מעבר אוטומטי וחלק ל-{alias} ({m_name})!")
+                          return res, f"{prov}:{m_name.split('/')[-1]}"
+                      except Exception as e:
+                          es = f"{type(e).__name__}: {str(e)}"
+                          self._record(stage, prov, m_name, alias, "fail", (time.time() - t0) * 1000, es)
+                          if "401" in es or "403" in es:
+                              self.dead_keys.add(alias)
+                              self.key_stats[alias]["status"] = "invalid_key"
 
                   return None, ""
 
@@ -480,15 +461,14 @@ jobs:
                   return {
                       "sdk": f"google-genai {_GENAI_SDK_VER}",
                       "gemini_keys_count": len(self.gemini_keys),
-                      "has_github_models_backup": bool(self.gh_token),
-                      "has_groq_backup": bool(self.groq_key),
+                      "has_github_models_backup": False,
+                      "has_groq_backup": bool(self.groq_key or self.cerebras_key or self.openrouter_key),
                       "active_ladder": self.gemini_models[:6],
                       "discovered_models": self.discovered_models[:12],
                       "key_health": list(self.key_stats.values()),
                       "alerts_he": self.alerts_he[:6],
                       "call_log": self.call_log[-18:],
                   }
-
           ai_router = AIRouter()
           dead_gemini_models = ai_router.dead_models
           gemini_errors = ai_router.errors
@@ -715,6 +695,7 @@ jobs:
               prep = re.sub(r"ברצלונה\s+אתלטיק|בארסה\s+אתלטיק", "Barça Atlètic", str(txt or ""))
               prep = re.sub(r"לה\s*מאסיה|לה\s*מסיה", "La Masia", prep)
               prep = re.sub(r"האנזי\s*פליק|האנסי\s*פליק", "Hansi Flick", prep)
+              prep = re.sub(r"\bדקו\b", "Deco", prep)
               try:
                   r = requests.post(
                       "https://translate.googleapis.com/translate_a/single",
@@ -756,7 +737,7 @@ jobs:
                       "Task 4 - Refinement Tips (Hebrew): Generate 2-3 short tips ('refinement_tips_he') referencing the extension's own filters (כגון 'עונה / שנים', 'סוג תוכן', 'מיון לפי תאריך' או 'מילות שלילה') — never tell the user to use YouTube's website filters.\n"
                       "Return ONLY JSON: {\"strategy_he\": \"...\", \"queries\": [{\"q\": \"...\", \"angle\": \"...\", \"note_he\": \"...\"}], \"suggestions_he\": [...], \"refinement_tips_he\": [...]}"
                   )
-                  g_exp, planner_model_used = call_gemini_json(exp_prompt, timeout_sec=18, stage="planner")
+                  g_exp, planner_model_used = call_gemini_json(exp_prompt, timeout_sec=24, stage="planner")
                   if not isinstance(g_exp, dict):
                       compact_exp = (
                           f"User YouTube search: \"{clean_q}\" | Languages: {lang_desc}.\n"
@@ -764,7 +745,7 @@ jobs:
                           "Generate 10 focused YouTube search queries across the languages (each as {\"q\":\"...\",\"angle\":\"direct|entities|community|deep\",\"note_he\":\"...\"}) + short Hebrew strategy_he + 8 short Hebrew suggestions_he.\n"
                           "Return ONLY valid JSON: {\"strategy_he\":\"...\",\"queries\":[...],\"suggestions_he\":[...]}"
                       )
-                      g_exp, planner_model_used = call_gemini_json(compact_exp, timeout_sec=16, stage="planner_retry")
+                      g_exp, planner_model_used = call_gemini_json(compact_exp, timeout_sec=20, stage="planner_retry")
                   if isinstance(g_exp, dict):
                       ai_strategy_he = str(g_exp.get("strategy_he") or "").strip()
                       if isinstance(g_exp.get("refinement_tips_he"), list):
@@ -784,7 +765,10 @@ jobs:
                           suggested_searches = [str(x).strip() for x in g_exp["suggestions_he"] if str(x).strip()][:16]
               if len(expanded_queries) < 3:
                   def _tr_lg(lg):
+                      if lg == "he" and any("\u0590" <= ch <= "\u05FF" for ch in clean_q):
+                          return ""
                       tr = gtrans_simple(clean_q, lg)
+                      tr = re.sub(r"\bBar[cç]a\s+Athletic\b|\bBarcelona\s+Athletic\b", "Barça Atlètic", tr, flags=re.I)
                       hint = (CTYPE_HINTS.get(content_type) or {}).get(lg, "")
                       return f"{tr} {hint}".strip() if tr else ""
                   with ThreadPoolExecutor(max_workers=5) as ex:
@@ -1048,72 +1032,107 @@ jobs:
           if high_quality_only: selected_pool = [c for c in selected_pool if (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
           if min_views > 0: selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
 
-          # סינון, דירוג ונימוק AI במקביל (2 מקבצים במקביל עד 180 סרטונים)
+          # סינון, דירוג ונימוק AI קומפקטי (2 מקבצים × 90 סרטונים = 2 קריאות בלבד, מהיר ועמיד לעומס!)
           ai_status = ""
+          used_models = []
+          ai_sent_by_q = {}
           if filter_prompt:
-              if not ai_router.has_any_provider(): ai_status = "⚠️ סינון AI כבוי (חסר מפתח AI ב-Secrets)"
+              if not ai_router.has_any_provider():
+                  ai_status = "⚠️ סינון AI כבוי (חסר מפתח AI ב-Secrets)"
               elif selected_pool:
-                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 240))]
-                  ai_sent_by_q = {}
+                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 180))]
                   for it_s in ai_slice:
                       sq_s = it_s.get("source_q") or ""
-                      if sq_s: ai_sent_by_q[sq_s] = ai_sent_by_q.get(sq_s, 0) + 1
-                  chunk_sz = 45
+                      if sq_s:
+                          ai_sent_by_q[sq_s] = ai_sent_by_q.get(sq_s, 0) + 1
+                  chunk_sz = 90
                   chunks_ai = [(off, ai_slice[off:off + chunk_sz]) for off in range(0, len(ai_slice), chunk_sz)]
 
-                  def _score_ai_chunk(pair):
+                  def _score_ai_chunk(pair, attempt_tag=""):
                       offset, sub_items = pair
-                      if offset > 0:
-                          time.sleep(min(1.2, 0.35 * (offset // chunk_sz)))
-                      compact = [{
-                          "i": offset + idx,
-                          "t": it.get("title", ""),
-                          "c": it.get("channel", ""),
-                          "d": it.get("duration", 0),
-                          "v": it.get("views", 0),
-                          "dt": it.get("upload_date", "") or it.get("published_rel", "")
-                      } for idx, it in enumerate(sub_items)]
+                      compact = [[
+                          offset + idx,
+                          str(it.get("title") or "")[:115],
+                          str(it.get("channel") or "")[:36],
+                          int(it.get("views") or 0)
+                      ] for idx, it in enumerate(sub_items)]
                       ai_prompt = (
-                          f"User search intent: Query=\"{query or 'N/A'}\" | Channel=\"{resolved_ch or 'Any'}\" | ContentType={content_type}\n"
-                          + (f"Disambiguated research strategy: {ai_strategy_he}\n" if ai_strategy_he else "")
-                          + f"Strict user filter rule: {filter_prompt}\n"
-                          + "ENTITY DISAMBIGUATION: Strictly verify team/entity names! E.g. 'ברצלונה אתלטיק' means Barça Atlètic (Barcelona B reserve team) — DROP matches/press conferences against Atlético Madrid or Athletic Bilbao unless they directly discuss the requested topic!\n"
-                          "You are curating a rich, high-value YouTube playlist for this user. Evaluate each video on TWO axes:\n"
-                          "  1. Direct hits: covers the user's exact concept/question (score 9-10 for exact multi-angle hits, 8 for strong hits).\n"
-                          "  2. Valuable related discoveries (Hidden Gems): covers an important component of the topic, a specific rising player/goalkeeper/coach, a tactical analysis, podcast, or full youth match tightly linked to the subject even if not every word from the query appears in the title (score 6-8).\n"
-                          "DO NOT OVER-PRUNE: Aim to keep roughly 25% to 55% of relevant videos (at least 15-30 videos per batch when valid exist). Only drop videos that are genuinely off-topic, gaming (FIFA/EA FC), clickbait spam, or violate the user's modesty/content rule.\n"
-                          "SCORING SPREAD: Reserve 10 ONLY for the top ~12% best matches; 8-9 for strong matches & top hidden gems; 6-7 for good related videos; 5 for borderline.\n"
-                          "For each kept video, write a crisp Hebrew note 'r' (3 to 7 Hebrew words) explaining why it fits or what angle it brings.\n"
-                          "Return ONLY JSON: {\"keep\": [{\"i\": 0, \"s\": 9, \"r\": \"...\"}]}\n"
-                          f"Videos: {json.dumps(compact, ensure_ascii=False)}"
+                          f"Query=\"{query or 'N/A'}\" | Channel=\"{resolved_ch or 'Any'}\" | Type={content_type}\n"
+                          + (f"Strategy: {ai_strategy_he}\n" if ai_strategy_he else "")
+                          + f"Rule: {filter_prompt}\n"
+                          + "Disambiguate entities strictly (e.g. 'ברצלונה אתלטיק' = Barça Atlètic / Barcelona B, NOT Atlético Madrid or Athletic Bilbao unless directly discussing the topic).\n"
+                          + "Evaluate each video [id, title, channel, views]. Keep direct hits (score 8-10) AND valuable related hidden gems (score 6-8). Keep ~25%-55% of valid items; drop off-topic/gaming/rule violations (score < 5).\n"
+                          + "Reserve 10 ONLY for top ~12%. Write a tiny Hebrew reason (3-6 words) per kept video.\n"
+                          + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
+                          + f"Items: {json.dumps(compact, ensure_ascii=False)}"
                       )
-                      return call_gemini_json(ai_prompt, timeout_sec=18, stage=f"scorer_{offset//chunk_sz + 1}")
+                      st_lbl = f"scorer_{offset // chunk_sz + 1}{attempt_tag}"
+                      return call_gemini_json(ai_prompt, timeout_sec=24, stage=st_lbl)
 
-                  score_map, reason_map, used_models = {}, {}, []
-                  _ai_workers = min(len(chunks_ai), max(2, len(ai_router.gemini_keys) + 1))
-                  with ThreadPoolExecutor(max_workers=_ai_workers) as ex:
-                      for g_data, m_used in ex.map(_score_ai_chunk, chunks_ai):
-                          if m_used and m_used not in used_models: used_models.append(m_used)
-                          if isinstance(g_data, dict) and isinstance(g_data.get("keep"), list):
-                              for r in g_data["keep"]:
-                                  if isinstance(r, dict) and isinstance(r.get("i"), int):
-                                      sc = int(r.get("s") or 7)
-                                      if sc >= 4:
-                                          score_map[r["i"]] = min(10, max(4, sc))
-                                          rs = str(r.get("r") or "").strip()
-                                          if rs: reason_map[r["i"]] = rs[:90]
+                  score_map, reason_map = {}, {}
+                  failed_chunks = []
+
+                  def _ingest_ai_resp(g_data, m_used):
+                      if m_used and m_used not in used_models:
+                          used_models.append(m_used)
+                      if not isinstance(g_data, dict):
+                          return False
+                      rows = g_data.get("k") if isinstance(g_data.get("k"), list) else (g_data.get("keep") if isinstance(g_data.get("keep"), list) else None)
+                      if rows is None:
+                          return False
+                      for r in rows:
+                          idx_r, sc_r, rs_r = None, 7, ""
+                          if isinstance(r, list) and len(r) >= 2 and isinstance(r[0], int):
+                              idx_r = r[0]
+                              sc_r = int(r[1] or 7)
+                              rs_r = str(r[2] or "").strip() if len(r) >= 3 else ""
+                          elif isinstance(r, dict) and isinstance(r.get("i"), int):
+                              idx_r = r["i"]
+                              sc_r = int(r.get("s") or 7)
+                              rs_r = str(r.get("r") or "").strip()
+                          if idx_r is not None and sc_r >= 4:
+                              score_map[idx_r] = min(10, max(4, sc_r))
+                              if rs_r:
+                                  reason_map[idx_r] = rs_r[:90]
+                      return True
+
+                  # על מפתח Gemini בודד מריצים בטור עם 0.6 שנ' רווח למניעת פרץ 429/503; עם 2+ מפתחות רצים במקביל!
+                  if len(ai_router.gemini_keys) >= 2 or ai_router.groq_key or ai_router.cerebras_key:
+                      with ThreadPoolExecutor(max_workers=len(chunks_ai)) as ex:
+                          for pair_c, (g_data, m_used) in zip(chunks_ai, ex.map(_score_ai_chunk, chunks_ai)):
+                              if not _ingest_ai_resp(g_data, m_used):
+                                  failed_chunks.append(pair_c)
+                  else:
+                      for c_i, pair_c in enumerate(chunks_ai):
+                          if c_i > 0:
+                              time.sleep(0.6)
+                          g_data, m_used = _score_ai_chunk(pair_c)
+                          if not _ingest_ai_resp(g_data, m_used):
+                              failed_chunks.append(pair_c)
+
+                  # ניסיון חוזר אחד למקבצים שנפלו כדי שלא נישאר עם 5 תוצאות בלבד
+                  if failed_chunks:
+                      time.sleep(2.5)
+                      for pair_c in failed_chunks:
+                          g_data, m_used = _score_ai_chunk(pair_c, "_retry")
+                          _ingest_ai_resp(g_data, m_used)
+
                   if score_map:
                       filtered = []
                       for idx, it in enumerate(ai_slice):
                           if idx in score_map:
                               it["ai_score"] = score_map[idx]
-                              if idx in reason_map: it["ai_reason"] = reason_map[idx]
+                              if idx in reason_map:
+                                  it["ai_reason"] = reason_map[idx]
                               filtered.append(it)
-                      m_lbl = used_models[0] if used_models else "gemini"
-                      if filtered: selected_pool = filtered; ai_status = f"🤖 {m_lbl} ({len(filtered)}/{len(ai_slice)})"
-                      else: ai_status = f"🤖 {m_lbl} (מוצגות כל התוצאות)"
-                  else: ai_status = "⚠️ סינון AI נכשל זמנית"
-
+                      m_lbl = used_models[0] if used_models else "ai"
+                      if filtered:
+                          selected_pool = filtered
+                          ai_status = f"🤖 {m_lbl} ({len(filtered)}/{len(ai_slice)})"
+                      else:
+                          ai_status = f"🤖 {m_lbl} (מוצגות כל התוצאות)"
+                  else:
+                      ai_status = "⚠️ שרתי ה-AI בעומס זמני (מוצגות תוצאות ללא סינון AI)"
           if sort_by == "relevance": selected_pool.sort(key=lambda x: (int(x.get("ai_score") or 0) * 1.8 + math.log10(max(0, int(x.get("views") or 0)) + 1), int(x.get("views") or 0)), reverse=True)
           elif sort_by == "likes": selected_pool.sort(key=lambda x: (int(x.get("likes") or 0), int(x.get("views") or 0)), reverse=True)
           elif sort_by == "quality_score": selected_pool.sort(key=lambda x: (int(x.get("max_height") or 0) >= 1080, int(x.get("likes") or 0) * 25 + int(x.get("views") or 0)), reverse=True)
@@ -1269,33 +1288,11 @@ jobs:
                   it["title_he"] = src
                   if has_foreign_words(src): need_tr.append((idx, src))
 
-              remaining = []
-              if ai_router.has_any_provider() and need_tr:
-                  for b_s in range(0, len(need_tr), 35):
-                      batch = need_tr[b_s:b_s + 35]
-                      tr_prompt = (
-                          "Translate EVERY SINGLE WORD of every YouTube title below (English, Spanish, Catalan, French, Arabic, etc.) into 100% pure, natural Israeli Hebrew.\n"
-                          "RULES:\n"
-                          "- Translate ALL Spanish/English youth football words (Torneo->טורניר, Alevín->ילדים, Infantil->נערים, Juvenil->נוער, gana al->מנצחת את, en la final->בגמר, Highlights->תקציר, Full Match->משחק מלא).\n"
-                          "- Transliterate ALL club & player names cleanly into Hebrew.\n"
-                          "- Leave ZERO untranslated Spanish, English, or French words!\n"
-                          f"Return ONLY JSON object: {{\"titles\": [exactly {len(batch)} Hebrew strings in exact order]}}.\n"
-                          f"Titles: {json.dumps([p[1] for p in batch], ensure_ascii=False)}"
-                      )
-                      g_tr, _ = call_gemini_json(tr_prompt, timeout_sec=18, stage=f"translate_{b_s//35 + 1}")
-                      arr_tr = g_tr.get("titles") if isinstance(g_tr, dict) else (g_tr if isinstance(g_tr, list) else None)
-                      if isinstance(arr_tr, list) and len(arr_tr) == len(batch):
-                          for (item_idx, orig_s), he_t in zip(batch, arr_tr):
-                              cleaned_he = polish_he(str(he_t or ""))
-                              pool[item_idx]["title_he"] = cleaned_he
-                              if has_foreign_words(cleaned_he): remaining.append((item_idx, orig_s))
-                      else: remaining.extend(batch)
-              else: remaining = need_tr
-
-              if remaining:
-                  with ThreadPoolExecutor(max_workers=6) as ex:
-                      tr_out = list(ex.map(lambda p: translate_one_pure_he(p[1]), remaining))
-                  for (i_idx, _), he_res in zip(remaining, tr_out):
+              # תרגום ישיר ומהיר (8 תהליכונים + נירמול ALL-CAPS + מילון ספורט) — חוסך 2-3 קריאות Gemini ומונע 429!
+              if need_tr:
+                  with ThreadPoolExecutor(max_workers=8) as ex:
+                      tr_out = list(ex.map(lambda p: translate_one_pure_he(p[1]), need_tr))
+                  for (i_idx, _), he_res in zip(need_tr, tr_out):
                       pool[i_idx]["title_he"] = he_res
 
           # ====================================================================
