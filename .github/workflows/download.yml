@@ -708,7 +708,6 @@ jobs:
                       "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=IL",
                       "https://www.proxy-list.download/api/v1/get?type=http&country=IL",
                       "https://www.proxy-list.download/api/v1/get?type=socks5&country=IL",
-                      "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
                   ]
                   for src in sources[:4]:
                       try:
@@ -858,9 +857,13 @@ jobs:
                           af.append(f"atempo={spd}")
                       if norm_audio:
                           af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
-                      ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-dn", "-map_chapters", "-1"]
-                      if fpath.suffix.lower() in (".mp4", ".mkv", ".webm") and abs(spd - 1.0) >= 0.01:
-                          ff_cmd += ["-filter:v", f"setpts=PTS/{spd}"]
+                      ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-dn", "-map_chapters", "-1"]
+                      if fpath.suffix.lower() in (".mp4", ".mkv", ".webm"):
+                          if abs(spd - 1.0) >= 0.01:
+                              ff_cmd += ["-filter:v", f"setpts=PTS/{spd}"]
+                          else:
+                              ff_cmd += ["-c:v", "copy"]
+                          ff_cmd += ["-c:s", "copy"]
                       if af:
                           ff_cmd += ["-filter:a", ",".join(af)]
                       ff_cmd += ["-movflags", "+faststart", str(tmp_p)]
@@ -1333,12 +1336,18 @@ jobs:
           is_cloud_only_done = bool(cloud_only_flag and (drive_web_link or _email_ok))
           rel_files = [str(z) for z in zip_paths]
           if cloud_only_flag:
-              drv_marker = pkg_dir / "cloud-ok.txt"
-              drv_marker.write_text("Cloud-Only delivery (Drive/Email). Zero local PC download.\n", encoding="utf-8")
+              marker_name = "cloud-ok.txt" if is_cloud_only_done else "cloud-failed.txt"
+              drv_marker = pkg_dir / marker_name
+              marker_msg = (
+                  "Cloud-Only delivery (Drive/Email) completed. Zero local PC download.\n"
+                  if is_cloud_only_done
+                  else f"Cloud-Only delivery failed: drive={drive_status} | email={email_sent_status}\n"
+              )
+              drv_marker.write_text(marker_msg, encoding="utf-8")
               rel_files = [str(drv_marker)]
               blob_shas = []
           notes = json.dumps({
-              "v": 22.0,
+              "v": 22.1,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
