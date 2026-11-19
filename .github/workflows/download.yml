@@ -639,21 +639,19 @@ jobs:
                       if quality in ("2160", "1440", "1080", "720"):
                           min_target = 720
                           fmt = (
-                              f"bv*[height<={req_h}][height>={min_target}][filesize?<1800M]+ba/"
                               f"bv*[height<={req_h}][height>={min_target}]+ba/"
                               f"b[height<={req_h}][height>={min_target}]"
                           )
                           sort_res = f"res:{req_h}"
                       else:
                           fmt = (
-                              "bv*[height<=2160][height>=1080][filesize?<1800M]+ba/"
                               "bv*[height<=2160][height>=1080]+ba/"
                               "bv*[height>=720]+ba/"
                               "b[height>=720]"
                           )
                           sort_res = "res:2160"
                   else:
-                      fmt = f"bv*[height<={req_h}][filesize?<1800M]+ba/bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
+                      fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
                       sort_res = f"res:{req_h}"
 
                   if prefer_hls:
