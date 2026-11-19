@@ -653,51 +653,46 @@ jobs:
               pot_ep = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
               attempts = []
 
+              # ניסיון 1: ברירת המחדל העדכנית של yt-dlp 2026 (tv_samsung + visionos + Deno EJS + PO Token) ללא דריסה!
+              attempts.append((
+                  "2026 Native yt-dlp Default (Clean + PO-Token, No Impersonate)", [
+                      "--xff", geo,
+                      "--concurrent-fragments", "4",
+                      "--extractor-args", pot_ep
+                  ], True, False
+              ))
+
               if has_ck:
-                  # ניסיון 1: HLS Stream עם עוגיות (m3u8_native ב-web_safari/mweb — לעולם לא נחתך ב-1.1% כי הוא מבוסס סגמנטים של m3u8 ולא Range Request!)
+                  # ניסיון 2: ברירת המחדל העדכנית של yt-dlp עם עוגיות (לסרטונים שדורשים התחברות / גיל)
                   attempts.append((
-                      "Auth HLS Segment Stream (web_safari + mweb m3u8 — Zero 403 Cutoff)", [
+                      "2026 Native Default + Cookies (default,web_safari + PO-Token)", [
                           "--cookies", str(cookie_file),
-                          "--impersonate", "chrome",
                           "--xff", geo,
                           "--concurrent-fragments", "4",
-                          "--extractor-args", "youtube:player_client=web_safari,mweb,web_creator;fetch_pot=always",
-                          "--extractor-args", pot_ep
-                      ], True, True
-                  ))
-                  # ניסיון 2: Direct DASH עם עוגיות ללא פיצול Chunks של 10M (שגרם לניתוק ב-10MB)
-                  attempts.append((
-                      "Auth Continuous Stream (tv + web_creator + web_embedded + PO-Token)", [
-                          "--cookies", str(cookie_file),
-                          "--impersonate", "chrome",
-                          "--xff", geo,
-                          "--concurrent-fragments", "2",
-                          "--extractor-args", "youtube:player_client=tv,web_creator,web_embedded;fetch_pot=always",
+                          "--extractor-args", "youtube:player_client=default,web_safari;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False
                   ))
 
-              # ניסיון 3: ללא עוגיות (Android VR + iOS + Web Safari בזרם רציף ללא 10M chunk cutoff)
+              # ניסיון 3: visionos + mweb + web_safari (ללא עוגיות, HLS)
               attempts.append((
-                  "Cloud Stealth Continuous Stream (android_vr + ios + web_safari)", [
-                      "--impersonate", "chrome",
+                  "2026 VisionOS + HLS Fallback (No Cookies)", [
                       "--xff", geo,
                       "--concurrent-fragments", "3",
-                      "--extractor-args", "youtube:player_client=android_vr,ios,web_safari;fetch_pot=always",
-                      "--extractor-args", pot_ep
-                  ], True, True
-              ))
-
-              # ניסיון 4: Fallback אוניברסלי גמיש (HLS + כל פורמט זמין)
-              attempts.append((
-                  "Universal Resilient Fallback (All Formats + HLS)",
-                  (["--cookies", str(cookie_file)] if has_ck else []) + [
-                      "--impersonate", "chrome",
-                      "--xff", geo,
-                      "--concurrent-fragments", "2",
-                      "--extractor-args", "youtube:player_client=web_safari,mweb,tv,web;fetch_pot=always",
+                      "--extractor-args", "youtube:player_client=visionos,tv_samsung,mweb,web_safari;fetch_pot=always",
                       "--extractor-args", pot_ep
                   ], False, True
+              ))
+
+              # ניסיון 4: Fallback אוניברסלי גמיש (ללא StrictHD, עם web_embedded + ios)
+              attempts.append((
+                  "Universal Resilient Fallback (All 2026 Clients)",
+                  (["--cookies", str(cookie_file)] if has_ck else []) + [
+                      "--xff", geo,
+                      "--concurrent-fragments", "2",
+                      "--extractor-args", "youtube:player_client=default,visionos,web_embedded,ios;fetch_pot=always",
+                      "--extractor-args", pot_ep
+                  ], False, False
               ))
 
               def get_stage_files():
