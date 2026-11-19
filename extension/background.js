@@ -612,6 +612,9 @@ async function driveJob(jobId) {
 
         if (job.driveOnly || assets[0].driveOnly) {
           if (cfg.autoCleanRelease === "true") await deleteReleaseAndTagByName(cfg, tag);
+          if (job.driveOnly && !assets[0].driveOnly && !detectedDriveUrl) {
+            throw new Error(detectedDriveStatus || "ההעלאה ל-Google Drive נכשלה (ודא שהוגדרו Secrets של Drive וש-COOKIE_KEY תואם)");
+          }
           await addHistoryEntry({ url: job.url, title: job.title || job.url, quality: job.quality, actualQuality: detectedQuality, driveUrl: detectedDriveUrl });
           const qN = detectedQuality ? (" | איכות: " + detectedQuality) : "";
           const dN = detectedDriveStatus ? (" | " + detectedDriveStatus) : "";
