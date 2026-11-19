@@ -982,6 +982,8 @@ jobs:
                               if not buf: break
                               end_b = pos + len(buf) - 1
                               cr = requests.put(up_url, headers={"Content-Length": str(len(buf)), "Content-Range": f"bytes {pos}-{end_b}/{f_total}"}, data=buf, timeout=180)
+                              if cr.status_code not in (200, 201, 308):
+                                  raise RuntimeError(f"Drive chunk HTTP {cr.status_code}")
                               pos += len(buf)
                               if cr.status_code in (200, 201):
                                   fin_json = cr.json()
@@ -1086,21 +1088,31 @@ jobs:
                   print(f"Email delivery error: {type(e).__name__}", flush=True)
                   email_sent_status = f"שגיאת מייל ({type(e).__name__})"
 
+          is_drv_only_done = bool(drive_only_flag and drive_web_link)
+          rel_files = [str(z) for z in zip_paths]
+          if is_drv_only_done:
+              drv_marker = pkg_dir / "drive-ok.txt"
+              drv_marker.write_text("Uploaded directly to Google Drive.\n", encoding="utf-8")
+              rel_files = [str(drv_marker)]
+              blob_shas = []
           notes = json.dumps({
-              "v": 10.6,
+              "v": 19.1,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
-              "cloud_temp_path": "/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name,
+              "drive_status": drive_status,
+              "drive_url_enc": drive_url_enc,
+              "drive_only": is_drv_only_done,
+              "cloud_temp_path": "Google Drive Cloud" if is_drv_only_done else ("/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name),
               "blobs": blob_shas
           }, ensure_ascii=False)
 
-          rel_cmd = ["gh", "release", "create", tag] + [str(z) for z in zip_paths] + ["--repo", repo, "--title", tag, "--notes", notes]
+          rel_cmd = ["gh", "release", "create", tag] + rel_files + ["--repo", repo, "--title", tag, "--notes", notes]
           rel_proc = subprocess.run(rel_cmd, capture_output=True, text=True, check=False)
           if rel_proc.returncode != 0:
               print("gh release create failed:", rel_proc.stderr, flush=True)
               upload_ok = True
-              for z in zip_paths:
+              for z in rel_files:
                   up_proc = subprocess.run(["gh", "release", "upload", tag, str(z), "--repo", repo, "--clobber"], capture_output=True, text=True, check=False)
                   if up_proc.returncode != 0:
                       print("gh release upload failed:", up_proc.stderr, flush=True)
