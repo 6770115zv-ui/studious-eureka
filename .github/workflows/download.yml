@@ -639,21 +639,21 @@ jobs:
                       if quality in ("2160", "1440", "1080", "720"):
                           min_target = 720
                           fmt = (
-                              f"bv*[height<={req_h}][height>={min_target}][filesize<1800M]+ba/"
+                              f"bv*[height<={req_h}][height>={min_target}][filesize?<1800M]+ba/"
                               f"bv*[height<={req_h}][height>={min_target}]+ba/"
                               f"b[height<={req_h}][height>={min_target}]"
                           )
                           sort_res = f"res:{req_h}"
                       else:
                           fmt = (
-                              "bv*[height>=1080][filesize<1800M]+ba/"
-                              "bv*[height>=1080]+ba/"
+                              "bv*[height<=2160][height>=1080][filesize?<1800M]+ba/"
+                              "bv*[height<=2160][height>=1080]+ba/"
                               "bv*[height>=720]+ba/"
                               "b[height>=720]"
                           )
-                          sort_res = "res:1080"
+                          sort_res = "res:2160"
                   else:
-                      fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
+                      fmt = f"bv*[height<={req_h}][filesize?<1800M]+ba/bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
                       sort_res = f"res:{req_h}"
 
                   if prefer_hls:
@@ -663,8 +663,8 @@ jobs:
                           f"bv*[protocol*=m3u8]+ba/"
                           f"b[protocol*=m3u8]/{fmt}"
                       )
-                      sort_str = f"proto:m3u8_native,{sort_res},fps,vcodec:h264:vp9:av01,ext:mp4"
-                  elif quality in ("2160", "1440"):
+                      sort_str = f"proto:m3u8_native,{sort_res},fps,vcodec:vp9:av01:h264,ext:mp4"
+                  elif quality in ("best", "2160", "1440"):
                       sort_str = f"{sort_res},fps,vcodec:vp9:av01:h264,acodec:m4a:aac:opus,ext:mp4:m4a"
                   else:
                       sort_str = f"{sort_res},fps,vcodec:h264:vp9:av01,acodec:m4a:aac:opus,ext:mp4:m4a"
