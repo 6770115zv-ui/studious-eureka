@@ -97,9 +97,12 @@ jobs:
           filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
 
           GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash")
+          dead_gemini_models = set()
           def call_gemini_json(prompt_text: str, timeout_sec: int = 32):
               if not gemini_key: return None, ""
               for model_name in GEMINI_MODELS:
+                  if model_name in dead_gemini_models:
+                      continue
                   try:
                       g_res = requests.post(
                           f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
@@ -115,6 +118,8 @@ jobs:
                               return json.loads(txt), model_name
                       else:
                           print(f"Gemini {model_name} HTTP {g_res.status_code}: {g_res.text[:140]}", flush=True)
+                          if g_res.status_code in (400, 404):
+                              dead_gemini_models.add(model_name)
                   except Exception as e:
                       print(f"Gemini {model_name} err: {e}", flush=True)
               return None, ""
@@ -354,19 +359,21 @@ jobs:
               if gemini_key and not is_similar:
                   lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
                   exp_prompt = (
-                      f"Current date: November 2026 (Current sports season: 2026/27; recent seasons: 2024/25, 2025/26).\n"
+                      f"Current date: November 2026 (Current sports season: 2026/27; recent seasons: 2025/26 and 2024/25).\n"
                       f"User input (short keyword OR free-form natural-language request): \"{clean_q}\"\n"
                       f"Target Languages: {lang_desc} | Content preference: {content_type}.\n"
-                      "You are an elite YouTube Research & Discovery Strategist. Turn the user's intent into high-signal YouTube queries that uncover direct analyses, specific named players/debutants, AND global fan/community channels (podcasts, club-dedicated channels in Spanish, English, Catalan, Hebrew, etc.).\n"
-                      "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you understood the request, which specific players/debutants/concepts you decided to target, and which kinds of channels/angles you are hunting for.\n"
+                      "You are an elite YouTube Research & Discovery Strategist. Turn the user's exact intent into razor-sharp, high-signal YouTube search queries.\n"
+                      "STRICT ANCHORING RULE: Identify ALL core entities/concepts in the user's input and keep EVERY query tightly anchored to their intersection! NEVER generate generic broad queries (like generic club podcasts, generic fan reactions, or generic tactical videos) that drop the user's specific focus.\n"
+                      "NATIVE TERMINOLOGY RULE: Always include official local/native terms in the target languages (e.g., if Spanish is requested for a Spanish club/reserve team, use the exact Spanish/Catalan names like 'Barça Atlètic', 'filial', 'cantera', 'fichajes', 'debut', etc., not only English).\n"
+                      "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you combined ALL parts of the user's request, which specific 2025-2026 players/coaches/angles you chose, and why.\n"
                       "Task 2 - Search Queries: Generate 13 realistic YouTube search queries (2 to 6 words each — real creator title phrasing!) across the target languages, split into 4 buckets:\n"
-                      "  - angle='direct' (4 queries): direct analytical breakdowns, stats, documentaries, and stories answering the user's exact idea.\n"
-                      "  - angle='entities' (4 queries): SPECIFIC real named players, debutants, youth prospects, goalkeepers, or coaches relevant to the topic (2024-2026) even if the user didn't name them (e.g. if asking about La Masia debuts under Flick, search specific names/lists like Marc Bernal, Marc Casado, Gerard Martin, Sergi Dominguez, Pau Victor, Toni Fernandez, Dro, Jofre Torrents, Aron Yaakobishvili, Xavi Espart, Ebrima Tunkara, etc.).\n"
-                      "  - angle='community' (3 queries): global dedicated fan channels, club podcasts, talk shows, and community analyses across Spanish/English/Hebrew (like Barcamania / Barca media / fan podcasts / La Masia talk).\n"
-                      "  - angle='deep' (2 queries): full matches, training sessions, or long-form tactical deep-dives (NEVER FIFA/EA FC/PES).\n"
+                      "  - angle='direct' (4 queries): direct analytical breakdowns, interviews, reports, and stories combining the user's exact concepts (at least 1 in Spanish/native language if applicable).\n"
+                      "  - angle='entities' (4 queries): SPECIFIC real named players, prospects, goalkeepers, or coaches directly relevant to THIS exact user input (prioritize fresh 2025/26-2026/27 names, NOT outdated generic lists).\n"
+                      "  - angle='community' (3 queries): dedicated club fan channels, club podcasts, and talk shows in Spanish/English/Hebrew that specifically discuss THIS exact topic (MUST include the specific topic keyword, never just a generic club podcast!).\n"
+                      "  - angle='deep' (2 queries): full matches, press conferences, documentaries, or long-form tactical deep-dives tightly on THIS exact topic (NEVER FIFA/EA FC/PES).\n"
                       "Each query item MUST be an object: {\"q\": \"...\", \"angle\": \"direct|entities|community|deep\", \"note_he\": \"3-6 Hebrew words explaining what this query hunts for\"}.\n"
                       "Task 3 - Clickable YouTube Follow-Up Suggestions (Hebrew): Generate 14 SHORT, punchy YouTube search terms in Hebrew (STRICTLY 2 to 5 words each, NO questions or question marks).\n"
-                      "Task 4 - Refinement Tips (Hebrew): Generate 2-3 short tips ('refinement_tips_he') telling the user how they could narrow or steer the next search if they want even sharper results.\n"
+                      "Task 4 - Refinement Tips (Hebrew): Generate 2-3 short tips ('refinement_tips_he') referencing the extension's own filters (כגון 'עונה / שנים', 'סוג תוכן', 'מיון לפי תאריך' או 'מילות שלילה') — never tell the user to use YouTube's website filters.\n"
                       "Return ONLY JSON: {\"strategy_he\": \"...\", \"queries\": [{\"q\": \"...\", \"angle\": \"...\", \"note_he\": \"...\"}], \"suggestions_he\": [...], \"refinement_tips_he\": [...]}"
                   )
                   g_exp, planner_model_used = call_gemini_json(exp_prompt, timeout_sec=26)
@@ -488,16 +495,29 @@ jobs:
               jobs = []
               for idx_q, eq in enumerate(expanded_queries):
                   jobs.append((eq, f"{eq}{date_op}".strip(), ""))
-                  if idx_q < 4: jobs.append((eq, f"{eq}{date_op}".strip(), sp_code))
-              per_q_cap = max(65, min(150, (max_results * 2) // max(1, len(expanded_queries)) + 35))
+                  if idx_q < 5: jobs.append((eq, f"{eq}{date_op}".strip(), sp_code))
+              per_q_cap = max(55, min(120, (max_results * 2) // max(1, len(expanded_queries)) + 30))
               query_hits_map = {}
+              buckets_by_q = {}
               with ThreadPoolExecutor(max_workers=10) as ex:
                   results_per_job = list(ex.map(lambda j: (j[0], fetch_search(j[1], j[2], per_q_cap)), jobs))
               for base_eq, b in results_per_job:
-                  raw.extend(b)
                   s_set = query_hits_map.setdefault(base_eq, set())
+                  q_list = buckets_by_q.setdefault(base_eq, [])
                   for item_b in b:
-                      if item_b.get("id"): s_set.add(item_b["id"])
+                      vid_b = item_b.get("id")
+                      if vid_b and vid_b not in s_set:
+                          s_set.add(vid_b)
+                          item_b["source_q"] = base_eq
+                          q_list.append(item_b)
+              # ערבוב Round-Robin בין כל 14 השאילתות כדי שכל זווית תקבל ייצוג שווה בחלון ה-AI!
+              q_order = [eq for eq in expanded_queries if eq in buckets_by_q]
+              max_b_len = max((len(buckets_by_q[eq]) for eq in q_order), default=0)
+              for r_i in range(max_b_len):
+                  for eq in q_order:
+                      ql = buckets_by_q[eq]
+                      if r_i < len(ql):
+                          raw.append(ql[r_i])
 
           seen_ids = {direct_vid} if (is_similar and direct_vid) else (set() if (channel_input or direct_vid) else set(exclude))
           cands = []
@@ -508,7 +528,7 @@ jobs:
               if target_uc_id and e_cid and e_cid != target_uc_id and e_cid not in allowed_uc_ids: continue
               if channel_input and resolved_ch and not e_cid and e_ch and e_ch.strip().lower() != resolved_ch.strip().lower(): continue
               seen_ids.add(vid)
-              cands.append({"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","channel":resolved_ch if channel_input else (e_ch or resolved_ch),"channel_id":e_cid,"views":parse_views_text(e.get("view_count") or 0),"likes":int(e.get("like_count") or 0),"upload_date":str(e.get("upload_date") or "").strip().replace("-",""),"published_rel":str(e.get("published_rel") or ""),"max_height":0,"orig_pos":idx_pos,"matched_date_op":bool(e.get("matched_date_op")),"duration":int(e.get("duration") or 0),"thumbnail":f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"})
+              cands.append({"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","channel":resolved_ch if channel_input else (e_ch or resolved_ch),"channel_id":e_cid,"views":parse_views_text(e.get("view_count") or 0),"likes":int(e.get("like_count") or 0),"upload_date":str(e.get("upload_date") or "").strip().replace("-",""),"published_rel":str(e.get("published_rel") or ""),"max_height":0,"orig_pos":idx_pos,"source_q":str(e.get("source_q") or ""),"matched_date_op":bool(e.get("matched_date_op")),"duration":int(e.get("duration") or 0),"thumbnail":f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"})
 
           GAMING_RX = re.compile(r"\b(fifa\s*\d*|ea\s*fc\s*\d*|fc\s*2[4567]|efootball|pes\s*\d*|fc\s*mobile|dream\s*league|dls\s*\d*|football\s*manager|fm2[3456]|career\s*mode|pack\s*opening|fut\s*draft|sbc|ultimate\s*team|new\s*showtime|pesmaster|eafc|gameplay)\b", re.I)
           if no_gaming: cands = [c for c in cands if not GAMING_RX.search(f"{c['title']} {c['channel']}")]
@@ -619,7 +639,8 @@ jobs:
                   except Exception: pass
 
           if selected_pool:
-              with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:600]))
+              enrich_cap = 600 if (channel_input or season_info or min_views > 0) else min(len(selected_pool), 300)
+              with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:enrich_cap]))
 
           if allowed_uc_ids: selected_pool = [c for c in selected_pool if c.get("channel_id") in allowed_uc_ids or str(c.get("channel") or "").strip().lower() in allowed_ch_names]
           elif channel_input and resolved_ch: selected_pool = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
@@ -644,16 +665,18 @@ jobs:
           if filter_prompt:
               if not gemini_key: ai_status = "⚠️ סינון AI כבוי (חסר GEMINI_API_KEY ב-Secrets)"
               elif selected_pool:
-                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 180))]
-                  mid = (len(ai_slice) + 1) // 2
-                  chunks_ai = [(0, ai_slice[:mid])] + ([(mid, ai_slice[mid:])] if len(ai_slice) > 70 else [])
-                  if len(ai_slice) <= 70:
-                      chunks_ai = [(0, ai_slice)]
+                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 240))]
+                  ai_sent_by_q = {}
+                  for it_s in ai_slice:
+                      sq_s = it_s.get("source_q") or ""
+                      if sq_s: ai_sent_by_q[sq_s] = ai_sent_by_q.get(sq_s, 0) + 1
+                  chunk_sz = 80
+                  chunks_ai = [(off, ai_slice[off:off + chunk_sz]) for off in range(0, len(ai_slice), chunk_sz)]
 
                   def _score_ai_chunk(pair):
                       offset, sub_items = pair
                       if offset > 0:
-                          time.sleep(0.7)
+                          time.sleep(min(1.2, 0.35 * (offset // chunk_sz)))
                       compact = [{
                           "i": offset + idx,
                           "t": it.get("title", ""),
@@ -708,19 +731,37 @@ jobs:
           else: selected_pool.sort(key=lambda x: (int(x.get("views") or 0), int(x.get("likes") or 0)), reverse=True)
 
           pool = selected_pool[:max_results]
+          ai_passed_by_q = {}
+          for it_k in selected_pool:
+              sq_k = it_k.get("source_q") or ""
+              if sq_k: ai_passed_by_q[sq_k] = ai_passed_by_q.get(sq_k, 0) + 1
+          _sent_map = ai_sent_by_q if "ai_sent_by_q" in locals() else {}
           query_stats = []
           for eq in expanded_queries:
               qm = query_meta_map.get(eq.lower()) or {}
-              query_stats.append({"q": eq, "angle": qm.get("angle", "direct"), "note_he": qm.get("note_he", ""), "hits": len(query_hits_map.get(eq, set()))})
+              sent_n = _sent_map.get(eq, 0)
+              pass_n = ai_passed_by_q.get(eq, 0)
+              base_note = qm.get("note_he", "")
+              eff_tag = f" (✓ {pass_n}/{sent_n} עברו AI)" if sent_n > 0 else ""
+              query_stats.append({
+                  "q": eq,
+                  "angle": qm.get("angle", "direct"),
+                  "note_he": (base_note + eff_tag).strip(),
+                  "hits": len(query_hits_map.get(eq, set())),
+                  "sent_to_ai": sent_n,
+                  "passed_ai": pass_n
+              })
           ai_trace = {
               "planner_model": planner_model_used or "",
               "scorer_model": (used_models[0] if "used_models" in locals() and used_models else ""),
+              "skipped_models": sorted(dead_gemini_models),
               "strategy_he": ai_strategy_he,
               "queries": query_stats,
               "refinement_tips_he": ai_refinement_tips,
               "pipeline": {
                   "raw_total": len(raw),
                   "unique_cands": len(cands),
+                  "sent_to_ai": sum(_sent_map.values()) if _sent_map else min(len(cands), 240),
                   "ai_kept": len(selected_pool),
                   "final_shown": len(pool)
               },
@@ -873,7 +914,7 @@ jobs:
               suggested_searches = [f"{base_t} 2026", f"{base_t} 2025/26", f"{base_t} תקציר", f"{base_t} כישרונות חדשים", f"{base_t} שערים ומהלכים", f"{base_t} משחק מלא", f"{base_t} אימון", f"{base_t} דוקומנטרי"]
 
           for item in pool:
-              item.pop("orig_pos", None); item.pop("matched_date_op", None); item.pop("channel_id", None)
+              item.pop("orig_pos", None); item.pop("source_q", None); item.pop("matched_date_op", None); item.pop("channel_id", None)
               rd = str(item.get("upload_date") or "").strip()
               item["date_formatted"] = f"{rd[6:8]}/{rd[4:6]}/{rd[0:4]}" if (len(rd) == 8 and rd.isdigit()) else item.get("published_rel", "")
               mh = int(item.get("max_height") or 0)
