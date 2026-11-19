@@ -5,7 +5,7 @@ on:
       request_id: { required: true, type: string }
       query: { required: false, default: "", type: string }
       channel: { required: false, default: "", type: string }
-      sort_by: { required: false, default: "views", type: string }
+      sort_by: { required: false, default: "relevance", type: string }
       max_results: { required: false, default: "60", type: string }
       min_views: { required: false, default: "0", type: string }
       exclude_ids: { required: false, default: "", type: string }
@@ -24,10 +24,10 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - name: Install yt-dlp
+      - name: Install yt-dlp + Pillow
         run: |
-          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography
-      - name: Fast Channel & Topic Search Engine
+          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography pillow
+      - name: Smart Multi-Language + Gemini 3.5 Flash-Lite + Sharp WebP Engine
         env:
           REQ_ID: ${{ inputs.request_id }}
           QUERY: ${{ inputs.query }}
@@ -44,35 +44,42 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - << 'EOF'
-          import base64, datetime, json, os, re, subprocess, threading, urllib.parse, requests
+          import base64, datetime, io, json, os, re, subprocess, threading, urllib.parse, requests
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          from PIL import Image
 
           req_id = os.environ.get("REQ_ID", "").strip()
           query = os.environ.get("QUERY", "").strip()
           channel_input = os.environ.get("CHANNEL", "").strip()
-          sort_raw = os.environ.get("SORT_BY", "views").strip()
+          sort_raw = os.environ.get("SORT_BY", "relevance").strip()
           max_results = max(10, min(2500, int(os.environ.get("MAX_RESULTS", "60") or 60)))
           min_views = int(os.environ.get("MIN_VIEWS", "0") or 0)
           exclude = set(filter(None, os.environ.get("EXCLUDE_IDS", "").split(",")))
           filter_prompt = os.environ.get("FILTER_PROMPT", "").strip()
           cookies_enc = os.environ.get("COOKIES_ENC", "").strip()
           secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
-          for _m in (cookies_enc, secret_key_env):
-              if _m and len(_m) >= 8:
-                  print(f"::add-mask::{_m}", flush=True)
+          gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+
+          for _m in (cookies_enc, secret_key_env, gemini_key):
+              if _m and len(_m) >= 8: print(f"::add-mask::{_m}", flush=True)
 
           fp_low = filter_prompt.lower()
           high_quality_only = "[hq_only]" in fp_low or "|hq" in sort_raw.lower() or sort_raw.lower() == "quality_score"
           translate_titles = "[tr_he]" in fp_low or "|tr" in sort_raw.lower()
           playlist_mode = "streams" if "[pl_streams]" in fp_low else ("uu_all" if "[pl_uu]" in fp_low else ("uulp" if "[pl_uulp]" in fp_low else "auto"))
-          m_dur = re.search(r"\[dur:([a-z0-9_]+)\]", fp_low)
-          dur_filter = m_dur.group(1) if m_dur else "all"
-          m_season = re.search(r"\[season:([a-z0-9_]+)\]", fp_low)
-          season_filter = m_season.group(1) if m_season else "all"
+          m_dur = re.search(r"\[dur:([a-z0-9_]+)\]", fp_low); dur_filter = m_dur.group(1) if m_dur else "all"
+          m_season = re.search(r"\[season:([a-z0-9_]+)\]", fp_low); season_filter = m_season.group(1) if m_season else "all"
           m_il_ids = re.search(r"\[il_ids:([a-zA-Z0-9_,-]+)\]", filter_prompt, flags=re.I)
           il_seed_ids = [x.strip() for x in (m_il_ids.group(1).split(",") if m_il_ids else []) if len(x.strip()) == 11]
+          m_langs = re.search(r"\[langs:([a-z,]+)\]", fp_low)
+          search_langs = [x.strip() for x in (m_langs.group(1).split(",") if m_langs else ["he", "en", "es"]) if x.strip()]
+          expand_queries = "[expand]" in fp_low
+          m_ctype = re.search(r"\[ctype:([a-z0-9_]+)\]", fp_low); content_type = m_ctype.group(1) if m_ctype else "all"
+          no_gaming = "[no_gaming]" in fp_low
+          m_excl = re.search(r"\[excl:([^\]]+)\]", filter_prompt, flags=re.I)
+          exclude_terms = [urllib.parse.unquote(x).strip().lower() for x in (m_excl.group(1).split(",") if m_excl else []) if x.strip()]
 
           SEASON_RANGES = {
               "2026_2027": ("20260801", "20270731", "after:2026-07-31"),
@@ -86,51 +93,57 @@ jobs:
               "before_2023": ("19900101", "20221231", "before:2023-01-01"),
           }
           season_info = SEASON_RANGES.get(season_filter)
-          sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "views"
-          filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+)\]", "", filter_prompt, flags=re.I).strip()
+          sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "relevance"
+          filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
+
+          GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash")
+          def call_gemini_json(prompt_text: str, timeout_sec: int = 32):
+              if not gemini_key: return None, ""
+              for model_name in GEMINI_MODELS:
+                  try:
+                      g_res = requests.post(
+                          f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+                          headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key},
+                          json={"contents": [{"parts": [{"text": prompt_text}]}], "generationConfig": {"temperature": 0.15, "responseMimeType": "application/json"}},
+                          timeout=timeout_sec
+                      )
+                      if g_res.status_code == 200:
+                          parts = ((g_res.json().get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+                          txt = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+                          if txt:
+                              txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.S).strip()
+                              return json.loads(txt), model_name
+                      else:
+                          print(f"Gemini {model_name} HTTP {g_res.status_code}: {g_res.text[:140]}", flush=True)
+                  except Exception as e:
+                      print(f"Gemini {model_name} err: {e}", flush=True)
+              return None, ""
 
           cookie_file = Path("/tmp/rec_cookies.txt")
           cookie_dict = {"SOCS": "CAISHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiAo_CmBg", "CONSENT": "YES+cb"}
           has_ck = False
-          if cookies_enc:
+          if cookies_enc and len(secret_key_env) == 64:
               try:
                   raw_enc = base64.b64decode(cookies_enc)
-                  for kh in (secret_key_env,):
-                      if len(kh) == 64:
-                          try:
-                              pt = AESGCM(bytes.fromhex(kh)).decrypt(raw_enc[:12], raw_enc[12:], None).decode("utf-8", errors="replace")
-                              if "youtube.com" in pt or "# Netscape" in pt:
-                                  cookie_file.write_text(pt, encoding="utf-8")
-                                  has_ck = True
-                                  for ln in pt.splitlines():
-                                      if ln and not ln.startswith("#"):
-                                          ps = ln.split("\t")
-                                          if len(ps) >= 7: cookie_dict[ps[5]] = ps[6]
-                                  break
-                          except Exception: pass
+                  pt = AESGCM(bytes.fromhex(secret_key_env)).decrypt(raw_enc[:12], raw_enc[12:], None).decode("utf-8", errors="replace")
+                  if "youtube.com" in pt or "# Netscape" in pt:
+                      cookie_file.write_text(pt, encoding="utf-8"); has_ck = True
+                      for ln in pt.splitlines():
+                          if ln and not ln.startswith("#"):
+                              ps = ln.split("\t")
+                              if len(ps) >= 7: cookie_dict[ps[5]] = ps[6]
               except Exception: pass
 
           UA_STR = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
           def build_headers(referer="https://www.youtube.com/"):
-              return {
-                  "Content-Type": "application/json",
-                  "User-Agent": UA_STR,
-                  "Origin": "https://www.youtube.com",
-                  "Referer": referer,
-                  "X-YouTube-Client-Name": "1",
-                  "X-YouTube-Client-Version": "2.20261101.00.00",
-                  "X-Forwarded-For": "212.179.112.1",
-                  "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"
-              }
+              return {"Content-Type":"application/json","User-Agent":UA_STR,"Origin":"https://www.youtube.com","Referer":referer,"X-YouTube-Client-Name":"1","X-YouTube-Client-Version":"2.20261101.00.00","X-Forwarded-For":"212.179.112.1","Accept-Language":"he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7"}
 
           def parse_views_text(v_str) -> int:
               if isinstance(v_str, (int, float)): return int(v_str)
               s = str(v_str or "").strip().upper().replace(",", "")
               m = re.search(r"([\d.]+)\s*([KMB])?", s)
-              if not m:
-                  d = re.sub(r"\D", "", s)
-                  return int(d) if d else 0
-              return int(float(m.group(1)) * {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(m.group(2) or "", 1))
+              if not m: d = re.sub(r"\D", "", s); return int(d) if d else 0
+              return int(float(m.group(1)) * {"K":1_000,"M":1_000_000,"B":1_000_000_000}.get(m.group(2) or "", 1))
 
           def extract_11char_id(s: str) -> str:
               s = str(s or "").strip()
@@ -155,7 +168,7 @@ jobs:
                   if "feedFilterChipBarRenderer" in obj:
                       for idx, cw in enumerate((obj["feedFilterChipBarRenderer"] or {}).get("contents") or []):
                           cr = cw.get("chipCloudChipRenderer") or {}
-                          lbl = "".join(r.get("text", "") for r in ((cr.get("text") or {}).get("runs") or [])).strip().lower() or (cr.get("text") or {}).get("simpleText", "").strip().lower()
+                          lbl = "".join(r.get("text","") for r in ((cr.get("text") or {}).get("runs") or [])).strip().lower() or (cr.get("text") or {}).get("simpleText","").strip().lower()
                           ct = find_tokens(cr)
                           if ct: out_chip_toks.append((idx, lbl, ct[0]))
                       return
@@ -164,29 +177,16 @@ jobs:
                       vid = vr.get("videoId")
                       if vid and len(vid) == 11:
                           runs = (vr.get("title") or {}).get("runs") or []
-                          title = "".join(r.get("text", "") for r in runs) or (vr.get("title") or {}).get("simpleText", "")
-                          vc_txt = ((vr.get("viewCountText") or {}).get("simpleText") or "".join(r.get("text", "") for r in ((vr.get("viewCountText") or {}).get("runs") or [])) or (vr.get("videoInfo") or {}).get("simpleText") or "".join(r.get("text", "") for r in ((vr.get("videoInfo") or {}).get("runs") or [])))
+                          title = "".join(r.get("text","") for r in runs) or (vr.get("title") or {}).get("simpleText","")
+                          vc_txt = ((vr.get("viewCountText") or {}).get("simpleText") or "".join(r.get("text","") for r in ((vr.get("viewCountText") or {}).get("runs") or [])) or (vr.get("videoInfo") or {}).get("simpleText") or "".join(r.get("text","") for r in ((vr.get("videoInfo") or {}).get("runs") or [])))
                           pub_rel = (vr.get("publishedTimeText") or {}).get("simpleText") or ""
                           dur_txt = (vr.get("lengthText") or {}).get("simpleText") or ""
                           dur_sec = int(vr.get("lengthSeconds") or 0)
                           if not dur_sec and ":" in dur_txt:
                               for p in [int(x) for x in dur_txt.split(":") if x.isdigit()]: dur_sec = dur_sec * 60 + p
                           ch_runs = ((vr.get("ownerText") or vr.get("longBylineText") or vr.get("shortBylineText") or {}).get("runs") or [])
-                          ch_id = ""
-                          for r_item in ch_runs:
-                              bid = (((r_item.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId") or "")
-                              if bid.startswith("UC"):
-                                  ch_id = bid
-                                  break
-                          out_vids.append({
-                              "id": vid,
-                              "title": title.strip(),
-                              "channel": "".join(r.get("text", "") for r in ch_runs).strip(),
-                              "channel_id": ch_id,
-                              "view_count": parse_views_text(vc_txt),
-                              "published_rel": pub_rel.strip(),
-                              "duration": dur_sec
-                          })
+                          ch_id = next(((((r_i.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId") or "") for r_i in ch_runs if (((r_i.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId") or "").startswith("UC")), "")
+                          out_vids.append({"id":vid,"title":title.strip(),"channel":"".join(r.get("text","") for r in ch_runs).strip(),"channel_id":ch_id,"view_count":parse_views_text(vc_txt),"published_rel":pub_rel.strip(),"duration":dur_sec})
                   if "continuationItemRenderer" in obj:
                       for t in find_tokens(obj["continuationItemRenderer"]):
                           if t not in out_grid_toks: out_grid_toks.append(t)
@@ -195,28 +195,28 @@ jobs:
               elif isinstance(obj, list):
                   for it in obj: walk_items(it, out_vids, out_grid_toks, out_chip_toks)
 
-          def fetch_search(q_str: str, sp_param: str = "", target_count: int = 160, must_match_uc: str = "", must_match_name: str = ""):
+          allowed_uc_ids, allowed_ch_names = set(), set()
+
+          def fetch_search(q_str: str, sp_param: str = "", target_count: int = 120, must_match_uc: str = "", must_match_name: str = ""):
               if not q_str: return []
               api_url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false"
               ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
               payload = {"context": ctx, "query": q_str}
               if sp_param: payload["params"] = sp_param
               collected, seen_vids, visited = [], set(), set()
-              max_s_pages = max(8, min(35, (target_count // 15) + 4))
+              max_s_pages = max(5, min(20, (target_count // 18) + 3))
               try:
                   r = requests.post(api_url, headers=build_headers(), json=payload, timeout=15)
                   if r.status_code != 200: return []
                   vids, toks, _ = [], [], []
                   walk_items(r.json(), vids, toks, _)
-                  for v in vids:
-                      if v["id"] in seen_vids: continue
-                      if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc and v["channel_id"] not in allowed_uc_ids:
-                          continue
-                      if must_match_name and not v.get("channel_id") and v.get("channel") and v["channel"].strip().lower() != must_match_name.strip().lower():
-                          continue
-                      seen_vids.add(v["id"])
-                      collected.append(v)
-                  pages = 0
+                  def accept(arr):
+                      for v in arr:
+                          if v["id"] in seen_vids: continue
+                          if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc and v["channel_id"] not in allowed_uc_ids: continue
+                          if must_match_name and not v.get("channel_id") and v.get("channel") and v["channel"].strip().lower() != must_match_name.strip().lower(): continue
+                          seen_vids.add(v["id"]); collected.append(v)
+                  accept(vids); pages = 0
                   while toks and len(collected) < target_count and pages < max_s_pages:
                       nt = toks.pop(0)
                       if nt in visited: continue
@@ -224,15 +224,7 @@ jobs:
                       rn = requests.post(api_url, headers=build_headers(), json={"context": ctx, "continuation": nt}, timeout=15)
                       if rn.status_code != 200: break
                       mv, mt, _ = [], [], []
-                      walk_items(rn.json(), mv, mt, _)
-                      for v in mv:
-                          if v["id"] in seen_vids: continue
-                          if must_match_uc and v.get("channel_id") and v["channel_id"] != must_match_uc and v["channel_id"] not in allowed_uc_ids:
-                              continue
-                          if must_match_name and not v.get("channel_id") and v.get("channel") and v["channel"].strip().lower() != must_match_name.strip().lower():
-                              continue
-                          seen_vids.add(v["id"])
-                          collected.append(v)
+                      walk_items(rn.json(), mv, mt, _); accept(mv)
                       for t in mt:
                           if t not in visited: toks.append(t)
               except Exception: pass
@@ -240,15 +232,14 @@ jobs:
 
           def fetch_yt_json(target_url, limit_str, forced_uc: str = "", forced_name: str = ""):
               for use_ck in ([False, True] if has_ck else [False]):
-                  cmd = ["python3", "-m", "yt_dlp", "--force-ipv4", "--xff", "IL", "--dump-json", "--flat-playlist", "--playlist-end", str(limit_str), "--ignore-errors", "--no-warnings", "--js-runtimes", "deno"]
+                  cmd = ["python3","-m","yt_dlp","--force-ipv4","--xff","IL","--dump-json","--flat-playlist","--playlist-end",str(limit_str),"--ignore-errors","--no-warnings","--js-runtimes","deno"]
                   if use_ck: cmd += ["--cookies", str(cookie_file)]
                   cmd.append(target_url)
                   r = subprocess.run(cmd, capture_output=True, text=True)
                   out = []
                   for ln in r.stdout.splitlines():
                       try:
-                          d = json.loads(ln)
-                          vid = str(d.get("id") or "")
+                          d = json.loads(ln); vid = str(d.get("id") or "")
                           if len(vid) == 11:
                               if forced_uc: d["channel_id"] = forced_uc
                               if forced_name and not d.get("channel"): d["channel"] = forced_name
@@ -258,28 +249,18 @@ jobs:
               return []
 
           is_similar = query.upper().startswith("SIMILAR:")
-          if is_similar:
-              season_info = None
-              season_filter = "all"
-              channel_input = ""
-
+          if is_similar: season_info = None; season_filter = "all"; channel_input = ""
           direct_vid = extract_11char_id(channel_input) or extract_11char_id(query)
           seed_video, related_videos = None, []
           if direct_vid:
               try:
-                  pr = requests.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", headers=build_headers(), json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": direct_vid}, timeout=12)
+                  pr = requests.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", headers=build_headers(), json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00"}},"videoId":direct_vid}, timeout=12)
                   vd = (pr.json().get("videoDetails") or {}) if pr.status_code == 200 else {}
                   if vd.get("videoId"):
-                      seed_video = {"id": vd["videoId"], "title": vd.get("title") or direct_vid, "channel": vd.get("author") or "", "channel_id": vd.get("channelId") or "", "view_count": int(vd.get("viewCount") or 0), "duration": int(vd.get("lengthSeconds") or 0)}
-                      rn = requests.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", headers=build_headers(), json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": direct_vid}, timeout=12)
-                      if rn.status_code == 200:
-                          rv, rt, _ = [], [], []
-                          walk_items(rn.json(), rv, rt, _)
-                          related_videos.extend(rv)
-                      if is_similar:
-                          clean_t = re.sub(r"\[[a-zA-Z0-9_-]{11}\]|\([^\)]*\)|\|.*", "", seed_video["title"]).strip()
-                          query = f"{seed_video['channel']} {clean_t}".strip()
-                          channel_input = ""
+                      seed_video = {"id":vd["videoId"],"title":vd.get("title") or direct_vid,"channel":vd.get("author") or "","channel_id":vd.get("channelId") or "","view_count":int(vd.get("viewCount") or 0),"duration":int(vd.get("lengthSeconds") or 0)}
+                      rn = requests.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", headers=build_headers(), json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00"}},"videoId":direct_vid}, timeout=12)
+                      if rn.status_code == 200: rv, rt, _ = [], [], []; walk_items(rn.json(), rv, rt, _); related_videos.extend(rv)
+                      if is_similar: query = f"{seed_video['channel']} {re.sub(r'\[[a-zA-Z0-9_-]{11}\]|\([^\)]*\)|\|.*', '', seed_video['title']).strip()}".strip(); channel_input = ""
                       else:
                           if not channel_input and vd.get("channelId"): channel_input = f"https://www.youtube.com/channel/{vd['channelId']}"
                           if query == direct_vid or f"[{direct_vid}]" in query: query = ""
@@ -290,26 +271,20 @@ jobs:
               if not ch: return "", "", ""
               base, name, uc_id = "", ch, ""
               m_uc = re.search(r"(UC[a-zA-Z0-9_-]{22})", ch)
-              if m_uc:
-                  uc_id = m_uc.group(1); base = f"https://www.youtube.com/channel/{uc_id}"
-              elif ch.startswith("http"):
-                  base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", ch.rstrip("/"))
-                  m_h = re.search(r"(@[a-zA-Z0-9_.-]+)", base)
-                  name = m_h.group(1) if m_h else base.split("/")[-1]
-              elif ch.startswith("@"):
-                  handle = ch.split("/")[0]; base, name = f"https://www.youtube.com/{handle}", handle
-              else:
-                  base = f"https://www.youtube.com/@{ch}" if re.match(r"^[a-zA-Z0-9_.-]+$", ch) else ""
+              if m_uc: uc_id = m_uc.group(1); base = f"https://www.youtube.com/channel/{uc_id}"
+              elif ch.startswith("http"): base = re.sub(r"/(videos|shorts|streams|playlists|about|featured)/?$", "", ch.rstrip("/")); m_h = re.search(r"(@[a-zA-Z0-9_.-]+)", base); name = m_h.group(1) if m_h else base.split("/")[-1]
+              elif ch.startswith("@"): handle = ch.split("/")[0]; base, name = f"https://www.youtube.com/{handle}", handle
+              else: base = f"https://www.youtube.com/@{ch}" if re.match(r"^[a-zA-Z0-9_.-]+$", ch) else ""
               if base and not uc_id:
                   try:
-                      rr = requests.post("https://www.youtube.com/youtubei/v1/navigation/resolve_url?prettyPrint=false", headers=build_headers(), json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "url": base}, timeout=12)
+                      rr = requests.post("https://www.youtube.com/youtubei/v1/navigation/resolve_url?prettyPrint=false", headers=build_headers(), json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00"}},"url":base}, timeout=12)
                       if rr.status_code == 200:
                           bid = (((rr.json().get("endpoint") or {}).get("browseEndpoint") or {}).get("browseId") or "")
                           if bid.startswith("UC"): uc_id = bid
                   except Exception: pass
               if base:
                   try:
-                      resp = requests.get(f"{base}/videos", headers={"User-Agent": UA_STR}, cookies=cookie_dict, timeout=15)
+                      resp = requests.get(f"{base}/videos", headers={"User-Agent":UA_STR}, cookies=cookie_dict, timeout=15)
                       if resp.status_code == 200:
                           if not uc_id:
                               m_e = re.search(r'"(?:externalId|channelId|browseId)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', resp.text)
@@ -317,39 +292,28 @@ jobs:
                           m_t = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
                           if m_t and m_t.group(1).strip(): name = m_t.group(1).strip()
                   except Exception: pass
-              if not uc_id:
-                  try:
-                      sr = requests.post("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", headers=build_headers(), json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "query": ch, "params": "EgIQAg%3D%3D"}, timeout=12)
-                      if sr.status_code == 200:
-                          m_c = re.search(r'"channelRenderer"\s*:\s*\{[^}]*"channelId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', sr.text)
-                          if m_c: uc_id = m_c.group(1); base = base or f"https://www.youtube.com/channel/{uc_id}"
-                  except Exception: pass
               return base, uc_id, name
 
-          def fetch_playlist_browse(browse_id: str, ch_title: str, uc_id: str, max_pages: int = 85, target_count: int = 2500):
+          def fetch_playlist_browse(browse_id: str, ch_title: str, uc_id: str, max_pages: int = 80, target_count: int = 2500):
               api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
-              ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
+              ctx = {"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00","hl":"en","gl":"US"}}
               collected, seen_vids, visited = [], set(), set()
               try:
-                  rp = requests.post(api_url, headers=build_headers(), json={"context": ctx, "browseId": browse_id}, timeout=20)
+                  rp = requests.post(api_url, headers=build_headers(), json={"context":ctx,"browseId":browse_id}, timeout=20)
                   if rp.status_code != 200: return []
-                  pv, pt, _ = [], [], []
-                  walk_items(rp.json(), pv, pt, _)
+                  pv, pt, _ = [], [], []; walk_items(rp.json(), pv, pt, _)
                   for v in pv:
-                      if v["id"] not in seen_vids:
-                          seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
+                      if v["id"] not in seen_vids: seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
                   pages = 0
                   while pt and len(collected) < target_count and pages < max_pages:
                       nt = pt.pop(0)
                       if nt in visited: continue
                       visited.add(nt); pages += 1
-                      rn = requests.post(api_url, headers=build_headers(), json={"context": ctx, "continuation": nt}, timeout=20)
+                      rn = requests.post(api_url, headers=build_headers(), json={"context":ctx,"continuation":nt}, timeout=20)
                       if rn.status_code != 200: break
-                      mv, mt, _ = [], [], []
-                      walk_items(rn.json(), mv, mt, _)
+                      mv, mt, _ = [], [], []; walk_items(rn.json(), mv, mt, _)
                       for v in mv:
-                          if v["id"] not in seen_vids:
-                              seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
+                          if v["id"] not in seen_vids: seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
                       for t in mt:
                           if t not in visited: pt.append(t)
               except Exception: pass
@@ -360,266 +324,104 @@ jobs:
               def add_items(arr):
                   for v in arr:
                       vid = v.get("id")
-                      if vid and len(vid) == 11 and vid not in seen_vids:
-                          seen_vids.add(vid)
-                          v["channel"] = ch_title
-                          v["channel_id"] = uc_id
-                          collected.append(v)
-              if playlist_mode == "streams" and base_url:
-                  add_items(fetch_yt_json(f"{base_url}/streams", str(target_count), uc_id, ch_title))
-              if uc_id and sort_mode in ("views", "likes", "quality_score") and playlist_mode != "uu_all":
-                  add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, uc_id, 30, target_count))
-              if uc_id and len(collected) < target_count:
-                  api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
-                  ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "US"}}
-                  visited = set()
-                  try:
-                      r = requests.post(api_url, headers=build_headers(), json={"context": ctx, "browseId": uc_id, "params": "EgZ2aWRlb3PyBgQKAjoA"}, timeout=20)
-                      if r.status_code == 200:
-                          iv, ig, chips = [], [], []
-                          walk_items(r.json(), iv, ig, chips)
-                          active = []
-                          if sort_mode in ("views", "likes", "quality_score") and chips and playlist_mode != "uu_all":
-                              tok = next((t for i, l, t in chips if "popular" in l or "פופולר" in l or i == 1), None)
-                              if tok: active = [tok]
-                          elif sort_mode == "date_asc" and chips:
-                              tok = next((t for i, l, t in chips if "oldest" in l or "ישנ" in l or i == 2), None)
-                              if tok: active = [tok]
-                          if not active:
-                              add_items(iv); active = ig[:]
-                          pages = 0
-                          max_c_pages = max(25, min(90, (target_count // 25) + 10))
-                          while active and len(collected) < target_count and pages < max_c_pages:
-                              nt = active.pop(0)
-                              if nt in visited: continue
-                              visited.add(nt); pages += 1
-                              rn = requests.post(api_url, headers=build_headers(), json={"context": ctx, "continuation": nt}, timeout=20)
-                              if rn.status_code != 200: break
-                              mv, mt, _ = [], [], []
-                              walk_items(rn.json(), mv, mt, _)
-                              add_items(mv)
-                              for t in mt:
-                                  if t not in visited: active.append(t)
-                          if len(collected) < 15 and iv: add_items(iv)
-                  except Exception: pass
-              if uc_id and (len(collected) < max_results or playlist_mode == "uu_all"):
-                  add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, uc_id, max(35, min(90, (target_count // 25) + 15)), max(target_count, 800)))
+                      if vid and len(vid) == 11 and vid not in seen_vids: seen_vids.add(vid); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
+              if playlist_mode == "streams" and base_url: add_items(fetch_yt_json(f"{base_url}/streams", str(target_count), uc_id, ch_title))
+              if uc_id and sort_mode in ("views","likes","quality_score","relevance") and playlist_mode != "uu_all": add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, uc_id, 30, target_count))
+              if uc_id and len(collected) < target_count: add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, uc_id, max(35, min(85, (target_count // 25) + 15)), max(target_count, 800)))
               return collected
 
+          # הרחבת שאילתות רב-לשונית + הצעות לחיפושים דומים מ-Gemini 3.5 Flash-Lite
           clean_q = re.sub(r"[!?\u05be]+", " ", query).strip()
-          en_query = ""
-          if clean_q and any("\u0590" <= ch <= "\u05FF" for ch in clean_q) and not is_similar:
-              try:
-                  tr_r = requests.get("https://translate.googleapis.com/translate_a/single?client=gtx&sl=iw&tl=en&dt=t&q=" + urllib.parse.quote(clean_q), timeout=10)
-                  if tr_r.status_code == 200: en_query = "".join(p[0] for p in tr_r.json()[0] if p and p[0]).strip()
-              except Exception: pass
+          CTYPE_HINTS = {"highlights":{"en":"highlights","es":"resumen","he":"תקציר"},"doc":{"en":"documentary analysis","es":"documental historia","he":"דוקומנטרי ניתוח"},"full":{"en":"full match","es":"partido completo","he":"משחק מלא"},"podcast":{"en":"podcast interview","es":"entrevista podcast","he":"פודקאסט ראיון"},"training":{"en":"training inside","es":"entrenamiento","he":"אימון"}}
+          LANG_NAMES = {"he":"Hebrew","en":"English","es":"Spanish","fr":"French","it":"Italian","de":"German","pt":"Portuguese","ar":"Arabic"}
 
-          sp_code = {"views": "CAMSAhAB", "date_desc": "CAI%3D", "likes": "CAE%3D"}.get(sort_by, "CAMSAhAB")
+          def gtrans_simple(txt: str, target_lang: str) -> str:
+              tl = "iw" if target_lang == "he" else target_lang
+              try:
+                  r = requests.get("https://translate.googleapis.com/translate_a/single", params={"client":"gtx","sl":"auto","tl":tl,"dt":"t","q":txt}, timeout=8)
+                  if r.status_code == 200: return "".join(p[0] for p in r.json()[0] if p and p[0]).strip()
+              except Exception: pass
+              return ""
+
+          expanded_queries, suggested_searches = [], []
+          if clean_q:
+              expanded_queries.append(clean_q)
+              if gemini_key and not is_similar:
+                  lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
+                  exp_prompt = (
+                      f"Topic: \"{clean_q}\" | Languages: {lang_desc} | Preferred content: {content_type}.\n"
+                      "1. Generate 6 diverse YouTube search queries across the requested languages (native club/player spellings, highlights/documentaries/related angles; no FIFA/EA FC/PES).\n"
+                      "2. Generate 8 clickable follow-up search suggestions in natural Israeli Hebrew (4 closely related + 4 broader interesting sports angles).\n"
+                      "Return ONLY JSON: {\"queries\": [...], \"suggestions_he\": [...]}"
+                  )
+                  g_exp, _ = call_gemini_json(exp_prompt, timeout_sec=20)
+                  if isinstance(g_exp, dict):
+                      if expand_queries and isinstance(g_exp.get("queries"), list):
+                          for q_c in g_exp["queries"]:
+                              qs = str(q_c or "").strip()
+                              if qs and qs.lower() not in [x.lower() for x in expanded_queries]: expanded_queries.append(qs)
+                      if isinstance(g_exp.get("suggestions_he"), list):
+                          suggested_searches = [str(x).strip() for x in g_exp["suggestions_he"] if str(x).strip()][:8]
+              if len(expanded_queries) < 3:
+                  def _tr_lg(lg):
+                      tr = gtrans_simple(clean_q, lg)
+                      hint = (CTYPE_HINTS.get(content_type) or {}).get(lg, "")
+                      return f"{tr} {hint}".strip() if tr else ""
+                  with ThreadPoolExecutor(max_workers=5) as ex:
+                      for rq in ex.map(_tr_lg, search_langs[:5]):
+                          if rq and rq.lower() not in [x.lower() for x in expanded_queries]: expanded_queries.append(rq)
+
+          expanded_queries = expanded_queries[:7]
+          en_query = expanded_queries[1] if len(expanded_queries) > 1 else ""
+          sp_code = {"views":"CAMSAhAB","date_desc":"CAI%3D","likes":"CAE%3D"}.get(sort_by, "CAMSAhAB")
+
           raw = []
           if seed_video and not is_similar: raw.append(seed_video)
           if related_videos: raw.extend(related_videos)
-          for il_vid in il_seed_ids: raw.append({"id": il_vid, "title": il_vid, "channel": "", "channel_id": "", "view_count": 0, "duration": 0, "matched_date_op": True})
-          resolved_ch = channel_input
-          target_uc_id = ""
-          allowed_uc_ids = set()
-          allowed_ch_names = set()
-
-          NETWORK_CLUSTERS = {
-              "@one-1004": ["@one-1004", "@one4576", "@one5353", "@onepodcasts3641"],
-              "@one4576": ["@one4576", "@one-1004", "@one5353"],
-              "@one5353": ["@one5353", "@one-1004", "@one4576"],
-              "@hapodium_podcast": ["@hapodium_podcast", "@hapodium_sport"],
-              "@hapodium_sport": ["@hapodium_sport", "@hapodium_podcast"],
-          }
-
+          for il_vid in il_seed_ids: raw.append({"id":il_vid,"title":il_vid,"channel":"","channel_id":"","view_count":0,"duration":0,"matched_date_op":True})
+          resolved_ch, target_uc_id = channel_input, ""
           date_op = f" {season_info[2]}" if season_info else ""
+
           if channel_input:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
               target_uc_id = uc_id
               if uc_id: allowed_uc_ids.add(uc_id)
               if resolved_ch: allowed_ch_names.add(resolved_ch.strip().lower())
-              ch_key = channel_input.strip().lower()
-              for net_k, net_list in NETWORK_CLUSTERS.items():
-                  if net_k in ch_key:
-                      for sib_h in net_list:
-                          if sib_h.lower() != ch_key:
-                              try:
-                                  s_base, s_uc, s_name = resolve_channel(sib_h)
-                                  if s_uc: allowed_uc_ids.add(s_uc)
-                                  if s_name: allowed_ch_names.add(s_name.strip().lower())
-                                  if season_info and s_uc:
-                                      raw.extend(fetch_channel_vids(s_base, s_uc, s_name or resolved_ch, sort_by, 400))
-                              except Exception:
-                                  pass
-                      break
-              if season_info or clean_q:
-                  # 1. חיפוש ישיר בתוך כתובת הערוץ ביוטיוב דרך yt-dlp עם --xff IL (שואב גם את כל התקצירים החסומים גיאוגרפית לישראל בלבד!)
-                  if ch_base:
-                      yt_ch_queries = []
-                      if clean_q and season_info:
-                          s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
-                          yt_ch_queries = [f"{clean_q} {s_y1}", f"{clean_q} {s_y2}", clean_q]
-                      elif clean_q:
-                          yt_ch_queries = [clean_q]
-                      elif season_info:
-                          s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
-                          yt_ch_queries = [
-                              f"תקציר מורחב {s_y1}", f"תקציר מורחב {s_y2}",
-                              f"תקציר {s_y1}", f"תקציר {s_y2}",
-                              f"ברצלונה {s_y1}", f"ברצלונה {s_y2}",
-                              f"ריאל מדריד {s_y1}", f"ריאל מדריד {s_y2}",
-                              f"מכבי {s_y1}", f"מכבי {s_y2}",
-                              f"מחזור {s_y1}", f"מחזור {s_y2}",
-                              f"{s_y1}/{s_y2[-2:]}"
-                          ]
-                      if yt_ch_queries:
-                          with ThreadPoolExecutor(max_workers=6) as ex:
-                              for b in ex.map(lambda sq: fetch_yt_json(f"{ch_base}/search?query={urllib.parse.quote(sq)}", "180", uc_id, resolved_ch), yt_ch_queries):
-                                  raw.extend(b)
-
-                  # 2. מנוע Multi-Slice Deep Harvester: פירוק העונה לתתי-תקופות חודשיות + מילות מפתח של קבוצות ומחזורים במקביל!
-                  s_queries = []
-                  def build_date_slices(s_min_str: str, s_max_str: str):
-                      try:
-                          d_start = datetime.datetime.strptime(s_min_str, "%Y%m%d")
-                          d_end = datetime.datetime.strptime(s_max_str, "%Y%m%d")
-                          slices = []
-                          cur = d_start
-                          while cur < d_end:
-                              nxt = min(d_end, cur + datetime.timedelta(days=45))
-                              a_str = (cur - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-                              b_str = (nxt + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-                              slices.append(f"after:{a_str} before:{b_str}")
-                              cur = nxt + datetime.timedelta(days=1)
-                          return slices
-                      except Exception:
-                          return [date_op.strip()] if date_op.strip() else []
-
-                  if clean_q:
-                      s_queries.append((f'"{resolved_ch}" {clean_q}{date_op}', ""))
-                      s_queries.append((f'"{resolved_ch}" {clean_q}{date_op}', sp_code))
-                      if en_query and en_query.lower() != clean_q.lower():
-                          s_queries.append((f'"{resolved_ch}" {en_query}{date_op}', ""))
-                          s_queries.append((f'"{resolved_ch}" {en_query}{date_op}', sp_code))
-                      if season_info:
-                          for sl_op in build_date_slices(season_info[0], season_info[1]):
-                              s_queries.append((f'"{resolved_ch}" {clean_q} {sl_op}', ""))
-                  elif season_info:
-                      s_y1, s_y2 = season_info[0][:4], season_info[1][:4]
-                      # א. חלוקה ל-8 חלונות זמן של 45 יום לאורך כל העונה (כדי שיוטיוב לא יחתוך תוצאות!)
-                      for sl_op in build_date_slices(season_info[0], season_info[1]):
-                          s_queries.append((f'"{resolved_ch}" {sl_op}', ""))
-                          s_queries.append((f'"{resolved_ch}" {sl_op}', sp_code))
-                          s_queries.append((f'"{resolved_ch}" תקציר {sl_op}', ""))
-                      # ב. סריקה ממוקדת של כל הקבוצות והליגות המרכזיות בעונה הזו
-                      topic_Boosters = [
-                          "תקציר", "תקציר מורחב", "מחזור", "ברצלונה", "ריאל מדריד", "אתלטיקו",
-                          "מילאן", "אינטר", "יובנטוס", "נאפולי", "רומא", "לאציו",
-                          "מכבי תל אביב", "מכבי חיפה", "הפועל", "בית\"ר", "נבחרת",
-                          "ליגת העל", "לה ליגה", "סרייה א", "דרבי", "קלאסיקו",
-                          "Highlights", "Resumen", f"{s_y1}/{s_y2[-2:]}"
-                      ]
-                      for tb in topic_Boosters:
-                          s_queries.append((f'"{resolved_ch}" {tb}{date_op}', ""))
-
-                  with ThreadPoolExecutor(max_workers=14) as ex:
-                      for b in ex.map(lambda q_pair: fetch_search(q_pair[0], q_pair[1], 300, uc_id, resolved_ch), s_queries):
-                          for it_b in b:
-                              it_b["matched_date_op"] = True
-                          raw.extend(b)
-
-              # 3. שאיבת כל הפלייליסטים הרשמיים של הערוץ (ליגה ספרדית, איטלקית, ליגת העל וכו') — חושף גם תקצירים מוגבלי-מדינה לישראל מכל השנים!
-              def fetch_channel_playlists_videos(uc_id_str: str, ch_title_str: str):
-                  if not uc_id_str: return []
-                  api_url = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false"
-                  ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
-                  pl_ids = []
-                  try:
-                      r = requests.post(api_url, headers=build_headers(), json={"context": ctx, "browseId": uc_id_str, "params": "EglwbGF5bGlzdHPyBgQKAkIA"}, timeout=15)
-                      if r.status_code == 200:
-                          for m_pl in re.finditer(r'"playlistId"\s*:\s*"(PL[a-zA-Z0-9_-]{16,})"', r.text):
-                              pid = m_pl.group(1)
-                              if pid not in pl_ids:
-                                  pl_ids.append(pid)
-                  except Exception:
-                      pass
-                  if not pl_ids:
-                      return []
-                  out_pl_vids = []
+              if clean_q:
+                  s_qs = [(f'"{resolved_ch}" {eq}{date_op}', "") for eq in expanded_queries[:4]] + [(f'"{resolved_ch}" {eq}{date_op}', sp_code) for eq in expanded_queries[:2]]
                   with ThreadPoolExecutor(max_workers=8) as ex:
-                      for b in ex.map(lambda pid: fetch_playlist_browse("VL" + pid, ch_title_str, uc_id_str, 25, 500), pl_ids[:30]):
-                          out_pl_vids.extend(b)
-                  return out_pl_vids
-
-              if season_info and uc_id:
-                  pl_vids = fetch_channel_playlists_videos(uc_id, resolved_ch)
-                  if clean_q:
-                      q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
-                      for v in pl_vids:
-                          if any(w in str(v.get("title") or "").lower() for w in q_words):
-                              raw.append(v)
-                  else:
-                      raw.extend(pl_vids)
-
-                  # סריקת לשונית הפופולריים והישנים של הערוץ עם סינון מוקדם של סרטונים חדשים מ-2026!
-                  for s_mode in ("views", "date_asc"):
-                      ch_part = fetch_channel_vids(ch_base, uc_id, resolved_ch, s_mode, 500)
-                      for v in ch_part:
-                          rel_l = str(v.get("published_rel") or "").lower()
-                          if season_info[1] < "20260101" and any(w_k in rel_l for w_k in ("hour", "minute", "day", "week", "month", "שעה", "יום", "שבוע", "חודש")):
-                              continue
-                          if clean_q:
-                              q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
-                              if any(w in str(v.get("title") or "").lower() for w in q_words):
-                                  raw.append(v)
-                          else:
-                              raw.append(v)
-              else:
-                  ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 600))
-                  if clean_q:
-                      q_words = [w.lower() for w in (clean_q + " " + en_query).split() if len(w) >= 2]
-                      for v in ch_all:
-                          if any(w in str(v.get("title") or "").lower() for w in q_words):
-                              raw.append(v)
-                  else:
-                      raw.extend(ch_all)
+                      for b in ex.map(lambda p: fetch_search(p[0], p[1], 180, uc_id, resolved_ch), s_qs): raw.extend(b)
+              ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 500))
+              if clean_q:
+                  q_words = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3]
+                  raw.extend([v for v in ch_all if any(w in str(v.get("title") or "").lower() for w in q_words)])
+              else: raw.extend(ch_all)
           else:
-              q_main = f"{clean_q or query}{date_op}".strip()
-              jobs = [(q_main, ""), (q_main, sp_code)]
-              if en_query and en_query.lower() != (clean_q or query).lower():
-                  en_main = f"{en_query}{date_op}".strip()
-                  jobs.extend([(en_main, ""), (en_main, sp_code)])
-              with ThreadPoolExecutor(max_workers=4) as ex:
-                  for b in ex.map(lambda j: fetch_search(j[0], j[1], max(200, max_results + 60)), jobs): raw.extend(b)
+              jobs = []
+              for idx_q, eq in enumerate(expanded_queries):
+                  jobs.append((f"{eq}{date_op}".strip(), ""))
+                  if idx_q < 3: jobs.append((f"{eq}{date_op}".strip(), sp_code))
+              per_q_cap = max(80, min(180, (max_results * 2) // max(1, len(expanded_queries)) + 40))
+              with ThreadPoolExecutor(max_workers=8) as ex:
+                  for b in ex.map(lambda j: fetch_search(j[0], j[1], per_q_cap), jobs): raw.extend(b)
 
           seen_ids = {direct_vid} if (is_similar and direct_vid) else (set() if (channel_input or direct_vid) else set(exclude))
           cands = []
           for idx_pos, e in enumerate(raw):
-              vid = e.get("id")
-              title = (e.get("title") or "").strip()
+              vid, title = e.get("id"), (e.get("title") or "").strip()
               if not vid or vid in seen_ids or len(vid) != 11 or not title: continue
-              e_cid = str(e.get("channel_id") or "").strip()
-              e_ch = str(e.get("channel") or e.get("uploader") or "").strip()
-              # נעילת ערוץ הרמטית:
-              if target_uc_id and e_cid and e_cid != target_uc_id and e_cid not in allowed_uc_ids:
-                  continue
-              if channel_input and resolved_ch and not e_cid and e_ch and e_ch.strip().lower() != resolved_ch.strip().lower():
-                  continue
+              e_cid, e_ch = str(e.get("channel_id") or "").strip(), str(e.get("channel") or e.get("uploader") or "").strip()
+              if target_uc_id and e_cid and e_cid != target_uc_id and e_cid not in allowed_uc_ids: continue
+              if channel_input and resolved_ch and not e_cid and e_ch and e_ch.strip().lower() != resolved_ch.strip().lower(): continue
               seen_ids.add(vid)
-              cands.append({
-                  "id": vid, "title": title, "url": f"https://www.youtube.com/watch?v={vid}",
-                  "channel": resolved_ch if channel_input else (e_ch or resolved_ch),
-                  "channel_id": e_cid or "",
-                  "views": parse_views_text(e.get("view_count") or 0), "likes": int(e.get("like_count") or 0),
-                  "upload_date": str(e.get("upload_date") or "").strip().replace("-", ""),
-                  "published_rel": str(e.get("published_rel") or ""), "max_height": 0, "orig_pos": idx_pos,
-                  "matched_date_op": bool(e.get("matched_date_op")),
-                  "duration": int(e.get("duration") or 0), "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
-              })
+              cands.append({"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","channel":resolved_ch if channel_input else (e_ch or resolved_ch),"channel_id":e_cid,"views":parse_views_text(e.get("view_count") or 0),"likes":int(e.get("like_count") or 0),"upload_date":str(e.get("upload_date") or "").strip().replace("-",""),"published_rel":str(e.get("published_rel") or ""),"max_height":0,"orig_pos":idx_pos,"matched_date_op":bool(e.get("matched_date_op")),"duration":int(e.get("duration") or 0),"thumbnail":f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"})
 
-          cap_pool = max(max_results + 150, 900)
-          if sort_by in ("views", "likes", "quality_score"):
-              cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
+          GAMING_RX = re.compile(r"\b(fifa\s*\d*|ea\s*fc\s*\d*|fc\s*2[4567]|efootball|pes\s*\d*|fc\s*mobile|dream\s*league|dls\s*\d*|football\s*manager|fm2[3456]|career\s*mode|pack\s*opening|fut\s*draft|sbc|ultimate\s*team|new\s*showtime|pesmaster|eafc|gameplay)\b", re.I)
+          if no_gaming: cands = [c for c in cands if not GAMING_RX.search(f"{c['title']} {c['channel']}")]
+          if exclude_terms: cands = [c for c in cands if not any(w in f"{c['title']} {c['channel']}".lower() for w in exclude_terms)]
+
+          cap_pool = max(max_results + 150, 420)
+          if sort_by in ("views","likes","quality_score"): cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
           selected_pool = cands[:cap_pool]
 
           thread_local = threading.local()
@@ -628,20 +430,18 @@ jobs:
                   s = requests.Session(); s.headers.update(build_headers()); thread_local.s = s
               return thread_local.s
 
-          MONTHS = {"jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06", "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12"}
+          MONTHS = {"jan":"01","feb":"02","mar":"03","apr":"04","may":"05","jun":"06","jul":"07","aug":"08","sep":"09","oct":"10","nov":"11","dec":"12"}
           def parse_dt(d_str: str) -> str:
               s = str(d_str or "").strip()
               m1 = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
               if m1: return f"{m1.group(1)}{m1.group(2)}{m1.group(3)}"
               m2 = re.search(r"([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+(\d{4})", s)
-              if m2: return f"{m2.group(3)}{MONTHS.get(m2.group(1).lower(), '01')}{m2.group(2).zfill(2)}"
-              return ""
+              return f"{m2.group(3)}{MONTHS.get(m2.group(1).lower(),'01')}{m2.group(2).zfill(2)}" if m2 else ""
 
           def enrich(c):
-              sess = get_sess(); vid = c["id"]
-              # 1. קריאה ל-/youtubei/v1/next שמחזירה תמיד כותרת, ערוץ, צפיות ותאריך מדויק גם לסרטונים שחסומים גיאוגרפית בארה"ב (Geo-Blocked to IL)!
+              sess, vid = get_sess(), c["id"]
               try:
-                  rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "IL"}}, "videoId": vid}, timeout=10)
+                  rn = sess.post("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00","hl":"en","gl":"IL"}},"videoId":vid}, timeout=10)
                   if rn.status_code == 200:
                       rt = rn.text
                       if not c.get("channel_id"):
@@ -653,7 +453,7 @@ jobs:
                       if not c.get("upload_date"):
                           md = re.search(r'"dateText"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"', rt)
                           if md:
-                              raw_dt = md.group(1).replace("Premiered ", "").replace("Streamed live on ", "").strip()
+                              raw_dt = md.group(1).replace("Premiered ","").replace("Streamed live on ","").strip()
                               p_dt = parse_dt(raw_dt)
                               if p_dt: c["upload_date"] = p_dt
                               else: c["published_rel"] = raw_dt
@@ -663,15 +463,10 @@ jobs:
                       if c["likes"] == 0:
                           ml = re.search(r'"likeCount"\s*:\s*(\d+)', rt)
                           if ml: c["likes"] = int(ml.group(1))
-                          else:
-                              mf = re.search(r'"factoidRenderer"\s*:\s*\{\s*"value"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"\s*\}\s*,\s*"label"\s*:\s*\{\s*"simpleText"\s*:\s*"Likes"', rt)
-                              if mf: c["likes"] = parse_views_text(mf.group(1))
               except Exception: pass
-
-              # 2. השלמה מ-/youtubei/v1/player (אורך סרטון ורזולוציה)
               if not c.get("upload_date") or not c.get("duration") or not c.get("channel_id"):
                   try:
-                      r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "IL"}}, "videoId": vid}, timeout=10)
+                      r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00","hl":"en","gl":"IL"}},"videoId":vid}, timeout=10)
                       if r.status_code == 200:
                           pd = r.json(); vd = pd.get("videoDetails") or {}; mf = (pd.get("microformat") or {}).get("playerMicroformatRenderer") or {}
                           if vd.get("channelId"): c["channel_id"] = str(vd["channelId"]).strip()
@@ -686,209 +481,202 @@ jobs:
                   except Exception: pass
 
           if selected_pool:
-              with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:900]))
+              with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:600]))
 
-          # 1. נעילת ערוץ הרמטית 100% לאחר ה-enrich: זורק כל סרטון שאינו שייך ל-target_uc_id!
-          if allowed_uc_ids:
-              selected_pool = [c for c in selected_pool if c.get("channel_id") in allowed_uc_ids or str(c.get("channel") or "").strip().lower() in allowed_ch_names]
-          elif channel_input and resolved_ch:
-              selected_pool = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
-
-          # 2. סינון לפי עונה היסטורית (אם נבחרה):
+          if allowed_uc_ids: selected_pool = [c for c in selected_pool if c.get("channel_id") in allowed_uc_ids or str(c.get("channel") or "").strip().lower() in allowed_ch_names]
+          elif channel_input and resolved_ch: selected_pool = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
           if season_info:
               s_min, s_max, _ = season_info
-              season_filtered = []
-              for c in selected_pool:
-                  up = str(c.get("upload_date") or "")
-                  if up:
-                      if s_min <= up <= s_max:
-                          season_filtered.append(c)
-                  elif c.get("matched_date_op"):
-                      # הגיע מחיפוש יוטיוב עם אופרטור after:YYYY-MM-DD before:YYYY-MM-DD
-                      season_filtered.append(c)
-              selected_pool = season_filtered
+              selected_pool = [c for c in selected_pool if (s_min <= str(c.get("upload_date") or "") <= s_max) or (not c.get("upload_date") and c.get("matched_date_op"))]
 
-          # 3. סינון לפי אורך סרטון:
           def match_dur(c):
-              d = int(c.get("duration") or 0)
-              t_low = str(c.get("title") or "").lower()
-              if high_quality_only and ("#shorts" in t_low or (0 < d < 65)):
-                  return False
-              if dur_filter == "no_shorts":
-                  return d == 0 or d >= 61
-              if dur_filter == "clips":
-                  return d == 0 or (60 <= d <= 1200)
-              if dur_filter == "long":
-                  return d >= 1200
-              if dur_filter == "short5":
-                  return 0 < d <= 300
+              d, tl = int(c.get("duration") or 0), str(c.get("title") or "").lower()
+              if high_quality_only and ("#shorts" in tl or (0 < d < 65)): return False
+              if dur_filter == "no_shorts": return d == 0 or d >= 61
+              if dur_filter == "clips": return d == 0 or (60 <= d <= 1200)
+              if dur_filter == "long": return d >= 1200
+              if dur_filter == "short5": return 0 < d <= 300
               return True
-
           selected_pool = [c for c in selected_pool if match_dur(c)]
+          if high_quality_only: selected_pool = [c for c in selected_pool if (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
+          if min_views > 0: selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
 
-          if high_quality_only:
-              selected_pool = [c for c in selected_pool if (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
-
-          if min_views > 0:
-              selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
-
-          if sort_by == "likes":
-              selected_pool.sort(key=lambda x: (int(x.get("likes") or 0), int(x.get("views") or 0)), reverse=True)
-          elif sort_by == "quality_score":
-              selected_pool.sort(key=lambda x: (int(x.get("max_height") or 0) >= 1080, int(x.get("likes") or 0) * 25 + int(x.get("views") or 0)), reverse=True)
-          elif sort_by == "date_desc":
-              selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "00000000"), -int(x.get("orig_pos") or 0)), reverse=True)
-          elif sort_by == "date_asc":
-              selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "99999999"), int(x.get("orig_pos") or 0)), reverse=False)
-          else:
-              selected_pool.sort(key=lambda x: (int(x.get("views") or 0), int(x.get("likes") or 0)), reverse=True)
-
+          # סינון ודירוג AI ב-Gemini 3.5 Flash-Lite
           ai_status = ""
-          gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
           if filter_prompt:
-              if not gemini_key:
-                  ai_status = "⚠️ סינון AI לא פעיל (חסר GEMINI_API_KEY ב-Secrets)"
-                  print("AI filter requested but GEMINI_API_KEY secret is missing.", flush=True)
+              if not gemini_key: ai_status = "⚠️ סינון AI כבוי (חסר GEMINI_API_KEY ב-Secrets)"
               elif selected_pool:
-                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 120))]
-                  compact_items = [{"i": idx, "t": it.get("title", ""), "c": it.get("channel", "")} for idx, it in enumerate(ai_slice)]
+                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 160))]
+                  compact = [{"i": idx, "t": it.get("title", ""), "c": it.get("channel", ""), "d": it.get("duration", 0)} for idx, it in enumerate(ai_slice)]
                   ai_prompt = (
-                      f"Filter the following YouTube video list according to this user instruction: {filter_prompt}\n"
-                      "Return ONLY a valid JSON array of integer indices (\"i\") of the videos that match. Example: [0, 2, 5]\n"
-                      f"Videos: {json.dumps(compact_items, ensure_ascii=False)}"
+                      f"Context: Query={query or 'N/A'} | Channel={resolved_ch or 'Any'} | ContentType={content_type}\n"
+                      f"Strict user filter rule: {filter_prompt}\n"
+                      "Score each video 1-10 for relevance and strict compliance with the filter rule. Drop anything irrelevant or non-compliant (score < 5).\n"
+                      "Return ONLY JSON: {\"keep\": [{\"i\": 0, \"s\": 9}]}\n"
+                      f"Videos: {json.dumps(compact, ensure_ascii=False)}"
                   )
-                  ai_ok = False
-                  for model_name in ("gemini-2.5-flash", "gemini-2.0-flash"):
-                      try:
-                          g_res = requests.post(
-                              f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                              headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key},
-                              json={
-                                  "contents": [{"parts": [{"text": ai_prompt}]}],
-                                  "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
-                              },
-                              timeout=30
-                          )
-                          if g_res.status_code == 200:
-                              g_txt = g_res.json()["candidates"][0]["content"]["parts"][0]["text"]
-                              m_arr = re.search(r"\[[\d,\s]*\]", g_txt)
-                              if m_arr:
-                                  keep_idxs = set(json.loads(m_arr.group(0)))
-                                  filtered_pool = [it for idx, it in enumerate(ai_slice) if idx in keep_idxs]
-                                  if filtered_pool:
-                                      selected_pool = filtered_pool
-                                      ai_status = f"🤖 סינון AI ({len(filtered_pool)}/{len(ai_slice)})"
-                                      print(f"AI filter ({model_name}) kept {len(filtered_pool)}/{len(ai_slice)} items.", flush=True)
-                                  else:
-                                      ai_status = "🤖 סינון AI לא מצא התאמה (מוצגות כל התוצאות)"
-                                  ai_ok = True
-                                  break
-                          else:
-                              print(f"Gemini {model_name} HTTP {g_res.status_code}", flush=True)
-                      except Exception as ai_err:
-                          print(f"Gemini {model_name} error: {ai_err}", flush=True)
-                  if not ai_ok and not ai_status:
-                      ai_status = "⚠️ סינון AI נכשל זמנית"
+                  g_data, m_used = call_gemini_json(ai_prompt, timeout_sec=35)
+                  if isinstance(g_data, dict) and isinstance(g_data.get("keep"), list):
+                      score_map = {r["i"]: min(10, max(5, int(r.get("s") or 7))) for r in g_data["keep"] if isinstance(r, dict) and isinstance(r.get("i"), int) and int(r.get("s") or 7) >= 5}
+                      filtered = []
+                      for idx, it in enumerate(ai_slice):
+                          if idx in score_map: it["ai_score"] = score_map[idx]; filtered.append(it)
+                      if filtered: selected_pool = filtered; ai_status = f"🤖 {m_used} ({len(filtered)}/{len(ai_slice)})"
+                      else: ai_status = f"🤖 {m_used} (מוצגות כל התוצאות)"
+                  else: ai_status = "⚠️ סינון AI נכשל זמנית"
+
+          if sort_by == "relevance": selected_pool.sort(key=lambda x: (int(x.get("ai_score") or 0), int(x.get("views") or 0)), reverse=True)
+          elif sort_by == "likes": selected_pool.sort(key=lambda x: (int(x.get("likes") or 0), int(x.get("views") or 0)), reverse=True)
+          elif sort_by == "quality_score": selected_pool.sort(key=lambda x: (int(x.get("max_height") or 0) >= 1080, int(x.get("likes") or 0) * 25 + int(x.get("views") or 0)), reverse=True)
+          elif sort_by == "date_desc": selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "00000000"), -int(x.get("orig_pos") or 0)), reverse=True)
+          elif sort_by == "date_asc": selected_pool.sort(key=lambda x: (str(x.get("upload_date") or "99999999"), int(x.get("orig_pos") or 0)), reverse=False)
+          else: selected_pool.sort(key=lambda x: (int(x.get("views") or 0), int(x.get("likes") or 0)), reverse=True)
 
           pool = selected_pool[:max_results]
 
-          def translate_titles_properly(items_arr):
-              def pre_clean(t: str) -> str:
-                  s = re.sub(r"[\u2066-\u2069]", "", str(t or ""))
-                  s = re.sub(r"\bEXTENDED HIGHLIGHTS\b", "תקציר מורחב", s, flags=re.I)
-                  s = re.sub(r"\b(?:HIGHLIGHTS|HHIHLIGHTS|RESUMEN)\b", "תקציר", s, flags=re.I)
-                  s = re.sub(r"\b(?:FULL MATCH|PARTIDO COMPLETO|PARTIDO ENTERO)\b", "משחק מלא", s, flags=re.I)
-                  s = re.sub(r"\bFC Barcelona\b|\bBarça\b", "ברצלונה", s, flags=re.I)
-                  s = re.sub(r"\bReal Madrid\b", "ריאל מדריד", s, flags=re.I)
-                  s = re.sub(r"\bAtl[eé]tico de Madrid\b", "אתלטיקו מדריד", s, flags=re.I)
-                  s = re.sub(r"\bLa\s*Mas[ií]a\b", "לה מאסיה", s, flags=re.I)
-                  s = re.sub(r"\bOrian Goren\b", "אוריין גורן", s, flags=re.I)
-                  s = re.sub(r"\bLamine Yamal\b", "לאמין ימאל", s, flags=re.I)
-                  s = re.sub(r"\bPau Cubars[ií]\b", "פאו קובארסי", s, flags=re.I)
-                  s = re.sub(r"\bJoan Garc[ií]a\b", "ז'ואן גרסיה", s, flags=re.I)
-                  return s.strip()
+          # 100% תרגום עברית מלא (כולל שמות קבוצות, שחקנים וטורנירים + סיבוב אימות שני!)
+          def strip_noise(t: str) -> str:
+              return re.sub(r"\s+", " ", re.sub(r"#[a-zA-Z0-9_\u0590-\u05FF]+", "", re.sub(r"[\u2066-\u2069\u200e\u200f]", "", str(t or "")))).strip()
 
-              def needs_he_translation(txt: str) -> bool:
-                  he_cnt = sum(1 for ch in txt if "\u0590" <= ch <= "\u05FF")
-                  non_he_letters = sum(1 for ch in txt if ch.isalpha() and not ("\u0590" <= ch <= "\u05FF"))
-                  return non_he_letters >= 2 and non_he_letters > (he_cnt * 0.4)
+          HE_POST = [
+              (r"\bEXTENDED HIGHLIGHTS\b", "תקציר מורחב"), (r"\b(?:HIGHLIGHTS|HHIHLIGHTS|RESUMEN)\b", "תקציר"),
+              (r"\b(?:FULL MATCH|PARTIDO COMPLETO|PARTIDO ENTERO)\b", "משחק מלא"), (r"\bFIRST TEAM\b", "הקבוצה הבוגרת"),
+              (r"\bBEST OF\b", "מיטב הרגעים של"), (r"\bFINAL\b", "גמר"), (r"\bVS\.?\b", "נגד"),
+              (r"\bFC Barcelona\b|\bBarça\b|\bBarcelona\b", "ברצלונה"), (r"\bReal Madrid\b", "ריאל מדריד"),
+              (r"\bAtl[eé]tico de Madrid\b", "אתלטיקו מדריד"), (r"\bValencia\b", "ולנסיה"), (r"\bSevilla\b", "סביליה"),
+              (r"\bReal Betis\b", "ריאל בטיס"), (r"\bGirona\s*FC\b|\bGirona\b", "ג'ירונה"), (r"\bVillarreal\b", "ויאריאל"),
+              (r"\bMalaga\s*CF\b|\bM[aá]laga\b", "מלאגה"), (r"\bAtalanta\b", "אטאלנטה"), (r"\bAl Ahly\b", "אל-אהלי"),
+              (r"\bLa\s*Mas[ií]a\b|לה מסיה|לה מאסה", "לה מאסיה"), (r"\bLALIGA EA SPORTS\b|\bLALIGA\b", "לה ליגה"),
+              (r"\bOrian Goren\b", "אוריין גורן"), (r"\bLamine Yamal\b|למין ימל|לאמין ימל", "לאמין ימאל"),
+              (r"\bPau Cubars[ií]\b", "פאו קובארסי"), (r"\bJoan Garc[ií]a\b|חואן גרסיה|חואן גארסיה", "ז'ואן גרסיה"),
+              (r"\bLionel Messi\b|\bLeo Messi\b", "ליונל מסי"), (r"\bAnsu Fati\b", "אנסו פאטי"), (r"\bGavi\b", "גאבי"),
+              (r"\bMarc Bernal\b", "מארק ברנאל"), (r"\bDani Olmo\b", "דני אולמו"), (r"\bFerm[ií]n\b", "פרמין"),
+              (r"\bEric Garc[ií]a\b", "אריק גרסיה"), (r"\bAndr[eé]s Iniesta\b", "אנדרס אינייסטה"),
+              (r"\bדגשים\b|\bהבהרה\b|\bהבהרות\b", "תקציר")
+          ]
+          def polish_he(t: str) -> str:
+              s = strip_noise(t)
+              for pat, rep in HE_POST: s = re.sub(pat, rep, s, flags=re.I)
+              return re.sub(r"\s+", " ", s).strip()
 
+          def has_foreign_words(txt: str) -> bool:
+              return sum(1 for ch in txt if ch.isalpha() and not ("\u0590" <= ch <= "\u05FF")) >= 3
+
+          def gtrans_post(q_txt: str, sl: str = "auto") -> str:
+              for cid in ("gtx", "dict-chrome-ex"):
+                  try:
+                      r = requests.post("https://translate.googleapis.com/translate_a/single", params={"client":cid,"sl":sl,"tl":"iw","dt":"t","dj":"1"}, data={"q":q_txt}, headers={"User-Agent":UA_STR,"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8"}, timeout=14)
+                      if r.status_code == 200:
+                          tr = "".join(s.get("trans","") for s in (r.json().get("sentences") or []) if "trans" in s).strip()
+                          if tr: return tr
+                  except Exception: pass
+              return ""
+
+          if translate_titles and pool:
               need_tr = []
-              for idx, it in enumerate(items_arr):
+              for idx, it in enumerate(pool):
                   it["orig_title"] = it["title"]
-                  it["title_he"] = pre_clean(it["title"])
-                  if needs_he_translation(it["title_he"]):
-                      need_tr.append((idx, it["title_he"]))
+                  src = strip_noise(it["title"])
+                  it["title_he"] = src
+                  if has_foreign_words(src): need_tr.append((idx, src))
 
-              def translate_one(text_val: str) -> str:
-                  for client_id in ("gtx", "dict-chrome-ex"):
-                      try:
-                          r = requests.post(
-                              "https://translate.googleapis.com/translate_a/single",
-                              params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
-                              data={"q": text_val},
-                              headers={"User-Agent": UA_STR, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-                              timeout=10
-                          )
-                          if r.status_code == 200:
-                              sents = r.json().get("sentences") or []
-                              tr = "".join(s.get("trans", "") for s in sents if "trans" in s).strip()
-                              if tr:
-                                  return pre_clean(tr)
-                      except Exception:
-                          pass
-                  return text_val
+              remaining = []
+              if gemini_key and need_tr:
+                  for b_s in range(0, len(need_tr), 40):
+                      batch = need_tr[b_s:b_s + 40]
+                      tr_prompt = (
+                          "Translate EVERY SINGLE WORD of every YouTube video title below into 100% pure, natural Israeli Hebrew.\n"
+                          "CRITICAL RULES:\n"
+                          "- Translate/transliterate ALL team names (Valencia->ולנסיה, Sevilla->סביליה, Real Betis->ריאל בטיס, Girona->ג'ירונה, Atalanta->אטאלנטה, Malaga->מלאגה, Al Ahly->אל-אהלי, FC Barcelona->ברצלונה, Real Madrid->ריאל מדריד).\n"
+                          "- Transliterate ALL player names cleanly to Hebrew (Ansu Fati->אנסו פאטי, Gavi->גאבי, Marc Bernal->מארק ברנאל, Dani Olmo->דני אולמו, Fermín->פרמין, Eric García->אריק גרסיה, Andrés Iniesta->אנדרס אינייסטה, Héctor Fort->הקטור פורט, Carles Puyol->קרלס פויול, Joan García->ז'ואן גרסיה, Lamine Yamal->לאמין ימאל).\n"
+                          "- Translate ALL tournament/football words (Highlights->תקציר, Full Match->משחק מלא, Final->גמר, First Team->הקבוצה הבוגרת, Skills & Goals->מהלכים ושערים, Copa del Rey Juvenil->גביע המלך לנוער).\n"
+                          "- Leave ZERO English, Spanish, French, or Arabic words untranslated!\n"
+                          f"Return ONLY a JSON array of exactly {len(batch)} Hebrew strings in the exact same order.\n"
+                          f"Titles: {json.dumps([p[1] for p in batch], ensure_ascii=False)}"
+                      )
+                      g_tr, _ = call_gemini_json(tr_prompt, timeout_sec=35)
+                      if isinstance(g_tr, list) and len(g_tr) == len(batch):
+                          for (item_idx, orig_s), he_t in zip(batch, g_tr):
+                              cleaned_he = polish_he(str(he_t or ""))
+                              pool[item_idx]["title_he"] = cleaned_he
+                              if has_foreign_words(cleaned_he): remaining.append((item_idx, orig_s))
+                      else: remaining.extend(batch)
+              else: remaining = need_tr
 
-              def tr_batch(batch_pairs):
-                  joined = "\n".join(p[1].replace("\n", " ") for p in batch_pairs)
-                  for client_id in ("gtx", "dict-chrome-ex"):
-                      try:
-                          r = requests.post(
-                              "https://translate.googleapis.com/translate_a/single",
-                              params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
-                              data={"q": joined},
-                              headers={"User-Agent": UA_STR, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-                              timeout=15
-                          )
-                          if r.status_code == 200:
-                              sents = r.json().get("sentences") or []
-                              full_tr = "".join(s.get("trans", "") for s in sents if "trans" in s).strip()
-                              lines = [ln.strip() for ln in full_tr.splitlines() if ln.strip()]
-                              if len(lines) == len(batch_pairs):
-                                  for (item_idx, _), tr_line in zip(batch_pairs, lines):
-                                      items_arr[item_idx]["title_he"] = pre_clean(tr_line)
-                                  return
-                      except Exception:
-                          pass
-                  for item_idx, orig_t in batch_pairs:
-                      items_arr[item_idx]["title_he"] = translate_one(orig_t)
+              # סיבוב גיבוי ואימות דרך Google Translate על מקור נקי לכל כותרת שנותרו בה מילים זרות
+              def _tr_g_batch(bp):
+                  full_tr = gtrans_post("\n".join(p[1].replace("\n"," ") for p in bp), "auto")
+                  lines = [ln.strip() for ln in full_tr.splitlines() if ln.strip()] if full_tr else []
+                  if len(lines) == len(bp):
+                      for (i_idx, orig_s), tr_l in zip(bp, lines):
+                          out_he = polish_he(tr_l)
+                          if has_foreign_words(out_he):
+                              tr2 = gtrans_post(out_he, "en")
+                              if tr2: out_he = polish_he(tr2)
+                          pool[i_idx]["title_he"] = out_he
+                      return
+                  for i_idx, orig_s in bp:
+                      t1 = polish_he(gtrans_post(orig_s, "auto") or orig_s)
+                      if has_foreign_words(t1): t1 = polish_he(gtrans_post(t1, "en") or t1)
+                      pool[i_idx]["title_he"] = t1
 
-              if need_tr:
-                  batches = [need_tr[i:i + 15] for i in range(0, len(need_tr), 15)]
+              if remaining:
                   with ThreadPoolExecutor(max_workers=4) as ex:
-                      list(ex.map(tr_batch, batches))
+                      list(ex.map(_tr_g_batch, [remaining[i:i+15] for i in range(0, len(remaining), 15)]))
 
-          if translate_titles:
-              translate_titles_properly(pool)
+          # ====================================================================
+          # הזרמת תמונות ממוזערות חדות (hqdefault 480x360 -> Crop 16:9 -> WebP 82% Base64!)
+          # ====================================================================
+          def fetch_sharp_webp_thumb(item):
+              vid = item.get("id", "")
+              if not vid: return
+              sess = get_sess()
+              for u in (f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"):
+                  try:
+                      r = sess.get(u, timeout=7)
+                      if r.status_code == 200 and len(r.content) > 1200:
+                          im = Image.open(io.BytesIO(r.content)).convert("RGB")
+                          w, h = im.size
+                          # חיתוך פסי ה-Letterbox השחורים של hqdefault (480x360 -> 480x270 16:9 חד!)
+                          if w == 480 and h == 360: im = im.crop((0, 45, 480, 315))
+                          elif w == 640 and h == 480: im = im.crop((0, 60, 640, 420))
+                          im = im.resize((320, 180), Image.Resampling.LANCZOS)
+                          buf = io.BytesIO()
+                          im.save(buf, format="WEBP", quality=82, method=4)
+                          b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                          item["thumbnail"] = f"data:image/webp;base64,{b64}"
+                          return
+                  except Exception:
+                      pass
+
+          if pool:
+              with ThreadPoolExecutor(max_workers=24) as ex:
+                  list(ex.map(fetch_sharp_webp_thumb, pool[:180]))
+
+          # הצעות חיפוש גיבוי אם Gemini לא החזיר
+          if not suggested_searches and (clean_q or resolved_ch):
+              base_t = clean_q or resolved_ch
+              suggested_searches = [f"{base_t} תקציר", f"{base_t} דוקומנטרי", f"{base_t} שערים ומהלכים", f"{base_t} משחק מלא", f"{base_t} ראיון"]
 
           for item in pool:
-              item.pop("orig_pos", None)
-              item.pop("matched_date_op", None)
-              item.pop("channel_id", None)
+              item.pop("orig_pos", None); item.pop("matched_date_op", None); item.pop("channel_id", None)
               rd = str(item.get("upload_date") or "").strip()
-              d_disp = f"{rd[6:8]}/{rd[4:6]}/{rd[0:4]}" if (len(rd) == 8 and rd.isdigit()) else item.get("published_rel", "")
-              item["date_formatted"] = d_disp
+              item["date_formatted"] = f"{rd[6:8]}/{rd[4:6]}/{rd[0:4]}" if (len(rd) == 8 and rd.isdigit()) else item.get("published_rel", "")
               mh = int(item.get("max_height") or 0)
               qb = "4K" if mh >= 2160 else ("1440p" if mh >= 1440 else ("1080p HD" if mh >= 1080 else ("720p" if mh >= 720 else (f"{mh}p" if mh > 0 else ""))))
               item["quality_badge"] = qb
               item["channel"] = " • ".join(p for p in [item["channel"], f"🎬 {qb}" if qb else ""] if p)
               if item.get("title_he"): item["title"] = item["title_he"]
 
-          payload_bytes = json.dumps({"query": query, "channel": resolved_ch or channel_input, "sort_by": sort_by, "ai_status": ai_status, "items": pool}, ensure_ascii=False).encode("utf-8")
+          payload_bytes = json.dumps({
+              "query": query, "en_query": en_query, "expanded_queries": expanded_queries,
+              "suggested_searches": suggested_searches, "channel": resolved_ch or channel_input,
+              "sort_by": sort_by, "ai_status": ai_status, "items": pool
+          }, ensure_ascii=False).encode("utf-8")
           with open("recommendations.json", "wb") as f: f.write(payload_bytes)
           gh_repo = os.environ["GH_REPO"]; gh_token = os.environ["GH_TOKEN"]
-          r = requests.post(f"https://api.github.com/repos/{gh_repo}/git/blobs", headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}, json={"content": base64.b64encode(payload_bytes).decode("ascii"), "encoding": "base64"}, timeout=60)
+          r = requests.post(f"https://api.github.com/repos/{gh_repo}/git/blobs", headers={"Authorization":f"Bearer {gh_token}","Accept":"application/vnd.github+json"}, json={"content":base64.b64encode(payload_bytes).decode("ascii"),"encoding":"base64"}, timeout=60)
           sha = r.json().get("sha", "") if r.status_code == 201 else ""
           tag = f"rec-{req_id}"
-          subprocess.run(["gh", "release", "create", tag, "recommendations.json", "--repo", gh_repo, "--title", tag, "--notes", json.dumps({"blobs": [sha] if sha else [], "count": len(pool)})], capture_output=True, text=True, check=False)
+          subprocess.run(["gh","release","create",tag,"recommendations.json","--repo",gh_repo,"--title",tag,"--notes",json.dumps({"blobs":[sha] if sha else [],"count":len(pool)})], capture_output=True, text=True, check=False)
           EOF
