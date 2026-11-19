@@ -350,18 +350,19 @@ jobs:
                   lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
                   exp_prompt = (
                       f"Current date: November 2026 (Current sports season: 2026/27; recent season: 2025/26).\n"
-                      f"User topic: \"{clean_q}\" | Languages: {lang_desc} | Content preference: {content_type}.\n"
-                      "Task 1 - Search Queries: Generate 6 diverse YouTube search queries across the requested languages (native club/player spellings, highlights/documentaries/recent 2025-2026 videos; exclude FIFA/EA FC/PES).\n"
+                      f"User input (may be a short keyword OR a free-form natural-language request): \"{clean_q}\"\n"
+                      f"Target Languages: {lang_desc} | Content preference: {content_type}.\n"
+                      "You are an expert YouTube Research & Discovery Strategist. The user relies on YOU to turn vague ideas or broad topics into real, high-signal YouTube search queries that uncover both direct hits AND hidden gems they didn't think to type.\n"
+                      "Task 1 - Search Queries: Generate 11 diverse, realistic YouTube search queries (2 to 6 words each — how real creators title videos!) across the target languages, split into 3 buckets:\n"
+                      "  1) 5 Direct / Conceptual / Analytical queries: convert the user's intent (even if phrased as a question like 'how much does La Masia contribute under Flick') into exact YouTube title keywords (tactical analysis, documentary, breakdown, stats, story, podcast, 2025/2026).\n"
+                      "  2) 4 Hidden Gems & Related Entities queries: identify specific rising/lesser-known players, goalkeepers, coaches, youth squads, derbies, or full matches tightly connected to the topic that the user didn't explicitly name (e.g., for La Masia: specific prospects like Aron Yaakobishvili, Ebrima Tunkara, Toni/Guille Fernandez, Xavi Espart, Orian Goren, Juvenil A full matches, Barca Atletic).\n"
+                      "  3) 2 Native-language deep-dive / full-match / podcast queries in the target languages (never include FIFA/EA FC/PES/gaming).\n"
                       "Task 2 - Clickable YouTube Follow-Up Suggestions (Hebrew): Generate 14 SHORT, punchy, REAL YouTube search terms in Hebrew (STRICTLY 2 to 5 words each!).\n"
-                      "NEVER write long questions, essay titles, or phrases starting with 'איך...', 'הסיפור מאחורי...', 'ההשוואה בין...', 'השפעת...'. No question marks!\n"
-                      "Cover ALL 4 diverse angles:\n"
-                      "  a) 4 fresh 2026 / 2025-26 queries (e.g. '<topic> 2026', '<topic> 2026/27', 'כישרונות חדשים <topic> 2026', 'שערים <topic> 2026').\n"
-                      "  b) 4 specific current/rising players, coaches, or sub-teams directly related to the topic (real 2025/2026 names!).\n"
-                      "  c) 3 specific video formats (e.g. 'תקציר ...', 'משחק מלא ...', 'אימון ...', 'ליגת האלופות לנוער ...', 'ראיון ...').\n"
-                      "  d) 3 broader/alternative exciting angles (derbies, classic matches, academy vs academy, podcasts).\n"
+                      "NEVER write long questions or phrases starting with 'איך...', 'הסיפור מאחורי...', 'ההשוואה בין...', 'השפעת...'. No question marks!\n"
+                      "Cover ALL 4 angles: (a) 4 fresh 2026 / 2025-26 queries, (b) 4 specific current/rising players/prospects/coaches, (c) 3 specific formats (תקציר / משחק מלא / ניתוח טקטי / פודקאסט / אימון), (d) 3 exciting related angles.\n"
                       "Return ONLY JSON: {\"queries\": [...], \"suggestions_he\": [...]}"
                   )
-                  g_exp, _ = call_gemini_json(exp_prompt, timeout_sec=20)
+                  g_exp, _ = call_gemini_json(exp_prompt, timeout_sec=24)
                   if isinstance(g_exp, dict):
                       if expand_queries and isinstance(g_exp.get("queries"), list):
                           for q_c in g_exp["queries"]:
@@ -378,7 +379,7 @@ jobs:
                       for rq in ex.map(_tr_lg, search_langs[:5]):
                           if rq and rq.lower() not in [x.lower() for x in expanded_queries]: expanded_queries.append(rq)
 
-          expanded_queries = expanded_queries[:7]
+          expanded_queries = expanded_queries[:12]
           en_query = expanded_queries[1] if len(expanded_queries) > 1 else ""
           sp_code = {"views":"CAMSAhAB","date_desc":"CAI%3D","likes":"CAE%3D"}.get(sort_by, "CAMSAhAB")
 
@@ -467,9 +468,9 @@ jobs:
               jobs = []
               for idx_q, eq in enumerate(expanded_queries):
                   jobs.append((f"{eq}{date_op}".strip(), ""))
-                  if idx_q < 3: jobs.append((f"{eq}{date_op}".strip(), sp_code))
-              per_q_cap = max(80, min(180, (max_results * 2) // max(1, len(expanded_queries)) + 40))
-              with ThreadPoolExecutor(max_workers=8) as ex:
+                  if idx_q < 4: jobs.append((f"{eq}{date_op}".strip(), sp_code))
+              per_q_cap = max(70, min(160, (max_results * 2) // max(1, len(expanded_queries)) + 35))
+              with ThreadPoolExecutor(max_workers=10) as ex:
                   for b in ex.map(lambda j: fetch_search(j[0], j[1], per_q_cap), jobs): raw.extend(b)
 
           seen_ids = {direct_vid} if (is_similar and direct_vid) else (set() if (channel_input or direct_vid) else set(exclude))
@@ -487,7 +488,7 @@ jobs:
           if no_gaming: cands = [c for c in cands if not GAMING_RX.search(f"{c['title']} {c['channel']}")]
           if exclude_terms: cands = [c for c in cands if not any(w in f"{c['title']} {c['channel']}".lower() for w in exclude_terms)]
 
-          cap_pool = max(max_results + 150, 420)
+          cap_pool = max(max_results + 200, 480)
           if sort_by in ("views","likes","quality_score"): cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
           selected_pool = cands[:cap_pool]
 
@@ -591,29 +592,63 @@ jobs:
           if high_quality_only: selected_pool = [c for c in selected_pool if (c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0)]
           if min_views > 0: selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
 
-          # סינון ודירוג AI ב-Gemini 3.5 Flash-Lite
+          # סינון, דירוג ונימוק AI במקביל (2 מקבצים במקביל עד 180 סרטונים)
           ai_status = ""
           if filter_prompt:
               if not gemini_key: ai_status = "⚠️ סינון AI כבוי (חסר GEMINI_API_KEY ב-Secrets)"
               elif selected_pool:
-                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 160))]
-                  compact = [{"i": idx, "t": it.get("title", ""), "c": it.get("channel", ""), "d": it.get("duration", 0)} for idx, it in enumerate(ai_slice)]
-                  ai_prompt = (
-                      f"Context: Query={query or 'N/A'} | Channel={resolved_ch or 'Any'} | ContentType={content_type}\n"
-                      f"Strict user filter rule: {filter_prompt}\n"
-                      "Score each video 1-10 for relevance, quality, and strict compliance with the filter rule. Drop anything irrelevant or non-compliant (score < 5).\n"
-                      "CRITICAL SCORING DISTRIBUTION: Differentiate scores carefully! Reserve 10 ONLY for the top ~15% most direct, iconic, high-value matches; use 8-9 for strong direct matches; use 6-7 for secondary/tangential matches; use 5 for borderline matches. Do NOT give 10 to most videos.\n"
-                      "Return ONLY JSON: {\"keep\": [{\"i\": 0, \"s\": 9}]}\n"
-                      f"Videos: {json.dumps(compact, ensure_ascii=False)}"
-                  )
-                  g_data, m_used = call_gemini_json(ai_prompt, timeout_sec=35)
-                  if isinstance(g_data, dict) and isinstance(g_data.get("keep"), list):
-                      score_map = {r["i"]: min(10, max(5, int(r.get("s") or 7))) for r in g_data["keep"] if isinstance(r, dict) and isinstance(r.get("i"), int) and int(r.get("s") or 7) >= 5}
+                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 180))]
+                  mid = (len(ai_slice) + 1) // 2
+                  chunks_ai = [(0, ai_slice[:mid])] + ([(mid, ai_slice[mid:])] if len(ai_slice) > 70 else [])
+                  if len(ai_slice) <= 70:
+                      chunks_ai = [(0, ai_slice)]
+
+                  def _score_ai_chunk(pair):
+                      offset, sub_items = pair
+                      compact = [{
+                          "i": offset + idx,
+                          "t": it.get("title", ""),
+                          "c": it.get("channel", ""),
+                          "d": it.get("duration", 0),
+                          "v": it.get("views", 0),
+                          "dt": it.get("upload_date", "") or it.get("published_rel", "")
+                      } for idx, it in enumerate(sub_items)]
+                      ai_prompt = (
+                          f"User search intent: Query=\"{query or 'N/A'}\" | Channel=\"{resolved_ch or 'Any'}\" | ContentType={content_type}\n"
+                          f"Strict user filter rule: {filter_prompt}\n"
+                          "You are curating the best possible YouTube videos for this user. Evaluate each video on TWO axes:\n"
+                          "  1. Direct relevance to the user's concept/question (analytical breakdowns, documentaries, podcasts, full matches, tactical essays, highlights).\n"
+                          "  2. Valuable related discoveries (Hidden Gems): e.g. a full match or profile of a specific rising prospect, goalkeeper, or coach belonging to the exact topic even if their name wasn't typed.\n"
+                          "Drop anything clickbaity, gaming, off-topic, or non-compliant with the filter rule (score < 5).\n"
+                          "CRITICAL SCORING DISTRIBUTION: Differentiate carefully! Reserve 10 ONLY for the top ~12% most insightful/iconic matches; 8-9 for strong matches & top hidden gems; 6-7 for good secondary matches; 5 for borderline.\n"
+                          "For each kept video, also write a tiny crisp Hebrew note 'r' (STRICTLY 3 to 7 Hebrew words!) explaining WHY it's worth watching or what hidden angle it covers (e.g. 'ניתוח טקטי על הצעירים תחת פליק' or 'תגלית קשורה: משחק מלא של יעקובישווילי').\n"
+                          "Return ONLY JSON: {\"keep\": [{\"i\": 0, \"s\": 9, \"r\": \"...\"}]}\n"
+                          f"Videos: {json.dumps(compact, ensure_ascii=False)}"
+                      )
+                      return call_gemini_json(ai_prompt, timeout_sec=38)
+
+                  score_map, reason_map, used_models = {}, {}, []
+                  with ThreadPoolExecutor(max_workers=len(chunks_ai)) as ex:
+                      for g_data, m_used in ex.map(_score_ai_chunk, chunks_ai):
+                          if m_used and m_used not in used_models: used_models.append(m_used)
+                          if isinstance(g_data, dict) and isinstance(g_data.get("keep"), list):
+                              for r in g_data["keep"]:
+                                  if isinstance(r, dict) and isinstance(r.get("i"), int):
+                                      sc = int(r.get("s") or 7)
+                                      if sc >= 5:
+                                          score_map[r["i"]] = min(10, max(5, sc))
+                                          rs = str(r.get("r") or "").strip()
+                                          if rs: reason_map[r["i"]] = rs[:90]
+                  if score_map:
                       filtered = []
                       for idx, it in enumerate(ai_slice):
-                          if idx in score_map: it["ai_score"] = score_map[idx]; filtered.append(it)
-                      if filtered: selected_pool = filtered; ai_status = f"🤖 {m_used} ({len(filtered)}/{len(ai_slice)})"
-                      else: ai_status = f"🤖 {m_used} (מוצגות כל התוצאות)"
+                          if idx in score_map:
+                              it["ai_score"] = score_map[idx]
+                              if idx in reason_map: it["ai_reason"] = reason_map[idx]
+                              filtered.append(it)
+                      m_lbl = used_models[0] if used_models else "gemini"
+                      if filtered: selected_pool = filtered; ai_status = f"🤖 {m_lbl} ({len(filtered)}/{len(ai_slice)})"
+                      else: ai_status = f"🤖 {m_lbl} (מוצגות כל התוצאות)"
                   else: ai_status = "⚠️ סינון AI נכשל זמנית"
 
           if sort_by == "relevance": selected_pool.sort(key=lambda x: (int(x.get("ai_score") or 0) * 1.8 + math.log10(max(0, int(x.get("views") or 0)) + 1), int(x.get("views") or 0)), reverse=True)
