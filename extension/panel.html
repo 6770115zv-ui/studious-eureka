@@ -2,26 +2,23 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>YouTube Cloud Ultra v17</title>
+  <title>YouTube Cloud Ultra v19</title>
   <link rel="stylesheet" href="shared/theme.css"/>
 </head>
 <body style="overflow-anchor:none;">
   <main class="wrap" style="overflow-anchor:none;">
-
-    <!-- כותרת עליונה נקייה -->
     <header class="hd">
       <div class="hd__logo">⬇</div>
       <div class="hd__info">
         <div class="hd__title-row">
           <h1 class="hd__title">YouTube Cloud Ultra</h1>
-          <span class="ver-pill">v17</span>
+          <span class="ver-pill">v19 • AI + Drive</span>
         </div>
         <div class="hd__status">
           <span class="dot" id="conn-dot"></span>
           <span class="small muted" id="conn-text">בודק חיבור...</span>
         </div>
       </div>
-
       <div class="hd__actions">
         <details class="tools-menu">
           <summary class="btn small">🔧 כלים</summary>
@@ -30,51 +27,46 @@
             <button class="btn small" id="copyYtCookiesEncBtn" type="button">🔐 העתק עוגיות מוצפנות</button>
           </div>
         </details>
-        <button class="btn btn--danger small" id="cleanCloudBtn" type="button" title="מחק את כל ה-Releases והריצות ב-GitHub">🧹 ניקוי ענן</button>
+        <button class="btn btn--danger small" id="cleanCloudBtn" type="button">🧹 ניקוי ענן</button>
         <button class="btn small" id="settingsBtn" type="button">⚙ הגדרות</button>
       </div>
     </header>
 
     <div id="v15QuickStatus" class="toast-bar" aria-live="polite"></div>
 
-    <!-- פס הורדות פעילות צף (מופיע אוטומטית רק בזמן הורדה פעילה) -->
     <section id="pinnedJobsWrap" class="card pinned-jobs" style="display:none;">
       <div class="section-head">
-        <span class="small" style="font-weight:700;color:var(--accent);">⚡ הורדות פעילות כרגע</span>
+        <span class="small" style="font-weight:700;color:var(--accent);">⚡ הורדות / העלאות ל-Drive פעילות</span>
         <button class="btn small" id="goToQueueBtn" type="button" style="padding:4px 10px;">לכל התור ←</button>
       </div>
       <div id="pinnedJobsList" class="stack-sm"></div>
     </section>
 
-    <!-- סרגל ניווט ראשי -->
     <nav class="nav-tabs" role="tablist">
-      <button type="button" class="nav-tab is-active" data-tab="search">🎯 חיפוש וערוצים</button>
-      <button type="button" class="nav-tab" data-tab="download">📥 הורדה ישירה</button>
+      <button type="button" class="nav-tab is-active" data-tab="search">🎯 חיפוש חכם וערוצים</button>
+      <button type="button" class="nav-tab" data-tab="download">📥 הורדה ו-Google Drive</button>
       <button type="button" class="nav-tab" data-tab="queue">⚡ תור והיסטוריה <span id="queueTabBadge" class="tab-badge" style="display:none;">0</span></button>
       <button type="button" class="nav-tab" data-tab="translator">🌐 מתרגם כתוביות</button>
     </nav>
 
-    <!-- ================================================================== -->
-    <!-- טאב 1: חיפוש וסריקת ערוצים                                         -->
-    <!-- ================================================================== -->
+    <!-- טאב 1: חיפוש חכם רב-לשוני -->
     <section class="tab-pane is-active" id="pane-search">
       <div class="card">
         <div class="section-head">
           <div>
-            <h2 class="card-title">🎯 חיפוש חכם וסריקת ערוצים</h2>
-            <p class="small muted" style="margin:2px 0 0;">חפש לפי מילים בכל יוטיוב, סרוק ערוץ שלם, או שלב ביניהם</p>
+            <h2 class="card-title">🎯 חיפוש חכם רב-לשוני וסריקת ערוצים (Gemini 3.5 Flash-Lite)</h2>
+            <p class="small muted" style="margin:2px 0 0;">מחפש במספר שפות ושאילתות דומות, מסנן ב-AI, מטמיע תמונות WebP חדות ומתרגם 100% לעברית</p>
           </div>
           <button class="btn small" id="resetSearchFiltersBtn" type="button">🔄 איפוס סינון</button>
         </div>
 
-        <!-- שדות חיפוש מרכזיים -->
         <div class="grid-2">
           <div class="field">
             <div class="field__head">
-              <label for="recQueryInput">🔎 מה מחפשים? (נושא / שחקן / משחק)</label>
+              <label for="recQueryInput">🔎 מה מחפשים? (נושא / שחקן / משחק — בכל שפה)</label>
               <button type="button" id="clearQueryBtn" class="link-btn">✕ נקה</button>
             </div>
-            <input id="recQueryInput" class="input" placeholder="למשל: ז'ואן גרסיה, תקציר ברצלונה (או ריק לכל הערוץ)"/>
+            <input id="recQueryInput" class="input" placeholder="למשל: לה מאסיה ברצלונה, ז'ואן גרסיה, דני אבדיה..."/>
           </div>
           <div class="field">
             <div class="field__head">
@@ -87,11 +79,24 @@
 
         <div id="topicChips" class="chips-row"></div>
 
-        <!-- אינדקס 65 ערוצים מתקפל -->
+        <div class="lang-bar">
+          <span class="small" style="font-weight:700;color:var(--accent);white-space:nowrap;">🌐 שפות חיפוש:</span>
+          <div class="lang-pills" id="searchLangsWrap">
+            <label class="lang-pill"><input type="checkbox" value="he" checked/><span>🇮🇱 עברית</span></label>
+            <label class="lang-pill"><input type="checkbox" value="en" checked/><span>🇬🇧 אנגלית</span></label>
+            <label class="lang-pill"><input type="checkbox" value="es" checked/><span>🇪🇸 ספרדית</span></label>
+            <label class="lang-pill"><input type="checkbox" value="fr"/><span>🇫🇷 צרפתית</span></label>
+            <label class="lang-pill"><input type="checkbox" value="it"/><span>🇮🇹 איטלקית</span></label>
+            <label class="lang-pill"><input type="checkbox" value="de"/><span>🇩🇪 גרמנית</span></label>
+            <label class="lang-pill"><input type="checkbox" value="pt"/><span>🇵🇹 פורטוגזית</span></label>
+            <label class="lang-pill"><input type="checkbox" value="ar"/><span>🌍 ערבית</span></label>
+          </div>
+        </div>
+
         <details class="drawer" id="sportsHubDrawer">
           <summary class="drawer__sum">
             <span>🏟️ אינדקס מהיר: 65 ערוצי ספורט ופודקאסטים (לחץ לבחירה)</span>
-            <span class="drawer__hint small muted">ישראל + עולם</span>
+            <span class="small muted">ישראל + עולם</span>
           </summary>
           <div class="drawer__body">
             <div class="hub-grid">
@@ -113,23 +118,34 @@
               </div>
               <div class="hub-actions">
                 <button type="button" class="btn btn--primary small nowrap" id="v15LoadChannelPlaylistBtn">⚡ סרוק ערוץ</button>
-                <button type="button" class="btn small nowrap" id="v15SendChannelToTopBtn" title="שלח לטאב הורדה ישירה">📥 להורדה</button>
+                <button type="button" class="btn small nowrap" id="v15SendChannelToTopBtn">📥 להורדה</button>
               </div>
             </div>
             <div id="v15QuickChannelsBar" class="chips-row"></div>
           </div>
         </details>
 
-        <!-- לוח סינון נקי ומרווח -->
-        <div class="filter-grid">
+        <div class="filter-grid-4">
           <div class="field">
             <label>📊 מיון לפי:</label>
             <select id="recSortBySelect" class="input small">
-              <option value="views" selected>👁 צפיות (גבוה ← נמוך)</option>
+              <option value="relevance" selected>🎯 הכי רלוונטי (דירוג AI + צפיות)</option>
+              <option value="views">👁 צפיות (גבוה ← נמוך)</option>
               <option value="date_desc">📅 תאריך (חדש ← ישן)</option>
               <option value="date_asc">🕰 תאריך (ישן ← חדש)</option>
               <option value="likes">👍 כמות לייקים</option>
               <option value="quality_score">💎 איכות + לייקים</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>🎬 סוג תוכן:</label>
+            <select id="recContentTypeSelect" class="input small">
+              <option value="all" selected>הכל (מגוון)</option>
+              <option value="highlights">⚡ תקצירים ורגעים גדולים</option>
+              <option value="doc">🎬 דוקומנטרי, סיפורים וניתוחים</option>
+              <option value="full">🏟️ משחקים מלאים</option>
+              <option value="podcast">🎙️ פודקאסטים וראיונות</option>
+              <option value="training">🏋️ אימונים ומאחורי הקלעים</option>
             </select>
           </div>
           <div class="field">
@@ -174,9 +190,9 @@
             <select id="recMaxResultsSelect" class="input small">
               <option value="30">עד 30 (מהיר)</option>
               <option value="60" selected>עד 60</option>
-              <option value="150">עד 150</option>
-              <option value="350">עד 350</option>
-              <option value="600">עד 600</option>
+              <option value="120">עד 120</option>
+              <option value="250">עד 250</option>
+              <option value="500">עד 500</option>
               <option value="1200">עד 1,200 (עונה)</option>
               <option value="2500">עד 2,500 (ארכיון)</option>
             </select>
@@ -190,44 +206,58 @@
               <option value="streams">🔴 שידורים חיים (/streams)</option>
             </select>
           </div>
+          <div class="field">
+            <label>🚫 מילות שלילה (פסיק):</label>
+            <input id="recExcludeWordsInput" class="input small" placeholder="reaction, tiktok, vlog"/>
+          </div>
         </div>
 
-        <!-- מתגים והגדרת כתוביות לרשימה -->
         <div class="toggles-bar">
+          <label class="toggle-item"><input type="checkbox" id="recUseAiFilterToggle" class="switch" checked/><span>🤖 סינון ודירוג AI (Gemini 3.5 Flash-Lite — תמיד פעיל)</span></label>
+          <label class="toggle-item"><input type="checkbox" id="recExpandQueriesToggle" class="switch" checked/><span>✨ חיפושים דומים והרחבה רב-לשונית</span></label>
+          <label class="toggle-item"><input type="checkbox" id="recNoGamingToggle" class="switch" checked/><span>🎮 סנן משחקי מחשב (FIFA/EA FC/PES)</span></label>
+          <label class="toggle-item"><input type="checkbox" id="recTranslateTitlesToggle" class="switch" checked/><span>🔤 תרגם 100% לעברית (כולל קבוצות ושחקנים)</span></label>
           <label class="toggle-item"><input type="checkbox" id="recHighQualityOnlyToggle" class="switch"/><span>💎 רק HD/4K (ללא Shorts)</span></label>
-          <label class="toggle-item"><input type="checkbox" id="recTranslateTitlesToggle" class="switch" checked/><span>🔤 תרגם כותרות לעברית</span></label>
-          <label class="toggle-item"><input type="checkbox" id="netfreeNoThumbsToggle" class="switch"/><span>🖼️ מצב נטפרי מהיר (הסתר תמונות)</span></label>
-          <label class="toggle-item"><input type="checkbox" id="recUseAiFilterToggle" class="switch"/><span>🤖 סינון AI (Gemini)</span></label>
+          <label class="toggle-item"><input type="checkbox" id="netfreeNoThumbsToggle" class="switch"/><span>🖼️ הסתר תמונות</span></label>
         </div>
 
-        <div id="aiFilterWrap" class="ai-box" style="display:none;">
-          <label class="small" style="font-weight:700;color:var(--accent);">🤖 הנחיית סינון ל-Gemini AI (דורש GEMINI_API_KEY ב-Secrets):</label>
-          <input id="recFilterPromptInput" class="input small" value="הבא רק סרטוני ספורט אמיתיים ותקצירים רשמיים שקשורים ישירות לנושא, ללא סרטוני FIFA / EA FC / eFootball / PES וללא תכנים לא קשורים"/>
+        <div id="aiFilterWrap" class="ai-box">
+          <label class="small" style="font-weight:700;color:var(--accent);">🤖 הנחיית סינון ל-Gemini 3.5 Flash-Lite:</label>
+          <input id="recFilterPromptInput" class="input small" value="הבא רק תוצאות מקצועיות שעוסקות ישירות בנושא או בערוץ המבוקש, ללא משחקי מחשב, ללא דמויות לא קשורות וללא תכנים שאינם מתאימים למגזר שומר תורה ומצוות (רק ספורט גברים זה בסדר)"/>
         </div>
 
         <div class="search-cta-row">
-          <button class="btn btn--primary search-cta-btn" id="findRecsBtn" type="button">🔍 הפעל סריקה וחיפוש בענן</button>
+          <button class="btn btn--primary search-cta-btn" id="findRecsBtn" type="button">🔍 הפעל חיפוש חכם רב-לשוני בענן</button>
           <div class="subs-inline">
-            <label class="small muted nowrap" for="v15ListSubsSelect">📝 כתוביות בהורדה:</label>
+            <label class="small muted nowrap" for="v15ListSubsSelect">📝 כתוביות:</label>
             <select id="v15ListSubsSelect" class="input small">
               <option value="default">לפי ההורדה הישירה</option>
               <option value="embed">הטמעה בעברית</option>
-              <option value="files">קובץ SRT לצד הווידאו</option>
-              <option value="only">כתוביות בלבד (SRT)</option>
+              <option value="files">קובץ SRT</option>
+              <option value="only">כתוביות בלבד</option>
             </select>
           </div>
+          <label class="toggle-item nowrap" title="העלה סרטון שנבחר מהרשימה ישירות ל-Google Drive">
+            <input type="checkbox" id="listDriveToggle" class="switch"/><span>☁️ גם ל-Drive</span>
+          </label>
         </div>
       </div>
 
-      <!-- אזור לשוניות ותוצאות החיפוש -->
+      <!-- תוצאות + הצעות לחיפושים דומים -->
       <div class="card" id="resultsCard">
         <div class="sessions-bar-wrap">
           <div id="recSessionsTabs" class="sessions-tabs" style="display:none;"></div>
-          <button class="btn small nowrap" id="clearDoneRecsBtn" type="button" style="display:none;">🧹 סגור לשוניות ישנות</button>
+          <button class="btn small nowrap" id="clearDoneRecsBtn" type="button" style="display:none;">🧹 סגור ישנות</button>
+        </div>
+
+        <!-- הצעות לחיפושים דומים ונושאים נוספים -->
+        <div id="suggestedSearchesWrap" class="suggest-box" style="display:none;">
+          <div class="small" style="font-weight:700;color:var(--ok);">💡 הצעות לחיפושים דומים וכיוונים נוספים (לחץ לחיפוש מיידי):</div>
+          <div id="suggestedSearchesChips" class="chips-row"></div>
         </div>
 
         <div class="results-toolbar">
-          <div id="recStatusText" class="status-line small">הזן נושא או ערוץ למעלה ולחץ על "הפעל סריקה וחיפוש בענן".</div>
+          <div id="recStatusText" class="status-line small">הזן נושא או ערוץ למעלה ולחץ על "הפעל חיפוש חכם רב-לשוני בענן".</div>
           <div class="results-controls">
             <input id="liveRecSearchInput" class="input small live-filter-input" placeholder="⚡ סנן מילה בתוצאות..."/>
             <button class="btn small nowrap" id="translateVisibleRecsBtn" type="button" style="display:none;">🔤 תרגם מוצגות</button>
@@ -241,7 +271,6 @@
           <button class="btn btn--primary small nowrap" id="batchRecsBtn" type="button" disabled>📦 הורד מסומנים (0)</button>
         </div>
 
-        <!-- יומן טכני מתקפל (סגור כברירת מחדל כדי לא לתפוס מסך) -->
         <details id="recLogWrap" class="drawer drawer--log" style="display:none;">
           <summary class="drawer__sum">
             <span>📋 יומן התקדמות טכני בענן</span>
@@ -257,15 +286,13 @@
       </div>
     </section>
 
-    <!-- ================================================================== -->
-    <!-- טאב 2: הורדה ישירה                                                 -->
-    <!-- ================================================================== -->
+    <!-- טאב 2: הורדה ישירה והעלאה ל-Google Drive -->
     <section class="tab-pane" id="pane-download">
       <div class="card">
         <div class="section-head">
           <div>
-            <h2 class="card-title">📥 הורדה ישירה בענן GitHub</h2>
-            <p class="small muted" style="margin:2px 0 0;">הדבק קישור ליוטיוב, מזהה של 11 תווים, פלייליסט או רשימת קישורים</p>
+            <h2 class="card-title">📥 הורדה ישירה והעלאה מאובטחת ל-Google Drive</h2>
+            <p class="small muted" style="margin:2px 0 0;">הדבק קישור, מזהה 11 תווים, פלייליסט או רשימת קישורים — ניתן להוריד למחשב ו/או להעלות ישירות ל-Google Drive</p>
           </div>
         </div>
 
@@ -288,7 +315,7 @@
             <select id="formatSelect" class="input"></select>
           </div>
           <div class="field">
-            <label for="subsSelect">📝 כתוביות בעברית (ניקוי + תרגום):</label>
+            <label for="subsSelect">📝 כתוביות בעברית:</label>
             <select id="subsSelect" class="input">
               <option value="none">ללא כתוביות</option>
               <option value="embed">🎬+📝 הטמע כתוביות בעברית בווידאו</option>
@@ -298,77 +325,64 @@
           </div>
         </div>
 
-        <!-- אפשרויות מתקדמות מתקפלות (שומר על מסך נקי וברור) -->
+        <!-- אזור Google Drive ומייל מאובטח (מוצפן AES-256-GCM גם בריפו ציבורי!) -->
+        <div class="drive-box">
+          <div class="toggles-bar" style="background:transparent;border:none;padding:0;">
+            <label class="toggle-item"><input type="checkbox" id="driveToggle" class="switch"/><span>☁️ העלה ישירות ל-Google Drive</span></label>
+            <label class="toggle-item" id="driveOnlyWrap" style="display:none;"><input type="checkbox" id="driveOnlyToggle" class="switch"/><span>⚡ ל-Drive בלבד (ללא הורדה למחשב)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="emailToggle" class="switch"/><span>📧 שלח למייל (קובץ או קישור Drive)</span></label>
+          </div>
+          <div id="emailInputWrap" style="display:none;margin-top:8px;">
+            <input id="emailToInput" class="input small" dir="ltr" placeholder="כתובת מייל לשיתוף Drive / שליחה (מוצפן AES-256! השאר ריק למייל הקבוע שב-Secrets)"/>
+          </div>
+        </div>
+
         <details class="drawer" id="dlAdvancedDrawer">
-          <summary class="drawer__sum">
-            <span>⚙ אפשרויות מתקדמות (חיתוך זמנים, מהירות, Geo, SponsorBlock, מייל)</span>
-          </summary>
+          <summary class="drawer__sum"><span>⚙ אפשרויות מתקדמות (חיתוך זמנים, מהירות, Geo, SponsorBlock, פרקים)</span></summary>
           <div class="drawer__body">
             <div class="grid-4">
-              <div class="field">
-                <label class="small muted">חיתוך מהתחלה:</label>
-                <input id="clipStart" class="input small" dir="ltr" placeholder="00:00:00"/>
-              </div>
-              <div class="field">
-                <label class="small muted">חיתוך עד סיום:</label>
-                <input id="clipEnd" class="input small" dir="ltr" placeholder="עד הסוף"/>
-              </div>
+              <div class="field"><label class="small muted">חיתוך מהתחלה:</label><input id="clipStart" class="input small" dir="ltr" placeholder="00:00:00"/></div>
+              <div class="field"><label class="small muted">חיתוך עד סיום:</label><input id="clipEnd" class="input small" dir="ltr" placeholder="עד הסוף"/></div>
               <div class="field">
                 <label class="small muted">עקיפת מדינה (Geo):</label>
                 <select id="geoSelect" class="input small">
-                  <option value="IL">ישראל + עולמי</option>
-                  <option value="US">ארה"ב (US)</option>
-                  <option value="GB">בריטניה (GB)</option>
-                  <option value="DE">גרמניה (DE)</option>
+                  <option value="IL">ישראל + עולמי</option><option value="US">ארה"ב</option><option value="GB">בריטניה</option><option value="DE">גרמניה</option>
                 </select>
               </div>
               <div class="field">
-                <label class="small muted">מהירות השמעה:</label>
+                <label class="small muted">מהירות:</label>
                 <select id="speedSelect" class="input small">
-                  <option value="1" selected>רגילה (1.0x)</option>
-                  <option value="1.25">1.25x</option>
-                  <option value="1.5">1.5x</option>
-                  <option value="1.75">1.75x</option>
-                  <option value="2.0">2.0x</option>
+                  <option value="1" selected>1.0x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="1.75">1.75x</option><option value="2.0">2.0x</option>
                 </select>
               </div>
             </div>
-
             <div class="toggles-bar">
               <label class="toggle-item"><input type="checkbox" id="collectionToggle" class="switch"/><span>אוסף / פלייליסט (ZIP)</span></label>
               <label class="toggle-item"><input type="checkbox" id="sponsorToggle" class="switch"/><span>SponsorBlock</span></label>
               <label class="toggle-item"><input type="checkbox" id="chaptersToggle" class="switch"/><span>פיצול פרקים</span></label>
               <label class="toggle-item"><input type="checkbox" id="normToggle" class="switch"/><span>נרמול שמע</span></label>
-              <label class="toggle-item"><input type="checkbox" id="emailToggle" class="switch"/><span>📧 שלח למייל</span></label>
               <label class="toggle-item"><input type="checkbox" id="translateTitleDlToggle" class="switch" checked/><span>🔤 תרגם שם לעברית</span></label>
-            </div>
-
-            <div id="emailInputWrap" style="display:none;">
-              <input id="emailToInput" class="input small" dir="ltr" placeholder="כתובת מייל (השאר ריק לשליחה למייל הקבוע שב-Secrets)..."/>
             </div>
           </div>
         </details>
 
         <div class="dl-cta-row">
-          <button class="btn btn--primary" id="downloadBtn" type="button" style="flex:2;padding:12px;font-size:14.5px;">🚀 התחל הורדה בענן GitHub</button>
+          <button class="btn btn--primary" id="downloadBtn" type="button" style="flex:2;padding:12px;font-size:14.5px;">🚀 התחל הורדה / העלאה בענן</button>
           <button class="btn" id="subsOnlyBtn" type="button" style="flex:1;padding:12px;border-color:var(--ok);color:var(--ok);">📝 כתוביות בעברית בלבד (SRT)</button>
         </div>
         <p id="hint" class="small muted" style="margin:0;text-align:center;min-height:18px;"></p>
       </div>
     </section>
 
-    <!-- ================================================================== -->
-    <!-- טאב 3: תור הורדות והיסטוריה                                         -->
-    <!-- ================================================================== -->
+    <!-- טאב 3: תור והיסטוריה -->
     <section class="tab-pane" id="pane-queue">
       <div class="card">
         <div class="section-head">
-          <h2 class="card-title">⚡ תור הורדות</h2>
+          <h2 class="card-title">⚡ תור הורדות והעלאות Drive</h2>
           <button class="btn small" id="clearJobsBtn" type="button">🧹 נקה שהושלמו</button>
         </div>
         <div id="jobList" class="stack-md"></div>
       </div>
-
       <div class="card">
         <div class="section-head">
           <h2 class="card-title">📜 היסטוריית הורדות</h2>
@@ -382,14 +396,12 @@
       </div>
     </section>
 
-    <!-- ================================================================== -->
-    <!-- טאב 4: מתרגם קובצי כתוביות מהמחשב                                   -->
-    <!-- ================================================================== -->
+    <!-- טאב 4: מתרגם כתוביות מקומי -->
     <section class="tab-pane" id="pane-translator">
       <div class="card">
         <div>
           <h2 class="card-title">🌐 מתרגם קובצי כתוביות מקומיים לעברית (SRT / VTT)</h2>
-          <p class="small muted" style="margin:4px 0 0;">העלה קובץ כתוביות מכל שפה — המערכת מזהה שפה אוטומטית, מאחדת משפטים קטועים ויוצרת קובץ עברית נקי ומיושר לימין (RTL)</p>
+          <p class="small muted" style="margin:4px 0 0;">מזהה שפה אוטומטית, מאחד משפטים קטועים ויוצר קובץ עברית נקי ומיושר לימין (RTL)</p>
         </div>
         <div class="url-row">
           <input type="file" id="localSrtInput" accept=".srt,.vtt,.txt" multiple class="input" style="flex:2;padding:8px 10px;"/>
@@ -401,9 +413,7 @@
         </div>
       </div>
     </section>
-
   </main>
-
   <script src="shared/common.js"></script>
   <script src="v15_features.js"></script>
   <script src="panel.js"></script>
