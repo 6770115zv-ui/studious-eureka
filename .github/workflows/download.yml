@@ -955,6 +955,7 @@ jobs:
           auto_drive_for_mail = bool(send_email_flag and has_gd_secrets and primary_file.exists() and primary_file.stat().st_size > int(17.5 * 1024 * 1024))
           if upload_drive_flag or auto_drive_for_mail:
               if not (gd_cid and gd_sec and gd_ref):
+                  print(f"Drive secrets status: cid={bool(gd_cid)} sec={bool(gd_sec)} ref={bool(gd_ref)} fld={bool(gd_fld)}", flush=True)
                   drive_status = "⚠️ חסרים Secrets של Google Drive (GDRIVE_CLIENT_ID/SECRET/REFRESH_TOKEN)"
               else:
                   try:
@@ -975,7 +976,7 @@ jobs:
                       f_total = up_target.stat().st_size
                       meta = {"name": up_target.name}
                       if gd_fld: meta["parents"] = [gd_fld]
-                      init_r = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink", headers={**gd_h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Length": str(f_total)}, json=meta, timeout=25)
+                      init_r = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink", headers={**gd_h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": str(f_total)}, json=meta, timeout=25)
                       init_r.raise_for_status()
                       up_url = init_r.headers["Location"]
                       chunk_sz = 16 * 1024 * 1024
@@ -986,7 +987,7 @@ jobs:
                               buf = fp.read(chunk_sz)
                               if not buf: break
                               end_b = pos + len(buf) - 1
-                              cr = requests.put(up_url, headers={"Content-Length": str(len(buf)), "Content-Range": f"bytes {pos}-{end_b}/{f_total}"}, data=buf, timeout=180)
+                              cr = requests.put(up_url, headers={**gd_h, "Content-Length": str(len(buf)), "Content-Range": f"bytes {pos}-{end_b}/{f_total}"}, data=buf, timeout=180)
                               if cr.status_code not in (200, 201, 308):
                                   raise RuntimeError(f"Drive chunk HTTP {cr.status_code}")
                               pos += len(buf)
@@ -1009,8 +1010,10 @@ jobs:
                           drive_status = "☁️ הועלה ל-Google Drive בהצלחה"
                           print("Google Drive upload succeeded (link encrypted & masked).", flush=True)
                   except Exception as gd_err:
-                      print(f"Google Drive upload error: {type(gd_err).__name__}", flush=True)
-                      drive_status = f"⚠️ שגיאת Drive ({type(gd_err).__name__})"
+                      _code = getattr(getattr(gd_err, "response", None), "status_code", "")
+                      _rtxt = str(getattr(getattr(gd_err, "response", None), "text", ""))[:180].replace("\n", " ")
+                      print(f"Google Drive upload error: {type(gd_err).__name__} HTTP={_code} {_rtxt or gd_err}", flush=True)
+                      drive_status = f"⚠️ שגיאת Drive ({type(gd_err).__name__} {_code})"
 
           # === SAFE_EMAIL_AND_DRIVE_V21 ===
           MAX_GMAIL_RAW_BYTES = int(17.5 * 1024 * 1024)
