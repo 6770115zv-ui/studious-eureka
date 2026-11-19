@@ -133,15 +133,27 @@ jobs:
 
           class AIRouter:
               PREFERRED_GEMINI = [
-                  "gemini-3.5-flash-lite",
                   "gemini-3.1-flash-lite",
+                  "gemini-3.5-flash-lite",
                   "gemini-3.8-flash",
                   "gemini-3.7-flash",
                   "gemini-3.6-flash",
-                  "gemini-4-hydrogen",
                   "gemini-3.5-flash",
               ]
-              GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+              PREFERRED_GROQ_PREFIXES = [
+                  "meta-llama/llama-4-maverick",
+                  "meta-llama/llama-4-scout",
+                  "llama-4",
+                  "openai/gpt-oss-120b",
+                  "openai/gpt-oss-20b",
+                  "qwen/qwen3-32b",
+                  "qwen",
+                  "moonshotai/kimi",
+                  "deepseek",
+                  "llama-3.3-70b",
+                  "llama-3.1-8b",
+                  "gemma",
+              ]
               CEREBRAS_MODELS = ["llama-3.3-70b", "qwen-3-32b"]
               OPENROUTER_MODELS = ["google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free"]
 
@@ -175,7 +187,9 @@ jobs:
                   self.alerts_he = []
                   self._clients = {}
                   self.discovered_models = []
+                  self.discovered_groq_models = []
                   self.gemini_models = self._discover_gemini_models()
+                  self.groq_models = self._discover_groq_models()
 
               def _collect_gemini_keys(self):
                   raw_parts = []
@@ -235,11 +249,11 @@ jobs:
                                   if low.startswith("gemini-") and "generateContent" in methods and not any(b in low for b in bad_toks):
                                       found.append(name)
                   except Exception as e:
-                      self.errors.append(f"model_discovery: {type(e).__name__}: {str(e)[:80]}")
+                      self.errors.append(f"gemini_discovery: {type(e).__name__}: {str(e)[:80]}")
 
                   self.discovered_models = sorted(set(found))
                   if not found:
-                      return list(self.PREFERRED_GEMINI[:5])
+                      return list(self.PREFERRED_GEMINI[:4])
 
                   ranked = []
                   for pref in self.PREFERRED_GEMINI:
@@ -248,8 +262,52 @@ jobs:
                   for extra in found:
                       if ("flash" in extra.lower()) and extra not in ranked:
                           ranked.append(extra)
-                  print(f"AIRouter live ladder: {ranked[:6]}", flush=True)
-                  return ranked[:6] or list(self.PREFERRED_GEMINI[:5])
+                  print(f"AIRouter live Gemini ladder: {ranked[:5]}", flush=True)
+                  return ranked[:5] or list(self.PREFERRED_GEMINI[:4])
+
+              def _discover_groq_models(self):
+                  if not self.groq_key:
+                      return []
+                  found = []
+                  bad_toks = ("whisper", "tts", "orpheus", "playai", "guard", "safeguard", "embed", "moderation", "vision-preview", "allam", "distil")
+                  try:
+                      r = requests.get(
+                          "https://api.groq.com/openai/v1/models",
+                          headers={"Authorization": f"Bearer {self.groq_key}", "Accept": "application/json"},
+                          timeout=10
+                      )
+                      if r.status_code == 200:
+                          for m in (r.json().get("data") or []):
+                              mid = str(m.get("id") or "").strip()
+                              if not mid or m.get("active") is False:
+                                  continue
+                              low = mid.lower()
+                              if any(b in low for b in bad_toks):
+                                  continue
+                              found.append(mid)
+                      elif r.status_code in (401, 403):
+                          self.dead_keys.add("Groq#1")
+                          self.key_stats["Groq#1"]["status"] = "invalid_key"
+                          self._add_alert("⚠️ מפתח GROQ_API_KEY לא תקין (401/403) — בדוק את ה-Secret ב-GitHub.")
+                          return []
+                      else:
+                          self.errors.append(f"groq_discovery: HTTP {r.status_code}: {r.text[:80]}")
+                  except Exception as e:
+                      self.errors.append(f"groq_discovery: {type(e).__name__}: {str(e)[:80]}")
+
+                  self.discovered_groq_models = sorted(set(found))
+                  if not found:
+                      return []
+                  ranked = []
+                  for pref in self.PREFERRED_GROQ_PREFIXES:
+                      for mid in found:
+                          if pref in mid.lower() and mid not in ranked:
+                              ranked.append(mid)
+                  for mid in found:
+                      if mid not in ranked:
+                          ranked.append(mid)
+                  print(f"AIRouter live Groq ladder ({len(found)} found): {ranked[:4]}", flush=True)
+                  return ranked[:4]
 
               def _thinking_cfg(self, model_name: str):
                   if _gtypes is None or model_name in self.no_thinking_models:
@@ -311,21 +369,20 @@ jobs:
                           raise RuntimeError("empty_response")
                       return _parse_json_lenient(txt_out)
 
-              def _call_openai_compat(self, url: str, headers: dict, model_name: str, prompt_text: str, timeout_sec: int):
-                  r = requests.post(
-                      url,
-                      headers={**headers, "Content-Type": "application/json", "Accept": "application/json"},
-                      json={
-                          "model": model_name,
-                          "temperature": 0.15,
-                          "response_format": {"type": "json_object"},
-                          "messages": [
-                              {"role": "system", "content": "You are a strict JSON API. Return ONLY a single valid JSON object, no markdown."},
-                              {"role": "user", "content": prompt_text},
-                          ],
-                      },
-                      timeout=timeout_sec
-                  )
+              def _call_openai_compat(self, url: str, headers: dict, model_name: str, prompt_text: str, timeout_sec: int, use_json_mode: bool = True):
+                  body = {
+                      "model": model_name,
+                      "temperature": 0.15,
+                      "messages": [
+                          {"role": "system", "content": "You are a strict JSON API. Return ONLY a single valid JSON object matching the requested schema, with no markdown fences and no extra text."},
+                          {"role": "user", "content": prompt_text},
+                      ],
+                  }
+                  if use_json_mode:
+                      body["response_format"] = {"type": "json_object"}
+                  r = requests.post(url, headers={**headers, "Content-Type": "application/json", "Accept": "application/json"}, json=body, timeout=timeout_sec)
+                  if r.status_code == 400 and use_json_mode and any(k in r.text.lower() for k in ("response_format", "json_validate", "json")):
+                      return self._call_openai_compat(url, headers, model_name, prompt_text, timeout_sec, use_json_mode=False)
                   if r.status_code != 200:
                       raise RuntimeError(f"HTTP {r.status_code}: {r.text[:140]}")
                   raw_body = (r.text or "").strip()
@@ -333,6 +390,8 @@ jobs:
                       raise RuntimeError("HTTP 200 empty body")
                   data_j = json.loads(raw_body)
                   content = ((((data_j.get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
+                  # הסרת תגיות <think>...</think> אם דגם Qwen/DeepSeek החזיר אותן לפני ה-JSON
+                  content = re.sub(r"<think>[\s\S]*?</think>", "", content, flags=re.I).strip()
                   if not content:
                       raise RuntimeError("empty_choices_content")
                   return _parse_json_lenient(content)
@@ -363,19 +422,22 @@ jobs:
               def _try_fast_backups(self, prompt_text: str, stage: str):
                   backups = []
                   if self.groq_key and "Groq#1" not in self.dead_keys:
-                      for m in self.GROQ_MODELS:
-                          backups.append(("groq", "Groq#1", "https://api.groq.com/openai/v1/chat/completions", {"Authorization": f"Bearer {self.groq_key}"}, m))
+                      for m in self.groq_models:
+                          if m not in self.dead_models:
+                              backups.append(("groq", "Groq#1", "https://api.groq.com/openai/v1/chat/completions", {"Authorization": f"Bearer {self.groq_key}"}, m))
                   if self.cerebras_key and "Cerebras#1" not in self.dead_keys:
                       for m in self.CEREBRAS_MODELS:
-                          backups.append(("cerebras", "Cerebras#1", "https://api.cerebras.ai/v1/chat/completions", {"Authorization": f"Bearer {self.cerebras_key}"}, m))
+                          if m not in self.dead_models:
+                              backups.append(("cerebras", "Cerebras#1", "https://api.cerebras.ai/v1/chat/completions", {"Authorization": f"Bearer {self.cerebras_key}"}, m))
                   if self.openrouter_key and "OpenRouter#1" not in self.dead_keys:
                       for m in self.OPENROUTER_MODELS:
-                          backups.append(("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", {"Authorization": f"Bearer {self.openrouter_key}"}, m))
+                          if m not in self.dead_models:
+                              backups.append(("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", {"Authorization": f"Bearer {self.openrouter_key}"}, m))
 
                   for prov, alias, url, hdrs, m_name in backups:
                       t0 = time.time()
                       try:
-                          res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 20)
+                          res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 18)
                           self._record(stage, prov, m_name, alias, "ok", (time.time() - t0) * 1000)
                           self._add_alert(f"⚡ מעבר אוטומטי מהיר ל-{alias} ({m_name}) עקב עומס רגעי ב-Gemini!")
                           return res, f"{prov}:{m_name.split('/')[-1]}"
@@ -386,17 +448,19 @@ jobs:
                           if "401" in es or "403" in es:
                               self.dead_keys.add(alias)
                               self.key_stats[alias]["status"] = "invalid_key"
+                              break
+                          elif "404" in es:
+                              self.dead_models.add(m_name)
                   return None, ""
 
-              def call_json(self, prompt_text: str, timeout_sec: int = 22, stage: str = "general"):
+              def call_json(self, prompt_text: str, timeout_sec: int = 16, stage: str = "general"):
                   has_fast_backup = bool(
-                      (self.groq_key and "Groq#1" not in self.dead_keys)
+                      (self.groq_key and self.groq_models and "Groq#1" not in self.dead_keys)
                       or (self.cerebras_key and "Cerebras#1" not in self.dead_keys)
                   )
                   backups_tried = False
                   stage_gem_fails = 0
 
-                  # 1. מאגר מפתחות ודגמי Gemini עם Fast-Failover מיידי ל-Groq אחרי 2 כשלים
                   if self.gemini_keys and self.gemini_models:
                       with self.lock:
                           start_k = self.rr_cursor % len(self.gemini_keys)
@@ -419,9 +483,8 @@ jobs:
                                       continue
                                   tried_any = True
                                   t0 = time.time()
-                                  # כשיש Groq כגיבוי מהיר, נחתוך timeout ל-16s ב-Scorer כדי לא לבזבז 24s על 504
-                                  base_to = 16 if (has_fast_backup and stage.startswith("scorer")) else timeout_sec
-                                  m_timeout = base_to if "lite" in m_name else min(base_to + 4, 24)
+                                  # דגמי Lite מקבלים 15-16s; דגמי Flash כבדים מקבלים 12s כדי לא לבזבז 24s על 504
+                                  m_timeout = min(timeout_sec, 16) if "lite" in m_name else 12
                                   try:
                                       res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
                                       self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
@@ -459,7 +522,7 @@ jobs:
                                           self.cooldowns[(alias, m_name)] = time.time() + 10
                                           self.key_stats[alias]["status"] = "busy_503"
 
-                                      # Fast-Failover: אחרי 2 כשלים של Gemini באותו שלב, קופצים מיד ל-Groq (~1s)!
+                                      # Fast-Failover ל-Groq אחרי 2 כשלים ב-Gemini (תשובה תוך ~1s במקום להיתקע!)
                                       if has_fast_backup and not backups_tried and stage_gem_fails >= 2:
                                           backups_tried = True
                                           b_res, b_mod = self._try_fast_backups(prompt_text, stage)
@@ -471,19 +534,22 @@ jobs:
                                   b_res, b_mod = self._try_fast_backups(prompt_text, stage)
                                   if b_res is not None:
                                       return b_res, b_mod
-                              time.sleep(2.0 if tried_any else 2.5)
+                              time.sleep(1.8 if tried_any else 2.2)
 
                   if not backups_tried:
                       return self._try_fast_backups(prompt_text, stage)
                   return None, ""
+
               def export_telemetry(self):
+                  ladder_display = list(self.gemini_models[:4]) + [f"groq:{m}" for m in self.groq_models[:2]]
                   return {
                       "sdk": f"google-genai {_GENAI_SDK_VER}",
                       "gemini_keys_count": len(self.gemini_keys),
                       "has_github_models_backup": False,
-                      "has_groq_backup": bool(self.groq_key or self.cerebras_key or self.openrouter_key),
-                      "active_ladder": self.gemini_models[:6],
-                      "discovered_models": self.discovered_models[:12],
+                      "has_groq_backup": bool((self.groq_key and self.groq_models) or self.cerebras_key or self.openrouter_key),
+                      "active_ladder": ladder_display,
+                      "discovered_models": self.discovered_models[:10],
+                      "discovered_groq_models": self.discovered_groq_models[:10],
                       "key_health": list(self.key_stats.values()),
                       "alerts_he": self.alerts_he[:6],
                       "call_log": self.call_log[-18:],
@@ -1085,7 +1151,7 @@ jobs:
                           + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this club/theme (specific Barça Atlètic prospect/coach, Flick youth press conference, club podcast discussing this topic).\n"
                           + "  * DROP (<5): Wrong team (e.g. Atlético Madrid or Athletic Bilbao match/press conf unless directly about our topic), gaming (FIFA/EA FC), unrelated sports/celebrities, clickbait spam, or modesty rule violations.\n"
                           + "Note: 'ללא דמויות אחרות' means no unrelated celebrities/other sports — relevant players, youth prospects, directors & coaches of the requested club are WELCOME!\n"
-                          + "Target keeping roughly 25%-50% of this batch (~20-45 valid items) when relevant videos exist. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
+                          + "CRITICAL RECALL TARGET: Aim to keep ~22 to 40 valid items from this 90-item batch! If fewer than 20 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related club/youth/podcast/press-conference videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
                           + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
                           + f"Items: {json.dumps(compact, ensure_ascii=False)}"
                       )
@@ -1268,12 +1334,21 @@ jobs:
                   return w.lower()
               return re.sub(r"\b[A-ZÀÈÌÒÙÁÉÍÓÚÑÇÜ]{2,}\b", _fix_w, str(s or ""))
 
+          def _protect_terms_latin(s: str) -> str:
+              s = re.sub(r"\bhansi\s+flick\b", "XHFLICKX", s, flags=re.I)
+              s = re.sub(r"\bflick\b", "XFLICKX", s, flags=re.I)
+              s = re.sub(r"\bbar[cç]a\s+atl[eèé]tic\b", "XBATLETICX", s, flags=re.I)
+              return s
+
+          def _restore_terms_he(s: str) -> str:
+              s = re.sub(r"XHFLICKX", "האנזי פליק", s, flags=re.I)
+              s = re.sub(r"XFLICKX", "פליק", s, flags=re.I)
+              s = re.sub(r"XBATLETICX", "ברצלונה אתלטיק", s, flags=re.I)
+              return polish_he(s)
+
           def translate_one_pure_he(orig_s: str) -> str:
-              prep = _decap_latin(orig_s)
-              prep = re.sub(r"\bhansi\s+flick\b", "האנזי פליק", prep, flags=re.I)
-              prep = re.sub(r"\bflick\b", "פליק", prep, flags=re.I)
-              prep = re.sub(r"\bbar[cç]a\s+atl[eèé]tic\b", "ברצלונה אתלטיק", prep, flags=re.I)
-              best = polish_he(gtrans_post(prep, "auto") or prep)
+              prep = _protect_terms_latin(_decap_latin(orig_s))
+              best = _restore_terms_he(gtrans_post(prep, "auto") or prep)
               if not has_foreign_words(best):
                   return best
               guess_langs = []
@@ -1284,7 +1359,7 @@ jobs:
                   if lg not in guess_langs: guess_langs.append(lg)
               best_score = count_foreign_alpha(best)
               for sl in guess_langs:
-                  cand = polish_he(gtrans_post(prep, sl) or "")
+                  cand = _restore_terms_he(gtrans_post(prep, sl) or "")
                   if cand:
                       sc = count_foreign_alpha(cand)
                       if sc < best_score:
