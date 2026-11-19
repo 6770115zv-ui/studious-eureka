@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   download:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
       - name: Set up Deno
@@ -35,7 +35,7 @@ jobs:
             docker run -d --rm -p 4416:4416 --name bgutil-pot brainicism/bgutil-ytdlp-pot-provider:latest >/dev/null 2>&1 &
           fi
           if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y --no-install-recommends ffmpeg zip curl &
+            (curl -fsSL https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o /tmp/ff.tar.xz && tar -xf /tmp/ff.tar.xz -C /tmp && sudo cp /tmp/ffmpeg-*/bin/ffmpeg /tmp/ffmpeg-*/bin/ffprobe /usr/bin/ && sudo chmod +x /usr/bin/ffmpeg /usr/bin/ffprobe && rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-*) &
           fi
           python3 -m pip install --break-system-packages --no-cache-dir -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests deep-translator mutagen
           wait
