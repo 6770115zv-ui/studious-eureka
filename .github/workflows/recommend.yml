@@ -360,8 +360,43 @@ jobs:
                       if msg_he not in self.alerts_he:
                           self.alerts_he.append(msg_he)
 
-              def call_json(self, prompt_text: str, timeout_sec: int = 24, stage: str = "general"):
-                  # 1. מאגר מפתחות ודגמי Gemini (דגמי Lite מהירים ראשונים + Cooldown קצר בלי נעילה עצמית)
+              def _try_fast_backups(self, prompt_text: str, stage: str):
+                  backups = []
+                  if self.groq_key and "Groq#1" not in self.dead_keys:
+                      for m in self.GROQ_MODELS:
+                          backups.append(("groq", "Groq#1", "https://api.groq.com/openai/v1/chat/completions", {"Authorization": f"Bearer {self.groq_key}"}, m))
+                  if self.cerebras_key and "Cerebras#1" not in self.dead_keys:
+                      for m in self.CEREBRAS_MODELS:
+                          backups.append(("cerebras", "Cerebras#1", "https://api.cerebras.ai/v1/chat/completions", {"Authorization": f"Bearer {self.cerebras_key}"}, m))
+                  if self.openrouter_key and "OpenRouter#1" not in self.dead_keys:
+                      for m in self.OPENROUTER_MODELS:
+                          backups.append(("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", {"Authorization": f"Bearer {self.openrouter_key}"}, m))
+
+                  for prov, alias, url, hdrs, m_name in backups:
+                      t0 = time.time()
+                      try:
+                          res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 20)
+                          self._record(stage, prov, m_name, alias, "ok", (time.time() - t0) * 1000)
+                          self._add_alert(f"⚡ מעבר אוטומטי מהיר ל-{alias} ({m_name}) עקב עומס רגעי ב-Gemini!")
+                          return res, f"{prov}:{m_name.split('/')[-1]}"
+                      except Exception as e:
+                          es = f"{type(e).__name__}: {str(e)}"
+                          self._record(stage, prov, m_name, alias, "fail", (time.time() - t0) * 1000, es)
+                          print(f"AIRouter [{stage}] {alias}/{m_name} failed: {es[:130]}", flush=True)
+                          if "401" in es or "403" in es:
+                              self.dead_keys.add(alias)
+                              self.key_stats[alias]["status"] = "invalid_key"
+                  return None, ""
+
+              def call_json(self, prompt_text: str, timeout_sec: int = 22, stage: str = "general"):
+                  has_fast_backup = bool(
+                      (self.groq_key and "Groq#1" not in self.dead_keys)
+                      or (self.cerebras_key and "Cerebras#1" not in self.dead_keys)
+                  )
+                  backups_tried = False
+                  stage_gem_fails = 0
+
+                  # 1. מאגר מפתחות ודגמי Gemini עם Fast-Failover מיידי ל-Groq אחרי 2 כשלים
                   if self.gemini_keys and self.gemini_models:
                       with self.lock:
                           start_k = self.rr_cursor % len(self.gemini_keys)
@@ -371,7 +406,6 @@ jobs:
                       for pass_i in range(2):
                           now = time.time()
                           tried_any = False
-                          # בסיבוב 2 מנסים רק את 2 דגמי ה-Lite הכי מהירים אחרי השהיה קצרה
                           models_to_try = self.gemini_models if pass_i == 0 else self.gemini_models[:2]
                           for m_name in models_to_try:
                               if m_name in self.dead_models:
@@ -385,7 +419,9 @@ jobs:
                                       continue
                                   tried_any = True
                                   t0 = time.time()
-                                  m_timeout = timeout_sec if "lite" in m_name else min(timeout_sec + 4, 28)
+                                  # כשיש Groq כגיבוי מהיר, נחתוך timeout ל-16s ב-Scorer כדי לא לבזבז 24s על 504
+                                  base_to = 16 if (has_fast_backup and stage.startswith("scorer")) else timeout_sec
+                                  m_timeout = base_to if "lite" in m_name else min(base_to + 4, 24)
                                   try:
                                       res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
                                       self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
@@ -404,6 +440,7 @@ jobs:
                                           except Exception as e2:
                                               es = f"{type(e2).__name__}: {str(e2)}"
                                               low_e = es.lower()
+                                      stage_gem_fails += 1
                                       self._record(stage, "gemini", m_name, alias, "fail", ms, es)
                                       print(f"AIRouter [{stage}] {alias}/{m_name} failed ({int(ms)}ms): {es[:130]}", flush=True)
                                       if "401" in low_e or "403" in low_e or "api_key_invalid" in low_e or "permission_denied" in low_e:
@@ -415,48 +452,30 @@ jobs:
                                       elif "429" in low_e or "resource_exhausted" in low_e or "quota" in low_e:
                                           self.cooldowns[(alias, m_name)] = time.time() + 30
                                           self.key_stats[alias]["status"] = "quota_429"
-                                          if len(self.gemini_keys) == 1:
-                                              self._add_alert("⚠️ מפתח Gemini בודד הגיע ל-429/עומס — מומלץ להוסיף GEMINI_API_KEY_2 או GROQ_API_KEY ב-Secrets.")
-                                      elif "504" in low_e or "deadline_exceeded" in low_e or "timeout" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 12
+                                      elif "504" in low_e or "500" in low_e or "internal" in low_e or "deadline_exceeded" in low_e or "timeout" in low_e:
+                                          self.cooldowns[(alias, m_name)] = time.time() + 14
                                           self.key_stats[alias]["status"] = "busy_503"
                                       elif "503" in low_e or "unavailable" in low_e or "high demand" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 8
+                                          self.cooldowns[(alias, m_name)] = time.time() + 10
                                           self.key_stats[alias]["status"] = "busy_503"
+
+                                      # Fast-Failover: אחרי 2 כשלים של Gemini באותו שלב, קופצים מיד ל-Groq (~1s)!
+                                      if has_fast_backup and not backups_tried and stage_gem_fails >= 2:
+                                          backups_tried = True
+                                          b_res, b_mod = self._try_fast_backups(prompt_text, stage)
+                                          if b_res is not None:
+                                              return b_res, b_mod
                           if pass_i == 0:
-                              # אם יש ספק גיבוי חינמי מוגדר — נעבור אליו מיד במקום לחכות
-                              if self.groq_key or self.cerebras_key or self.openrouter_key:
-                                  break
-                              time.sleep(2.5 if tried_any else 3.0)
+                              if not backups_tried and (self.groq_key or self.cerebras_key or self.openrouter_key):
+                                  backups_tried = True
+                                  b_res, b_mod = self._try_fast_backups(prompt_text, stage)
+                                  if b_res is not None:
+                                      return b_res, b_mod
+                              time.sleep(2.0 if tried_any else 2.5)
 
-                  # 2. גיבוי מהיר וחינמי: Groq / Cerebras / OpenRouter (אם הוגדר Secret)
-                  backups = []
-                  if self.groq_key and "Groq#1" not in self.dead_keys:
-                      for m in self.GROQ_MODELS:
-                          backups.append(("groq", "Groq#1", "https://api.groq.com/openai/v1/chat/completions", {"Authorization": f"Bearer {self.groq_key}"}, m))
-                  if self.cerebras_key and "Cerebras#1" not in self.dead_keys:
-                      for m in self.CEREBRAS_MODELS:
-                          backups.append(("cerebras", "Cerebras#1", "https://api.cerebras.ai/v1/chat/completions", {"Authorization": f"Bearer {self.cerebras_key}"}, m))
-                  if self.openrouter_key and "OpenRouter#1" not in self.dead_keys:
-                      for m in self.OPENROUTER_MODELS:
-                          backups.append(("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", {"Authorization": f"Bearer {self.openrouter_key}"}, m))
-
-                  for prov, alias, url, hdrs, m_name in backups:
-                      t0 = time.time()
-                      try:
-                          res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 22)
-                          self._record(stage, prov, m_name, alias, "ok", (time.time() - t0) * 1000)
-                          self._add_alert(f"⚡ שרתי Gemini היו בעומס — בוצע מעבר אוטומטי וחלק ל-{alias} ({m_name})!")
-                          return res, f"{prov}:{m_name.split('/')[-1]}"
-                      except Exception as e:
-                          es = f"{type(e).__name__}: {str(e)}"
-                          self._record(stage, prov, m_name, alias, "fail", (time.time() - t0) * 1000, es)
-                          if "401" in es or "403" in es:
-                              self.dead_keys.add(alias)
-                              self.key_stats[alias]["status"] = "invalid_key"
-
+                  if not backups_tried:
+                      return self._try_fast_backups(prompt_text, stage)
                   return None, ""
-
               def export_telemetry(self):
                   return {
                       "sdk": f"google-genai {_GENAI_SDK_VER}",
@@ -729,7 +748,7 @@ jobs:
                       "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you combined ALL parts of the user's request, which specific 2025-2026 players/coaches/angles you chose, and why.\n"
                       "Task 2 - Search Queries: Generate 13 realistic YouTube search queries (2 to 6 words each — real creator title phrasing!) across the target languages, split into 4 buckets:\n"
                       "  - angle='direct' (4 queries): direct analytical breakdowns, interviews, reports, and stories combining the user's exact concepts (at least 1 in Spanish/native language if applicable).\n"
-                      "  - angle='entities' (4 queries): SPECIFIC real named players, prospects, goalkeepers, or coaches directly relevant to THIS exact user input (prioritize fresh 2025/26-2026/27 names, NOT outdated generic lists).\n"
+                      "  - angle='entities' (4 queries): MUST include ACTUAL PROPER NAMES of specific real players, youth prospects, goalkeepers, or reserve coaches relevant to THIS topic (never just generic words like 'promesas' or 'jovenes' without real player/coach names!). Also in Hebrew translate Spanish 'filial' as 'קבוצת הבת' (never 'פילים').\n"
                       "  - angle='community' (3 queries): dedicated club fan channels, club podcasts, and talk shows in Spanish/English/Hebrew that specifically discuss THIS exact topic (MUST include the specific topic keyword, never just a generic club podcast!).\n"
                       "  - angle='deep' (2 queries): full matches, press conferences, documentaries, or long-form tactical deep-dives tightly on THIS exact topic (NEVER FIFA/EA FC/PES).\n"
                       "Each query item MUST be an object: {\"q\": \"...\", \"angle\": \"direct|entities|community|deep\", \"note_he\": \"3-6 Hebrew words explaining what this query hunts for\"}.\n"
@@ -1059,10 +1078,14 @@ jobs:
                       ai_prompt = (
                           f"Query=\"{query or 'N/A'}\" | Channel=\"{resolved_ch or 'Any'}\" | Type={content_type}\n"
                           + (f"Strategy: {ai_strategy_he}\n" if ai_strategy_he else "")
-                          + f"Rule: {filter_prompt}\n"
-                          + "Disambiguate entities strictly (e.g. 'ברצלונה אתלטיק' = Barça Atlètic / Barcelona B, NOT Atlético Madrid or Athletic Bilbao unless directly discussing the topic).\n"
-                          + "Evaluate each video [id, title, channel, views]. Keep direct hits (score 8-10) AND valuable related hidden gems (score 6-8). Keep ~25%-55% of valid items; drop off-topic/gaming/rule violations (score < 5).\n"
-                          + "Reserve 10 ONLY for top ~12%. Write a tiny Hebrew reason (3-6 words) per kept video.\n"
+                          + f"User Modesty/Focus Rule: {filter_prompt}\n"
+                          + "IMPORTANT MULTI-CONCEPT SCORING RUBRIC (DO NOT require EVERY query word to appear in the same title!):\n"
+                          + "  * Score 9-10 (Top ~12%): Directly combines ALL core parts of the query (e.g. Flick + Deco + Barça Atlètic / youth squad planning).\n"
+                          + "  * Score 7-8 (Strong): Strongly covers ANY TWO core concepts (e.g. Flick + Barça Atlètic/La Masia, OR Flick + Deco strategy, OR Deco + Barça Atlètic/Belletti).\n"
+                          + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this club/theme (specific Barça Atlètic prospect/coach, Flick youth press conference, club podcast discussing this topic).\n"
+                          + "  * DROP (<5): Wrong team (e.g. Atlético Madrid or Athletic Bilbao match/press conf unless directly about our topic), gaming (FIFA/EA FC), unrelated sports/celebrities, clickbait spam, or modesty rule violations.\n"
+                          + "Note: 'ללא דמויות אחרות' means no unrelated celebrities/other sports — relevant players, youth prospects, directors & coaches of the requested club are WELCOME!\n"
+                          + "Target keeping roughly 25%-50% of this batch (~20-45 valid items) when relevant videos exist. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
                           + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
                           + f"Items: {json.dumps(compact, ensure_ascii=False)}"
                       )
