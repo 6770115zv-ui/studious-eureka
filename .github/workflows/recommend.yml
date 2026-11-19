@@ -96,32 +96,50 @@ jobs:
           sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "relevance"
           filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
 
-          GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash")
+          GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash")
           dead_gemini_models = set()
-          def call_gemini_json(prompt_text: str, timeout_sec: int = 32):
+          gemini_errors = []
+          def _parse_json_lenient(raw_s: str):
+              s = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw_s or ""), flags=re.S).strip()
+              try:
+                  return json.loads(s)
+              except Exception:
+                  m_obj = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", s)
+                  if not m_obj:
+                      raise
+                  cleaned = re.sub(r",\s*([}\]])", r"\1", m_obj.group(1))
+                  return json.loads(cleaned)
+
+          def call_gemini_json(prompt_text: str, timeout_sec: int = 24):
               if not gemini_key: return None, ""
               for model_name in GEMINI_MODELS:
-                  if model_name in dead_gemini_models:
+                  if model_name in dead_gemini_models and len(dead_gemini_models) < len(GEMINI_MODELS):
                       continue
                   try:
                       g_res = requests.post(
                           f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
                           headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key},
                           json={"contents": [{"parts": [{"text": prompt_text}]}], "generationConfig": {"temperature": 0.15, "responseMimeType": "application/json"}},
-                          timeout=timeout_sec
+                          timeout=min(timeout_sec, 26)
                       )
                       if g_res.status_code == 200:
                           parts = ((g_res.json().get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                           txt = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
                           if txt:
-                              txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt, flags=re.S).strip()
-                              return json.loads(txt), model_name
+                              return _parse_json_lenient(txt), model_name
+                          gemini_errors.append(f"{model_name}: empty_text")
                       else:
-                          print(f"Gemini {model_name} HTTP {g_res.status_code}: {g_res.text[:140]}", flush=True)
-                          if g_res.status_code in (400, 404):
+                          err_s = f"{model_name} HTTP {g_res.status_code}: {g_res.text[:100]}"
+                          print(f"Gemini {err_s}", flush=True)
+                          gemini_errors.append(err_s)
+                          if g_res.status_code in (400, 404, 429, 503):
                               dead_gemini_models.add(model_name)
                   except Exception as e:
-                      print(f"Gemini {model_name} err: {e}", flush=True)
+                      err_s = f"{model_name} {type(e).__name__}: {str(e)[:90]}"
+                      print(f"Gemini {err_s}", flush=True)
+                      gemini_errors.append(err_s)
+                      if "Timeout" in type(e).__name__:
+                          dead_gemini_models.add(model_name)
               return None, ""
 
           cookie_file = Path("/tmp/rec_cookies.txt")
@@ -364,7 +382,7 @@ jobs:
                       f"Target Languages: {lang_desc} | Content preference: {content_type}.\n"
                       "You are an elite YouTube Research & Discovery Strategist. Turn the user's exact intent into razor-sharp, high-signal YouTube search queries.\n"
                       "STRICT ANCHORING RULE: Identify ALL core entities/concepts in the user's input and keep EVERY query tightly anchored to their intersection! NEVER generate generic broad queries (like generic club podcasts, generic fan reactions, or generic tactical videos) that drop the user's specific focus.\n"
-                      "NATIVE TERMINOLOGY RULE: Always include official local/native terms in the target languages (e.g., if Spanish is requested for a Spanish club/reserve team, use the exact Spanish/Catalan names like 'Barça Atlètic', 'filial', 'cantera', 'fichajes', 'debut', etc., not only English).\n"
+                      "NATIVE TERMINOLOGY & DISAMBIGUATION RULE: Always include official local/native terms in the target languages AND strictly disambiguate similar team names! For example, in Hebrew 'ברצלונה אתלטיק' means Barça Atlètic (Barcelona B reserve team), NEVER Atlético Madrid or Athletic Club Bilbao! Use 'Barça Atlètic', 'Barcelona B', 'filial', 'cantera', etc.\n"
                       "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you combined ALL parts of the user's request, which specific 2025-2026 players/coaches/angles you chose, and why.\n"
                       "Task 2 - Search Queries: Generate 13 realistic YouTube search queries (2 to 6 words each — real creator title phrasing!) across the target languages, split into 4 buckets:\n"
                       "  - angle='direct' (4 queries): direct analytical breakdowns, interviews, reports, and stories combining the user's exact concepts (at least 1 in Spanish/native language if applicable).\n"
@@ -376,7 +394,15 @@ jobs:
                       "Task 4 - Refinement Tips (Hebrew): Generate 2-3 short tips ('refinement_tips_he') referencing the extension's own filters (כגון 'עונה / שנים', 'סוג תוכן', 'מיון לפי תאריך' או 'מילות שלילה') — never tell the user to use YouTube's website filters.\n"
                       "Return ONLY JSON: {\"strategy_he\": \"...\", \"queries\": [{\"q\": \"...\", \"angle\": \"...\", \"note_he\": \"...\"}], \"suggestions_he\": [...], \"refinement_tips_he\": [...]}"
                   )
-                  g_exp, planner_model_used = call_gemini_json(exp_prompt, timeout_sec=26)
+                  g_exp, planner_model_used = call_gemini_json(exp_prompt, timeout_sec=24)
+                  if not isinstance(g_exp, dict):
+                      compact_exp = (
+                          f"User YouTube search: \"{clean_q}\" | Languages: {lang_desc}.\n"
+                          "Disambiguate carefully (e.g. ברצלונה אתלטיק = Barça Atlètic / Barcelona B, NOT Atlético Madrid or Athletic Bilbao).\n"
+                          "Generate 10 focused YouTube search queries across the languages (each as {\"q\":\"...\",\"angle\":\"direct|entities|community|deep\",\"note_he\":\"...\"}) + short Hebrew strategy_he + 8 short Hebrew suggestions_he.\n"
+                          "Return ONLY valid JSON: {\"strategy_he\":\"...\",\"queries\":[...],\"suggestions_he\":[...]}"
+                      )
+                      g_exp, planner_model_used = call_gemini_json(compact_exp, timeout_sec=20)
                   if isinstance(g_exp, dict):
                       ai_strategy_he = str(g_exp.get("strategy_he") or "").strip()
                       if isinstance(g_exp.get("refinement_tips_he"), list):
@@ -687,7 +713,9 @@ jobs:
                       } for idx, it in enumerate(sub_items)]
                       ai_prompt = (
                           f"User search intent: Query=\"{query or 'N/A'}\" | Channel=\"{resolved_ch or 'Any'}\" | ContentType={content_type}\n"
-                          f"Strict user filter rule: {filter_prompt}\n"
+                          + (f"Disambiguated research strategy: {ai_strategy_he}\n" if ai_strategy_he else "")
+                          + f"Strict user filter rule: {filter_prompt}\n"
+                          + "ENTITY DISAMBIGUATION: Strictly verify team/entity names! E.g. 'ברצלונה אתלטיק' means Barça Atlètic (Barcelona B reserve team) — DROP matches/press conferences against Atlético Madrid or Athletic Bilbao unless they directly discuss the requested topic!\n"
                           "You are curating a rich, high-value YouTube playlist for this user. Evaluate each video on TWO axes:\n"
                           "  1. Direct hits: covers the user's exact concept/question (score 9-10 for exact multi-angle hits, 8 for strong hits).\n"
                           "  2. Valuable related discoveries (Hidden Gems): covers an important component of the topic, a specific rising player/goalkeeper/coach, a tactical analysis, podcast, or full youth match tightly linked to the subject even if not every word from the query appears in the title (score 6-8).\n"
@@ -755,6 +783,7 @@ jobs:
               "planner_model": planner_model_used or "",
               "scorer_model": (used_models[0] if "used_models" in locals() and used_models else ""),
               "skipped_models": sorted(dead_gemini_models),
+              "gemini_errors": gemini_errors[:8],
               "strategy_he": ai_strategy_he,
               "queries": query_stats,
               "refinement_tips_he": ai_refinement_tips,
@@ -820,26 +849,45 @@ jobs:
                   except Exception: pass
               return ""
 
+          def _decap_latin(s: str) -> str:
+              """ממיר מילים ב-ALL CAPS ל-lowercase כדי ש-Google Translate לא ידלג עליהן כראשי תיבות."""
+              def _fix_w(m):
+                  w = m.group(0)
+                  if w in ("FC", "UEFA", "FIFA", "NBA", "NFL", "UFC", "HD", "4K", "U19", "U18", "U17", "U16", "U14", "U12", "PSG", "TV", "VIP"):
+                      return w
+                  return w.lower()
+              return re.sub(r"\b[A-ZÁÉÍÓÚÑÇ]{3,}\b", _fix_w, str(s or ""))
+
           def translate_one_pure_he(orig_s: str) -> str:
-              best = polish_he(gtrans_post(orig_s, "auto") or orig_s)
+              prep = _decap_latin(orig_s)
+              best = polish_he(gtrans_post(prep, "auto") or prep)
               if not has_foreign_words(best):
                   return best
-              # נסה שפות מקור מפורשות (ספרדית / אנגלית / צרפתית / ערבית) על הטקסט המקורי הנקי!
               guess_langs = []
-              if re.search(r"[\u0600-\u06FF]", orig_s): guess_langs.append("ar")
-              if re.search(r"[áéíóúñ¡¿çèà]|\b(el|la|los|las|del|en|al|gana|contra|partido|torneo|final|goles|juvenil|alev[ií]n|infantil|ni[ñn]o)\b", orig_s, re.I):
+              if re.search(r"[\u0600-\u06FF]", prep): guess_langs.append("ar")
+              if re.search(r"[áéíóúñ¡¿çèà]|\b(el|la|los|las|del|en|al|tras|rueda|prensa|completa|entrevista|directo|futuro|frente|gana|contra|partido|torneo|final|goles|juvenil|alev[ií]n|infantil|ni[ñn]o)\b", prep, re.I):
                   guess_langs.append("es")
               for lg in ("es", "en", "fr"):
                   if lg not in guess_langs: guess_langs.append(lg)
               best_score = count_foreign_alpha(best)
               for sl in guess_langs:
-                  cand = polish_he(gtrans_post(orig_s, sl) or "")
+                  cand = polish_he(gtrans_post(prep, sl) or "")
                   if cand:
                       sc = count_foreign_alpha(cand)
                       if sc < best_score:
                           best, best_score = cand, sc
                           if best_score < 3:
                               break
+              if best_score >= 3:
+                  rebuilt = best
+                  for m_sp in re.finditer(r"[A-Za-z\u00C0-\u024F][A-Za-z\u00C0-\u024F0-9\s'’&.-]{2,}", best):
+                      sp = m_sp.group(0).strip()
+                      if count_foreign_alpha(sp) < 3: continue
+                      tr_sp = gtrans_post(_decap_latin(sp), guess_langs[0]) or gtrans_post(_decap_latin(sp), "en")
+                      if tr_sp and count_foreign_alpha(tr_sp) < count_foreign_alpha(sp):
+                          rebuilt = rebuilt.replace(sp, polish_he(tr_sp), 1)
+                  if count_foreign_alpha(rebuilt) < best_score:
+                      best = polish_he(rebuilt)
               return best
 
           if translate_titles and pool:
