@@ -62,6 +62,10 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           python3 - << 'EOF'
           import os, sys, re, html, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
@@ -104,7 +108,19 @@ jobs:
           norm_audio = bool(opts.get("norm"))
           speed_val = str(opts.get("speed") or "1").strip()
           email_opt = str(opts.get("email") or "").strip()
-          send_email_flag = bool(opts.get("send_email")) or bool(email_opt)
+          email_enc = str(opts.get("email_enc") or "").strip()
+          upload_drive_flag = bool(opts.get("upload_drive"))
+          drive_only_flag = bool(opts.get("drive_only")) and upload_drive_flag
+          if email_enc and len(secret_key_env) == 64:
+              try:
+                  _re = base64.b64decode(email_enc)
+                  _de = AESGCM(bytes.fromhex(secret_key_env)).decrypt(_re[:12], _re[12:], None).decode("utf-8", errors="replace").strip()
+                  if "@" in _de:
+                      email_opt = _de
+                      print(f"::add-mask::{email_opt}", flush=True)
+              except Exception:
+                  pass
+          send_email_flag = bool(opts.get("send_email"))
 
           out_dir = Path("/tmp/out")
           pkg_dir = Path("/tmp/pkg")
@@ -923,6 +939,70 @@ jobs:
                       blob_shas.append(p.stdout.strip())
               del raw_bytes
 
+          drive_web_link = ""
+          drive_url_enc = ""
+          drive_status = ""
+          gd_cid = os.environ.get("GDRIVE_CLIENT_ID", "").strip()
+          gd_sec = os.environ.get("GDRIVE_CLIENT_SECRET", "").strip()
+          gd_ref = os.environ.get("GDRIVE_REFRESH_TOKEN", "").strip()
+          gd_fld = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
+          _share_target = email_opt if (email_opt and "@" in email_opt) else (os.environ.get("EMAIL_TO", "").strip() or os.environ.get("SMTP_TO", "").strip())
+          if _share_target and "@" in _share_target: print(f"::add-mask::{_share_target}", flush=True)
+          if upload_drive_flag:
+              if not (gd_cid and gd_sec and gd_ref):
+                  drive_status = "⚠️ חסרים Secrets של Google Drive (GDRIVE_CLIENT_ID/SECRET/REFRESH_TOKEN)"
+              else:
+                  try:
+                      tr = requests.post("https://oauth2.googleapis.com/token", data={"client_id": gd_cid, "client_secret": gd_sec, "refresh_token": gd_ref, "grant_type": "refresh_token"}, timeout=20)
+                      tr.raise_for_status()
+                      acc_tok = tr.json()["access_token"]
+                      print(f"::add-mask::{acc_tok}", flush=True)
+                      gd_h = {"Authorization": f"Bearer {acc_tok}"}
+                      if not gd_fld:
+                          fq = requests.get("https://www.googleapis.com/drive/v3/files", headers=gd_h, params={"q": "name='YouTube Cloud Ultra' and mimeType='application/vnd.google-apps.folder' and trashed=false", "fields": "files(id)"}, timeout=15)
+                          flist = (fq.json().get("files") or []) if fq.ok else []
+                          if flist:
+                              gd_fld = flist[0]["id"]
+                          else:
+                              fc = requests.post("https://www.googleapis.com/drive/v3/files", headers={**gd_h, "Content-Type": "application/json"}, json={"name": "YouTube Cloud Ultra", "mimeType": "application/vnd.google-apps.folder"}, timeout=15)
+                              if fc.ok: gd_fld = fc.json().get("id", "")
+                      up_target = primary_file if len(files) == 1 else zip_path
+                      f_total = up_target.stat().st_size
+                      meta = {"name": up_target.name}
+                      if gd_fld: meta["parents"] = [gd_fld]
+                      init_r = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink", headers={**gd_h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Length": str(f_total)}, json=meta, timeout=25)
+                      init_r.raise_for_status()
+                      up_url = init_r.headers["Location"]
+                      chunk_sz = 16 * 1024 * 1024
+                      fin_json = {}
+                      with open(up_target, "rb") as fp:
+                          pos = 0
+                          while pos < f_total:
+                              buf = fp.read(chunk_sz)
+                              if not buf: break
+                              end_b = pos + len(buf) - 1
+                              cr = requests.put(up_url, headers={"Content-Length": str(len(buf)), "Content-Range": f"bytes {pos}-{end_b}/{f_total}"}, data=buf, timeout=180)
+                              pos += len(buf)
+                              if cr.status_code in (200, 201):
+                                  fin_json = cr.json()
+                                  break
+                      fid = fin_json.get("id", "")
+                      if fid:
+                          drive_web_link = fin_json.get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
+                          print(f"::add-mask::{fid}", flush=True)
+                          print(f"::add-mask::{drive_web_link}", flush=True)
+                          if _share_target and "@" in _share_target:
+                              requests.post(f"https://www.googleapis.com/drive/v3/files/{fid}/permissions", headers={**gd_h, "Content-Type": "application/json"}, params={"sendNotificationEmail": "true"}, json={"type": "user", "role": "reader", "emailAddress": _share_target}, timeout=20)
+                          if len(secret_key_env) == 64:
+                              _iv = os.urandom(12)
+                              _ct = AESGCM(bytes.fromhex(secret_key_env)).encrypt(_iv, drive_web_link.encode("utf-8"), None)
+                              drive_url_enc = base64.b64encode(_iv + _ct).decode("ascii")
+                          drive_status = "☁️ הועלה ל-Google Drive בהצלחה"
+                          print("Google Drive upload succeeded (link encrypted & masked).", flush=True)
+                  except Exception as gd_err:
+                      print(f"Google Drive upload error: {type(gd_err).__name__}", flush=True)
+                      drive_status = f"⚠️ שגיאת Drive ({type(gd_err).__name__})"
+
           MAX_GMAIL_RAW_BYTES = int(18.0 * 1024 * 1024)
           smtp_user = (
               os.environ.get("SMTP_USER", "").strip()
@@ -985,6 +1065,7 @@ jobs:
                       f"• איכות / סוג: {quality_report}\n"
                       f"• גודל הקובץ: {file_mb} MB\n"
                       f"• פירוט צרופה: {attach_note}\n"
+                      + (f"• קישור לצפייה ב-Google Drive: {drive_web_link}\n" if drive_web_link else "")
                   )
                   if attach_target.exists() and attach_target.stat().st_size <= MAX_GMAIL_RAW_BYTES:
                       msg.add_attachment(
