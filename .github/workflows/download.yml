@@ -128,6 +128,10 @@ jobs:
           stage_dir = Path("/tmp/stage")
           subs_dir = Path("/tmp/subs")
           embedded_srt_saved = None
+          t_job_start = time.time()
+          telemetry = {"attempts": [], "winner": "", "dl_sec": 0, "sub_sec": 0, "ff_sec": 0, "pkg_sec": 0, "drive_sec": 0, "email_sec": 0, "sub_cues": 0, "sub_source": ""}
+          subs_verified_flag = None
+          subs_detail_msg = ""
           out_dir.mkdir(parents=True, exist_ok=True)
           pkg_dir.mkdir(parents=True, exist_ok=True)
           cookie_file = Path("/tmp/cookies_full.txt")
@@ -447,12 +451,11 @@ jobs:
                   return cues_list
 
               print(f"Translating {len(cues_list)} reconstructed sentences to Hebrew...", flush=True)
-              batch_size = 35
+              batch_size = 45
               batches = [cues_list[i:i + batch_size] for i in range(0, len(cues_list), batch_size)]
 
               translated_cues = []
-              # שימוש ב-4 תהליכונים מבוקרים כדי למנוע חסימת 429 ולקבל 100% עברית
-              with ThreadPoolExecutor(max_workers=4) as ex:
+              with ThreadPoolExecutor(max_workers=6) as ex:
                   for res_batch in ex.map(translate_batch_guaranteed, batches):
                       translated_cues.extend(res_batch)
 
@@ -482,9 +485,9 @@ jobs:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
               def detect_best_sub_candidates():
-                  """מזהה מראש שפת מקור יחידה (ידנית או -orig) כדי למנוע --sub-langs all ושגיאות HTTP 429."""
+                  """מזהה מראש שפת מקור יחידה; מחזיר (probe_ok, plan) כדי לעצור מיד כשאין 0 כתוביות."""
                   if mode == "collection":
-                      return []
+                      return False, []
                   probe_cmd = [
                       "python3", "-m", "yt_dlp",
                       "--ignore-config", "--force-ipv4", "--skip-download", "--no-playlist",
@@ -497,15 +500,19 @@ jobs:
                   try:
                       pr = subprocess.run(probe_cmd + [video_url], capture_output=True, text=True, timeout=45, check=False)
                       if pr.returncode != 0 or not pr.stdout.strip():
-                          return []
+                          return False, []
                       info = json.loads(pr.stdout)
                   except Exception:
-                      return []
+                      return False, []
 
                   manual = [k for k in (info.get("subtitles") or {}).keys() if k and k != "live_chat"]
                   auto = [k for k in (info.get("automatic_captions") or {}).keys() if k and k != "live_chat"]
                   vlang = str(info.get("language") or "").strip().lower()
                   vlang_base = vlang.split("-")[0] if vlang else ""
+
+                  if not manual and not auto:
+                      print(f"Subtitle pre-detect confirmed: 0 subtitles available (vlang={vlang}). Skipping fallback loop.", flush=True)
+                      return True, []
 
                   plan = []
                   seen = set()
@@ -515,29 +522,24 @@ jobs:
                           seen.add(key)
                           plan.append((flag, code, is_he))
 
-                  # 1. כתוביות ידניות בעברית
                   for k in manual:
                       if k.lower() in ("he", "iw") or k.lower().startswith(("he-", "iw-")):
                           add_plan("--write-subs", k, True)
 
-                  # 2. כתוביות אוטומטיות בעברית אם הסרטון עצמו בעברית
                   for k in auto:
                       if k.lower() in ("he-orig", "iw-orig") or (vlang_base in ("he", "iw") and k.lower() in ("he", "iw")):
                           add_plan("--write-auto-subs", k, True)
 
-                  # 3. כתוביות ידניות בשפת הסרטון או שפה מובילה (אחת בלבד)
                   if manual:
                       pref_m = next((k for k in manual if vlang and (k.lower() == vlang or k.lower().startswith(vlang_base + "-"))), None)
                       if not pref_m:
                           pref_m = next((k for k in manual if k.lower().split("-")[0] in ("en", "es", "fr", "pt", "de", "it")), manual[0])
                       add_plan("--write-subs", pref_m, pref_m.lower().startswith(("he", "iw")))
 
-                  # 4. כתוביות אוטומטיות בשפת המקור האמיתית (-orig) — תומך בכל שפה (id, ar, ca, ja וכו') ללא 429!
                   orig_autos = [k for k in auto if k.lower().endswith("-orig")]
                   for k in orig_autos[:2]:
                       add_plan("--write-auto-subs", k, k.lower().startswith(("he", "iw")))
 
-                  # 5. כתוביות אוטומטיות לפי שפת הסרטון או fallback בודד
                   if vlang:
                       m_a = next((k for k in auto if k.lower() in (vlang, vlang_base)), None)
                       if m_a:
@@ -549,12 +551,13 @@ jobs:
                       add_plan("--write-auto-subs", auto[0], auto[0].lower().startswith(("he", "iw")))
 
                   print(f"Subtitle pre-detect plan: {plan[:4]} (manual={len(manual)}, auto={len(auto)}, vlang={vlang})", flush=True)
-                  return plan[:4]
+                  return True, plan[:4]
 
-              sub_clients = [
-                  [],
-                  ["--extractor-args", "youtube:player_client=android_vr,tv_embedded,mweb"],
-              ]
+              sub_clients = (
+                  [[], ["--extractor-args", "youtube:player_client=default,web_safari"]]
+                  if has_ck
+                  else [[], ["--extractor-args", "youtube:player_client=android_vr,mweb"]]
+              )
 
               def try_download_single_sub(flag_args, lang_code, expect_he):
                   for extra_cl in sub_clients:
@@ -572,28 +575,37 @@ jobs:
                       if expect_he or has_hebrew(" ".join(c[2] for c in clean_cues[:12])):
                           final_he = subs_dir / f"{clean_stem}.he.srt"
                           final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
-                          return [final_he], "כתוביות בעברית (SRT נקי)"
+                          telemetry["sub_cues"] = len(clean_cues)
+                          telemetry["sub_source"] = lang_code
+                          return [final_he], f"כתוביות בעברית ({len(clean_cues)} שורות)"
                       he_cues = translate_cues_to_hebrew(clean_cues)
                       if he_cues:
                           final_he = subs_dir / f"{clean_stem}.he.srt"
                           final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
-                          return [final_he], f"כתוביות מתורגמות לעברית מ-{lang_code} (SRT)"
+                          telemetry["sub_cues"] = len(he_cues)
+                          telemetry["sub_source"] = f"{lang_code}->he"
+                          return [final_he], f"מתורגם לעברית מ-{lang_code} ({len(he_cues)} שורות)"
                       final_orig = subs_dir / f"{clean_stem}.orig.srt"
                       final_orig.write_text(build_srt_string(clean_cues), encoding="utf-8")
-                      return [final_orig], "כתוביות מקור (SRT נקי)"
+                      telemetry["sub_cues"] = len(clean_cues)
+                      telemetry["sub_source"] = lang_code
+                      return [final_orig], f"כתוביות מקור {lang_code} ({len(clean_cues)} שורות)"
                   return None
 
-              detected_plan = detect_best_sub_candidates()
+              probe_ok, detected_plan = detect_best_sub_candidates()
+              if probe_ok and not detected_plan:
+                  return [], "לסרטון זה אין כתוביות ביוטיוב"
+
               for sub_flag, lang_code, is_he in detected_plan:
                   res_sub = try_download_single_sub([sub_flag], lang_code, is_he)
                   if res_sub:
                       return res_sub
 
-              # גיבוי בטוח אם הזיהוי המקדים נכשל — שפה בודדת בכל ניסיון (ללא --sub-langs all שגורם ל-429)
-              for fallback_lang, is_he in [("he,iw", True), ("en-orig", False), ("en", False), ("es-orig", False), ("es", False), ("fr-orig", False)]:
-                  res_sub = try_download_single_sub(["--write-subs", "--write-auto-subs"], fallback_lang, is_he)
-                  if res_sub:
-                      return res_sub
+              if not probe_ok:
+                  for fallback_lang, is_he in [("he,iw", True), ("en-orig", False), ("en", False), ("es-orig", False), ("es", False), ("fr-orig", False)]:
+                      res_sub = try_download_single_sub(["--write-subs", "--write-auto-subs"], fallback_lang, is_he)
+                      if res_sub:
+                          return res_sub
 
               return [], "לסרטון זה אין כתוביות ביוטיוב"
 
@@ -703,7 +715,8 @@ jobs:
                   "--force-ipv4",
                   "--no-mtime",
                   "--js-runtimes", "deno",
-                  "--sleep-requests", "1.2",
+                  "--sleep-requests", "0.5",
+                  "--http-chunk-size", "10M",
                   "--socket-timeout", "25",
               ]
               if mode != "collection":
@@ -728,7 +741,7 @@ jobs:
               attempts.append((
                   "2026 Native yt-dlp Default (Clean + PO-Token, No Impersonate)", [
                       "--xff", geo,
-                      "--concurrent-fragments", "4",
+                      "--concurrent-fragments", "8",
                       "--extractor-args", pot_ep
                   ], True, False
               ))
@@ -739,7 +752,7 @@ jobs:
                       "2026 Native Default + Cookies (default,web_safari + PO-Token)", [
                           "--cookies", str(cookie_file),
                           "--xff", geo,
-                          "--concurrent-fragments", "4",
+                          "--concurrent-fragments", "8",
                           "--extractor-args", "youtube:player_client=default,web_safari;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False
@@ -749,7 +762,7 @@ jobs:
               attempts.append((
                   "2026 VisionOS + HLS Fallback (No Cookies)", [
                       "--xff", geo,
-                      "--concurrent-fragments", "3",
+                      "--concurrent-fragments", "6",
                       "--extractor-args", "youtube:player_client=visionos,tv_samsung,mweb,web_safari;fetch_pot=always",
                       "--extractor-args", pot_ep
                   ], False, True
@@ -812,7 +825,8 @@ jobs:
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
                       if att_idx > 1:
-                          time.sleep(2)
+                          time.sleep(0.5)
+                      _t_att = time.time()
 
                       if stage_dir.exists():
                           shutil.rmtree(stage_dir, ignore_errors=True)
@@ -847,7 +861,11 @@ jobs:
                               shutil.move(str(f), str(dest_f))
                               if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
                                   downloaded_media_for_url = dest_f
-                          print(f"=== Success with: {label} ===", flush=True)
+                          _att_sec = round(time.time() - _t_att, 1)
+                          telemetry["winner"] = label
+                          telemetry["dl_sec"] = round(telemetry["dl_sec"] + _att_sec, 1)
+                          telemetry["attempts"].append({"n": att_idx, "label": label, "ok": True, "sec": _att_sec})
+                          print(f"=== Success with: {label} ({_att_sec}s) ===", flush=True)
                           break
 
                       # אם יוטיוב החזיר חסימת מדינה לישראל בלבד (כמו ב-ONE / ספורט 5), קופצים מיד למנוע הפרוקסי הישראלי בלי לבזבז זמן על שאר הקליינטים מארה"ב!
@@ -889,9 +907,11 @@ jobs:
                               print(f"=== Success via Israel Proxy #{px_idx}! ===", flush=True)
                               break
 
-                  if downloaded_media_for_url and subtitles in ("embed", "files"):
-                      time.sleep(2)
-                      srt_list, _ = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
+                  if downloaded_media_for_url and (not is_audio) and subtitles in ("embed", "files"):
+                      time.sleep(0.5)
+                      _t_sub = time.time()
+                      srt_list, sub_label = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
+                      telemetry["sub_sec"] = round(telemetry["sub_sec"] + (time.time() - _t_sub), 1)
                       if srt_list:
                           best_srt = srt_list[0]
                           embedded_srt_saved = Path("/tmp/mail_embedded_subs.he.srt")
@@ -899,14 +919,20 @@ jobs:
                           if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 1800 * 1024 * 1024:
                               emb_tmp = downloaded_media_for_url.with_name("sub_" + downloaded_media_for_url.name)
                               sub_c = "mov_text" if downloaded_media_for_url.suffix.lower() == ".mp4" else "srt"
-                              ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew", "-movflags", "+faststart", str(emb_tmp)]
+                              ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c:v", "copy", "-c:a", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew", "-movflags", "+faststart", str(emb_tmp)]
                               if subprocess.run(ff_sub, check=False).returncode == 0 and emb_tmp.exists():
                                   emb_tmp.replace(downloaded_media_for_url)
                               else:
                                   shutil.copy2(str(best_srt), str(out_dir / best_srt.name))
+                                  subs_detail_msg = "⚠️ הטמעה נכשלה — צורף קובץ SRT נפרד"
                           else:
                               for s_f in srt_list:
                                   shutil.copy2(str(s_f), str(out_dir / s_f.name))
+                              subs_verified_flag = True
+                              subs_detail_msg = f"📄 צורף קובץ כתוביות ({sub_label})"
+                      else:
+                          subs_verified_flag = False
+                          subs_detail_msg = "⚠️ אין כתוביות לסרטון זה ביוטיוב" 
 
               files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
               if not files:
@@ -946,7 +972,23 @@ jobs:
               detected_h, detected_dur, quality_report = inspect_media_quality(primary_file)
 
           file_mb = round(primary_file.stat().st_size / (1024 * 1024), 2)
-          print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) <<<", flush=True)
+          if (not is_audio) and (not is_subs_only) and subtitles == "embed":
+              _sr_probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=codec_name:stream_tags=language", "-of", "json", str(primary_file)], capture_output=True, text=True, timeout=15)
+              _sub_streams = []
+              try: _sub_streams = json.loads(_sr_probe.stdout).get("streams") or []
+              except Exception: pass
+              if _sub_streams:
+                  subs_verified_flag = True
+                  _cues_n = telemetry.get("sub_cues") or 0
+                  _cues_str = f" ({_cues_n} שורות)" if _cues_n else ""
+                  subs_detail_msg = f"✅ כתוביות בעברית מוטמעות ומאומתות{_cues_str}"
+              elif not subs_detail_msg:
+                  subs_verified_flag = False
+                  subs_detail_msg = "⚠️ לא אומת ערוץ כתוביות מוטמע בקובץ"
+          elif is_subs_only:
+              subs_verified_flag = True
+              subs_detail_msg = f"✅ {quality_report}"
+          print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) | SUBS: {subs_detail_msg or 'none'} <<<", flush=True)
 
           MAX_SINGLE_ZIP_BYTES = 1850 * 1024 * 1024
           if primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
@@ -1001,16 +1043,21 @@ jobs:
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           blob_shas = []
 
-          if not cloud_only_flag and len(zip_paths) == 1 and zip_size <= 65 * 1024 * 1024:
+          _t_pkg = time.time()
+          if not cloud_only_flag and len(zip_paths) == 1 and zip_size <= 95 * 1024 * 1024:
               raw_bytes = zip_path.read_bytes()
-              chunk_size = 12 * 1024 * 1024
-              for offset in range(0, len(raw_bytes), chunk_size):
-                  chunk = raw_bytes[offset:offset + chunk_size]
-                  b64_payload = json.dumps({"content": base64.b64encode(chunk).decode("ascii"), "encoding": "base64"})
-                  p = subprocess.run(["gh", "api", f"repos/{repo}/git/blobs", "-q", ".sha", "--input", "-"], input=b64_payload, text=True, capture_output=True, check=False)
-                  if p.returncode == 0 and p.stdout.strip():
-                      blob_shas.append(p.stdout.strip())
+              chunk_size = 16 * 1024 * 1024
+              chunks_list = [raw_bytes[off:off + chunk_size] for off in range(0, len(raw_bytes), chunk_size)]
               del raw_bytes
+              def _up_blob(ch_bytes):
+                  b64_payload = json.dumps({"content": base64.b64encode(ch_bytes).decode("ascii"), "encoding": "base64"})
+                  p = subprocess.run(["gh", "api", f"repos/{repo}/git/blobs", "-q", ".sha", "--input", "-"], input=b64_payload, text=True, capture_output=True, check=False)
+                  return p.stdout.strip() if (p.returncode == 0 and p.stdout.strip()) else ""
+              with ThreadPoolExecutor(max_workers=4) as ex:
+                  shas_out = list(ex.map(_up_blob, chunks_list))
+              if all(shas_out):
+                  blob_shas = shas_out
+          telemetry["pkg_sec"] = round(time.time() - _t_pkg, 1)
 
           drive_web_link = ""
           drive_url_enc = ""
@@ -1417,17 +1464,22 @@ jobs:
               drv_marker.write_text(marker_msg, encoding="utf-8")
               rel_files = [str(drv_marker)]
               blob_shas = []
+          telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
+          telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 22.2,
+              "v": 23.0,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
+              "subs_verified": subs_verified_flag,
+              "subs_detail": subs_detail_msg,
               "email_status": email_sent_status,
               "drive_status": drive_status,
               "drive_url_enc": drive_url_enc,
               "drive_only": is_cloud_only_done,
               "cloud_only": is_cloud_only_done,
               "cloud_temp_path": "Cloud-Only (0MB Local Traffic -> Drive/Email)" if cloud_only_flag else ("/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name),
-              "blobs": blob_shas
+              "blobs": blob_shas,
+              "telemetry": telemetry
           }, ensure_ascii=False)
 
           rel_cmd = ["gh", "release", "create", tag] + rel_files + ["--repo", repo, "--title", tag, "--notes", notes]
