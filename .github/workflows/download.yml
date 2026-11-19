@@ -88,7 +88,7 @@ jobs:
           raw_sb = str(inp.get("sponsorblock", "{}")).strip()
           cookies_enc = str(inp.get("cookies_enc", "")).strip()
 
-          secret_key_env = os.environ.get("COOKIE_KEY", "").strip()
+          secret_key_env = os.environ.get("COOKIE_KEY", "").strip().strip("\"'")
           for _m in (cookies_enc, secret_key_env):
               if _m and len(_m) >= 8:
                   print(f"::add-mask::{_m}", flush=True)
@@ -481,48 +481,119 @@ jobs:
               if has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
+              def detect_best_sub_candidates():
+                  """מזהה מראש שפת מקור יחידה (ידנית או -orig) כדי למנוע --sub-langs all ושגיאות HTTP 429."""
+                  if mode == "collection":
+                      return []
+                  probe_cmd = [
+                      "python3", "-m", "yt_dlp",
+                      "--ignore-config", "--force-ipv4", "--skip-download", "--no-playlist",
+                      "--dump-single-json", "--no-warnings",
+                      "--js-runtimes", "deno",
+                      "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+                  ]
+                  if has_ck:
+                      probe_cmd += ["--cookies", str(cookie_file)]
+                  try:
+                      pr = subprocess.run(probe_cmd + [video_url], capture_output=True, text=True, timeout=45, check=False)
+                      if pr.returncode != 0 or not pr.stdout.strip():
+                          return []
+                      info = json.loads(pr.stdout)
+                  except Exception:
+                      return []
+
+                  manual = [k for k in (info.get("subtitles") or {}).keys() if k and k != "live_chat"]
+                  auto = [k for k in (info.get("automatic_captions") or {}).keys() if k and k != "live_chat"]
+                  vlang = str(info.get("language") or "").strip().lower()
+                  vlang_base = vlang.split("-")[0] if vlang else ""
+
+                  plan = []
+                  seen = set()
+                  def add_plan(flag, code, is_he):
+                      key = (flag, code)
+                      if code and key not in seen:
+                          seen.add(key)
+                          plan.append((flag, code, is_he))
+
+                  # 1. כתוביות ידניות בעברית
+                  for k in manual:
+                      if k.lower() in ("he", "iw") or k.lower().startswith(("he-", "iw-")):
+                          add_plan("--write-subs", k, True)
+
+                  # 2. כתוביות אוטומטיות בעברית אם הסרטון עצמו בעברית
+                  for k in auto:
+                      if k.lower() in ("he-orig", "iw-orig") or (vlang_base in ("he", "iw") and k.lower() in ("he", "iw")):
+                          add_plan("--write-auto-subs", k, True)
+
+                  # 3. כתוביות ידניות בשפת הסרטון או שפה מובילה (אחת בלבד)
+                  if manual:
+                      pref_m = next((k for k in manual if vlang and (k.lower() == vlang or k.lower().startswith(vlang_base + "-"))), None)
+                      if not pref_m:
+                          pref_m = next((k for k in manual if k.lower().split("-")[0] in ("en", "es", "fr", "pt", "de", "it")), manual[0])
+                      add_plan("--write-subs", pref_m, pref_m.lower().startswith(("he", "iw")))
+
+                  # 4. כתוביות אוטומטיות בשפת המקור האמיתית (-orig) — תומך בכל שפה (id, ar, ca, ja וכו') ללא 429!
+                  orig_autos = [k for k in auto if k.lower().endswith("-orig")]
+                  for k in orig_autos[:2]:
+                      add_plan("--write-auto-subs", k, k.lower().startswith(("he", "iw")))
+
+                  # 5. כתוביות אוטומטיות לפי שפת הסרטון או fallback בודד
+                  if vlang:
+                      m_a = next((k for k in auto if k.lower() in (vlang, vlang_base)), None)
+                      if m_a:
+                          add_plan("--write-auto-subs", m_a, m_a.lower().startswith(("he", "iw")))
+                  for fb in ("he", "iw", "en", "es"):
+                      if fb in auto:
+                          add_plan("--write-auto-subs", fb, fb in ("he", "iw"))
+                  if not plan and auto:
+                      add_plan("--write-auto-subs", auto[0], auto[0].lower().startswith(("he", "iw")))
+
+                  print(f"Subtitle pre-detect plan: {plan[:4]} (manual={len(manual)}, auto={len(auto)}, vlang={vlang})", flush=True)
+                  return plan[:4]
+
               sub_clients = [
                   [],
                   ["--extractor-args", "youtube:player_client=android_vr,tv_embedded,mweb"],
               ]
-              # 1. ניסיון כתוביות קיימות בעברית (ידניות או אוטומטיות)
-              for extra_cl in sub_clients:
-                  subprocess.run(base_sub_cmd + extra_cl + ["--write-subs", "--write-auto-subs", "--sub-langs", "he,iw", video_url], check=False)
-                  he_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15]
-                  if he_files:
-                      src_f = max(he_files, key=lambda p: p.stat().st_size)
+
+              def try_download_single_sub(flag_args, lang_code, expect_he):
+                  for extra_cl in sub_clients:
+                      subprocess.run(base_sub_cmd + extra_cl + flag_args + ["--sub-langs", lang_code, video_url], check=False)
+                      cand_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15 and not p.name.endswith("live_chat.json")]
+                      if not cand_files:
+                          continue
+                      src_f = max(cand_files, key=lambda p: p.stat().st_size)
+                      clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_f.stem)
                       clean_cues = clean_and_reconstruct_sentences(src_f.read_text(encoding="utf-8", errors="replace"))
-                      if clean_cues:
-                          clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_f.stem)
+                      for p in cand_files:
+                          p.unlink(missing_ok=True)
+                      if not clean_cues:
+                          continue
+                      if expect_he or has_hebrew(" ".join(c[2] for c in clean_cues[:12])):
                           final_he = subs_dir / f"{clean_stem}.he.srt"
                           final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
-                          for p in he_files:
-                              if p != final_he:
-                                  p.unlink(missing_ok=True)
                           return [final_he], "כתוביות בעברית (SRT נקי)"
+                      he_cues = translate_cues_to_hebrew(clean_cues)
+                      if he_cues:
+                          final_he = subs_dir / f"{clean_stem}.he.srt"
+                          final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
+                          return [final_he], f"כתוביות מתורגמות לעברית מ-{lang_code} (SRT)"
+                      final_orig = subs_dir / f"{clean_stem}.orig.srt"
+                      final_orig.write_text(build_srt_string(clean_cues), encoding="utf-8")
+                      return [final_orig], "כתוביות מקור (SRT נקי)"
+                  return None
 
-              # 2. ניסיון כתוביות באנגלית או שפת המקור של הסרטון (ספרדית/צרפתית/אוטומטי) ותרגום לעברית
-              for lang_code in ["en-orig,en,es,fr,pt,de,it", "all"]:
-                  for extra_cl in sub_clients:
-                      subprocess.run(base_sub_cmd + extra_cl + ["--write-subs", "--write-auto-subs", "--sub-langs", lang_code, video_url], check=False)
-                      cand_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15 and not p.name.endswith("live_chat.json")]
-                      if cand_files:
-                          src_en = max(cand_files, key=lambda p: p.stat().st_size)
-                          clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_en.stem)
-                          clean_en_cues = clean_and_reconstruct_sentences(src_en.read_text(encoding="utf-8", errors="replace"))
-                          for p in cand_files:
-                              p.unlink(missing_ok=True)
-                          if not clean_en_cues:
-                              continue
-                          he_cues = translate_cues_to_hebrew(clean_en_cues)
-                          if he_cues:
-                              final_he = subs_dir / f"{clean_stem}.he.srt"
-                              final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
-                              return [final_he], "כתוביות מתורגמות לעברית (SRT)"
-                          else:
-                              final_en = subs_dir / f"{clean_stem}.en.srt"
-                              final_en.write_text(build_srt_string(clean_en_cues), encoding="utf-8")
-                              return [final_en], "כתוביות מקור (SRT נקי)"
+              detected_plan = detect_best_sub_candidates()
+              for sub_flag, lang_code, is_he in detected_plan:
+                  res_sub = try_download_single_sub([sub_flag], lang_code, is_he)
+                  if res_sub:
+                      return res_sub
+
+              # גיבוי בטוח אם הזיהוי המקדים נכשל — שפה בודדת בכל ניסיון (ללא --sub-langs all שגורם ל-429)
+              for fallback_lang, is_he in [("he,iw", True), ("en-orig", False), ("en", False), ("es-orig", False), ("es", False), ("fr-orig", False)]:
+                  res_sub = try_download_single_sub(["--write-subs", "--write-auto-subs"], fallback_lang, is_he)
+                  if res_sub:
+                      return res_sub
 
               return [], "לסרטון זה אין כתוביות ביוטיוב"
 
@@ -944,10 +1015,10 @@ jobs:
           drive_web_link = ""
           drive_url_enc = ""
           drive_status = ""
-          gd_cid = re.sub(r"\s+", "", os.environ.get("GDRIVE_CLIENT_ID", ""))
-          gd_sec = re.sub(r"\s+", "", os.environ.get("GDRIVE_CLIENT_SECRET", ""))
-          gd_ref = re.sub(r"\s+", "", os.environ.get("GDRIVE_REFRESH_TOKEN", ""))
-          gd_fld = re.sub(r"\s+", "", os.environ.get("GDRIVE_FOLDER_ID", ""))
+          gd_cid = re.sub(r"\s+", "", os.environ.get("GDRIVE_CLIENT_ID", "")).strip("\"'")
+          gd_sec = re.sub(r"\s+", "", os.environ.get("GDRIVE_CLIENT_SECRET", "")).strip("\"'")
+          gd_ref = re.sub(r"\s+", "", os.environ.get("GDRIVE_REFRESH_TOKEN", "")).strip("\"'")
+          gd_fld = re.sub(r"\s+", "", os.environ.get("GDRIVE_FOLDER_ID", "")).strip("\"'")
           _share_target = email_opt if (email_opt and "@" in email_opt) else (os.environ.get("EMAIL_TO", "").strip() or os.environ.get("SMTP_TO", "").strip())
           if _share_target and "@" in _share_target: print(f"::add-mask::{_share_target}", flush=True)
           has_gd_secrets = bool(gd_cid and gd_sec and gd_ref)
@@ -1317,7 +1388,7 @@ jobs:
                               f"ושליחה של מעל {MAX_SAFE_SMTP_PARTS} מיילים כבדים גורמת לגוגל לנעול את חשבון ה-Gmail זמנית.\n\n"
                               f"• הקובץ המלא באיכות המקורית ({quality_report}) נשמר אצלך במחשב!\n"
                               + (f"• למייל זה צורף עותק צפייה מותאם במייל אחד בטוח ({round(attach_fp.stat().st_size / (1024*1024), 1)} MB).\n" if attach_fp else "")
-                              + "• טיפ: חבר Google Drive (לוקח דקה עם setup_gdrive_easy.py) — ואז כל קובץ גדול יועלה אוטומטית ל-Drive באיכות 100% וישלח אליך במייל אחד קליל עם קישור ישיר!\n"
+                              + "• טיפ: חבר Google Drive (דרך הגדרת ה-Secrets של Drive במאגר) — ואז כל קובץ גדול יועלה אוטומטית ל-Drive באיכות 100% וישלח אליך במייל אחד קליל עם קישור ישיר!\n"
                           )
                           if attach_fp:
                               msg.add_attachment(attach_fp.read_bytes(), maintype="application", subtype="octet-stream", filename=attach_fp.name)
@@ -1347,7 +1418,7 @@ jobs:
               rel_files = [str(drv_marker)]
               blob_shas = []
           notes = json.dumps({
-              "v": 22.1,
+              "v": 22.2,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
