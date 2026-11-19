@@ -126,6 +126,7 @@ jobs:
           pkg_dir = Path("/tmp/pkg")
           stage_dir = Path("/tmp/stage")
           subs_dir = Path("/tmp/subs")
+          embedded_srt_saved = None
           out_dir.mkdir(parents=True, exist_ok=True)
           pkg_dir.mkdir(parents=True, exist_ok=True)
           cookie_file = Path("/tmp/cookies_full.txt")
@@ -827,7 +828,9 @@ jobs:
                       srt_list, _ = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
                       if srt_list:
                           best_srt = srt_list[0]
-                          if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 400 * 1024 * 1024:
+                          embedded_srt_saved = Path("/tmp/mail_embedded_subs.he.srt")
+                          shutil.copy2(str(best_srt), str(embedded_srt_saved))
+                          if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 1800 * 1024 * 1024:
                               emb_tmp = downloaded_media_for_url.with_name("sub_" + downloaded_media_for_url.name)
                               sub_c = "mov_text" if downloaded_media_for_url.suffix.lower() == ".mp4" else "srt"
                               ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew", "-movflags", "+faststart", str(emb_tmp)]
@@ -1005,7 +1008,11 @@ jobs:
                       print(f"Google Drive upload error: {type(gd_err).__name__}", flush=True)
                       drive_status = f"⚠️ שגיאת Drive ({type(gd_err).__name__})"
 
-          MAX_GMAIL_RAW_BYTES = int(18.0 * 1024 * 1024)
+          # === LOSSLESS_MULTI_PART_EMAIL_V20 ===
+          MAX_GMAIL_RAW_BYTES = int(17.5 * 1024 * 1024)
+          TARGET_CHUNK_BYTES = int(13.5 * 1024 * 1024)
+          MAX_EMAIL_PARTS = 45
+
           smtp_user = (
               os.environ.get("SMTP_USER", "").strip()
               or os.environ.get("EMAIL_USER", "").strip()
@@ -1027,65 +1034,298 @@ jobs:
               if _em and len(_em) >= 4:
                   print(f"::add-mask::{_em}", flush=True)
 
+          def _mail_safe_stem(raw_name: str) -> str:
+              s = re.sub(r"\.f\d+(?:-\d+)?$", "", str(raw_name or "video"), flags=re.I)
+              s = re.sub(r'[<>:"/\\|?*\x00-\x1f#~%&{}^`!@$+=;]+', " ", s)
+              s = re.sub(r"\s+", " ", s).strip(" ._-")
+              return (s[:72].strip(" ._-")) or "youtube-video"
+
+          def _probe_dur_sec(fp: Path) -> float:
+              try:
+                  r = subprocess.run(
+                      ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(fp)],
+                      capture_output=True, text=True, timeout=15
+                  )
+                  return max(0.0, float((r.stdout or "0").strip()))
+              except Exception:
+                  return 0.0
+
+          def _probe_has_subs(fp: Path) -> bool:
+              try:
+                  r = subprocess.run(
+                      ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index", "-of", "csv=p=0", str(fp)],
+                      capture_output=True, text=True, timeout=15
+                  )
+                  return bool((r.stdout or "").strip())
+              except Exception:
+                  return False
+
+          def _parse_raw_srt(raw_txt: str):
+              cues = []
+              for blk in re.split(r"\r?\n\r?\n+", raw_txt.lstrip("\ufeff").strip()):
+                  lns = [l for l in blk.splitlines() if l.strip()]
+                  ti = next((i for i, l in enumerate(lns[:3]) if "-->" in l), -1)
+                  if ti < 0: continue
+                  parts = lns[ti].split("-->")
+                  if len(parts) < 2: continue
+                  s_ms = ts_to_ms(parts[0])
+                  e_ms = ts_to_ms(parts[1].strip().split()[0])
+                  body = "\r\n".join(lns[ti + 1:]).strip()
+                  if e_ms > s_ms and body:
+                      cues.append((s_ms, e_ms, body))
+              return cues
+
+          def _slice_srt_window(cues, win_start_ms: int, win_end_ms: int) -> str:
+              out = []
+              idx_c = 1
+              dur_ms = max(1, win_end_ms - win_start_ms)
+              for cs, ce, body in cues:
+                  if ce <= win_start_ms or cs >= win_end_ms:
+                      continue
+                  ns = max(0, cs - win_start_ms)
+                  ne = min(dur_ms, ce - win_start_ms)
+                  if ne - ns < 120:
+                      continue
+                  out.append(f"{idx_c}\r\n{ms_to_ts(ns)} --> {ms_to_ts(ne)}\r\n{body}")
+                  idx_c += 1
+              return ("\ufeff" + "\r\n\r\n".join(out) + "\r\n") if out else ""
+
+          def _split_lossless_once(src_fp: Path, dst_dir: Path, prefix: str, seg_sec: int, is_vid: bool):
+              dst_dir.mkdir(parents=True, exist_ok=True)
+              ext = src_fp.suffix.lower()
+              pattern = str(dst_dir / f"{prefix}_%03d{ext}")
+              cmd = [
+                  "/usr/bin/ffmpeg", "-y", "-i", str(src_fp),
+                  "-dn", "-map_chapters", "-1",
+              ]
+              if is_vid:
+                  cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+              else:
+                  cmd += ["-map", "0:a:0"]
+              cmd += ["-c", "copy", "-f", "segment", "-segment_time", str(max(4, seg_sec)), "-reset_timestamps", "1"]
+              if ext in (".mp4", ".m4a", ".mov"):
+                  cmd += ["-segment_format_options", "movflags=+faststart"]
+              cmd.append(pattern)
+              subprocess.run(cmd, capture_output=True, text=True, check=False)
+              return sorted([p for p in dst_dir.glob(f"{prefix}_*{ext}") if p.is_file() and p.stat().st_size > 0])
+
           email_sent_status = ""
           if send_email_flag and smtp_user and smtp_pass and recipient and "@" in recipient:
               try:
-                  attach_target = primary_file if len(files) == 1 else zip_path
-                  attach_note = f"מצורף הקובץ המקורי ({file_mb} MB)."
-                  if attach_target.stat().st_size > MAX_GMAIL_RAW_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
-                      mail_mp4 = Path("/tmp/email_copy.mp4")
-                      dur_sec = float(locals().get("detected_dur") or 600.0)
-                      if dur_sec <= 1.0:
-                          dur_sec = 600.0
-                      target_v_kbps = max(95, int((15.5 * 8192) / max(10.0, dur_sec)) - 56)
-                      target_h = 480 if target_v_kbps >= 280 else 360
-                      ff_mail = [
-                          "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
-                          "-map", "0:v:0", "-map", "0:a:0?", "-dn", "-map_chapters", "-1",
-                          "-vf", f"scale=trunc(oh*a/2)*2:{target_h}",
-                          "-c:v", "libx264", "-preset", "veryfast",
-                          "-b:v", f"{target_v_kbps}k", "-maxrate", f"{int(target_v_kbps * 1.15)}k", "-bufsize", f"{target_v_kbps * 2}k",
-                          "-c:a", "aac", "-b:a", "56k",
-                          "-movflags", "+faststart",
-                          "-fs", str(MAX_GMAIL_RAW_BYTES - 300000),
-                          str(mail_mp4)
-                      ]
-                      subprocess.run(ff_mail, capture_output=True, text=True, check=False)
-                      if mail_mp4.exists() and 0 < mail_mp4.stat().st_size <= MAX_GMAIL_RAW_BYTES:
-                          attach_target = mail_mp4
-                          comp_mb = round(mail_mp4.stat().st_size / (1024 * 1024), 1)
-                          attach_note = f"הקובץ המלא ({file_mb}MB) ירד באיכות {quality_report} למחשב. למייל זה צורף עותק וידאו מותאם ({comp_mb}MB) עבור מגבלת Gmail."
+                  mail_work = Path("/tmp/mail_parts")
+                  if mail_work.exists():
+                      shutil.rmtree(mail_work, ignore_errors=True)
+                  mail_work.mkdir(parents=True, exist_ok=True)
 
-                  msg = email.message.EmailMessage()
-                  msg["Subject"] = f"YouTube Cloud Ultra [{quality_report}] - {primary_file.name}"
-                  msg["From"] = smtp_user
-                  msg["To"] = recipient
-                  msg.set_content(
-                      f"שלום,\n\n"
-                      f"המשימה הושלמה בהצלחה בענן!\n"
-                      f"• שם הקובץ: {primary_file.name}\n"
-                      f"• איכות / סוג: {quality_report}\n"
-                      f"• גודל הקובץ: {file_mb} MB\n"
-                      f"• פירוט צרופה: {attach_note}\n"
-                      + (f"• קישור לצפייה ב-Google Drive: {drive_web_link}\n" if drive_web_link else "")
-                  )
-                  if attach_target.exists() and attach_target.stat().st_size <= MAX_GMAIL_RAW_BYTES:
-                      msg.add_attachment(
-                          attach_target.read_bytes(),
-                          maintype="application",
-                          subtype="octet-stream",
-                          filename=primary_file.name if attach_target != zip_path else zip_path.name
-                      )
-                  for srt_f in out_dir.glob("*.srt"):
-                      if srt_f != attach_target and srt_f.stat().st_size <= 2 * 1024 * 1024:
-                          msg.add_attachment(srt_f.read_bytes(), maintype="text", subtype="plain", filename=srt_f.name)
+                  clean_stem = _mail_safe_stem(primary_file.stem)
+                  ext_low = primary_file.suffix.lower()
+                  is_vid_file = ext_low in (".mp4", ".mkv", ".webm")
+                  is_aud_file = ext_low in (".mp3", ".m4a", ".flac", ".wav", ".opus")
+                  is_media_file = is_vid_file or is_aud_file
+                  single_orig_ok = primary_file.exists() and primary_file.stat().st_size <= MAX_GMAIL_RAW_BYTES
 
-                  with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=90) as srv:
-                      srv.login(smtp_user, smtp_pass)
-                      srv.send_message(msg)
-                  email_sent_status = "נשלח למייל בהצלחה"
+                  parts_to_send = []  # list of (media_path, dur_sec, optional_ext_srt_path)
+                  playlist_file = None
+                  has_internal_subs_preserved = False
+
+                  if single_orig_ok:
+                      ext_srts = [s for s in sorted(out_dir.glob("*.srt")) if s != primary_file and s.stat().st_size <= 2 * 1024 * 1024]
+                      parts_to_send.append((primary_file, int(round(_probe_dur_sec(primary_file))), ext_srts[0] if ext_srts else None))
+                  elif is_media_file and primary_file.exists():
+                      # איסוף כתוביות פנימיות (או קובץ SRT צמוד) כדי להטמיע אותן מסונכרנות בכל חלק!
+                      srt_cues = []
+                      srt_source = None
+                      if embedded_srt_saved and embedded_srt_saved.exists() and embedded_srt_saved.stat().st_size > 15:
+                          srt_source = embedded_srt_saved
+                      elif _probe_has_subs(primary_file):
+                          ext_tmp = mail_work / "extracted_internal.srt"
+                          if subprocess.run(["/usr/bin/ffmpeg", "-y", "-i", str(primary_file), "-map", "0:s:0", str(ext_tmp)], capture_output=True, check=False).returncode == 0 and ext_tmp.exists():
+                              srt_source = ext_tmp
+                      else:
+                          side_srts = sorted(out_dir.glob("*.srt"))
+                          if side_srts:
+                              srt_source = side_srts[0]
+                      if srt_source and srt_source.exists():
+                          srt_cues = _parse_raw_srt(srt_source.read_text(encoding="utf-8", errors="replace"))
+
+                      tot_bytes = primary_file.stat().st_size
+                      tot_dur = _probe_dur_sec(primary_file) or float(locals().get("detected_dur") or 0.0) or 600.0
+                      est_seg_sec = max(6, int(tot_dur * (TARGET_CHUNK_BYTES / max(1, tot_bytes))))
+                      raw_chunks = _split_lossless_once(primary_file, mail_work / "pass0", "seg", est_seg_sec, is_vid_file)
+
+                      # בדיקה ופיצול חוזר אדפטיבי לכל חלק שגולש מעל 17.5MB (בגלל קפיצות VBR) — ללא איבוד איכות!
+                      for _round in range(3):
+                          next_chunks = []
+                          changed = False
+                          for c_i, ch_fp in enumerate(raw_chunks):
+                              ch_sz = ch_fp.stat().st_size
+                              if ch_sz > MAX_GMAIL_RAW_BYTES:
+                                  ch_d = _probe_dur_sec(ch_fp)
+                                  n_sub = max(2, math.ceil(ch_sz / (12.8 * 1024 * 1024)))
+                                  sub_t = max(4, int(math.floor(ch_d / n_sub))) if ch_d > 6 else 4
+                                  sub_list = _split_lossless_once(ch_fp, mail_work / f"r{_round}_{c_i}", "sub", sub_t, is_vid_file)
+                                  if len(sub_list) >= 2:
+                                      next_chunks.extend(sub_list)
+                                      changed = True
+                                      continue
+                              next_chunks.append(ch_fp)
+                          raw_chunks = next_chunks
+                          if not changed:
+                              break
+
+                      # הרכבת שמות סופיים עוקבים + הטמעת כתוביות פנימיות מסונכרנות בכל חלק (remux ללא קידוד!)
+                      final_dir = mail_work / "final"
+                      final_dir.mkdir(parents=True, exist_ok=True)
+                      cursor_ms = 0
+                      pad_w = max(2, len(str(len(raw_chunks))))
+                      for idx_p, ch_fp in enumerate(raw_chunks, 1):
+                          c_dur_sec = _probe_dur_sec(ch_fp)
+                          c_dur_ms = max(1000, int(round(c_dur_sec * 1000)))
+                          win_s, win_e = cursor_ms, cursor_ms + c_dur_ms
+                          cursor_ms = win_e
+
+                          part_name = f"{clean_stem} - Part {str(idx_p).zfill(pad_w)}{ext_low}"
+                          part_dst = final_dir / part_name
+                          part_ext_srt = None
+
+                          sliced_srt_txt = _slice_srt_window(srt_cues, win_s, win_e) if srt_cues else ""
+                          if sliced_srt_txt and is_vid_file and ext_low in (".mp4", ".mkv"):
+                              part_srt_fp = final_dir / f"{clean_stem} - Part {str(idx_p).zfill(pad_w)}.he.srt"
+                              part_srt_fp.write_text(sliced_srt_txt, encoding="utf-8")
+                              if subtitles == "embed" or _probe_has_subs(primary_file):
+                                  sub_codec = "mov_text" if ext_low == ".mp4" else "srt"
+                                  mux_cmd = [
+                                      "/usr/bin/ffmpeg", "-y", "-i", str(ch_fp), "-i", str(part_srt_fp),
+                                      "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0",
+                                      "-dn", "-map_chapters", "-1", "-c", "copy", "-c:s", sub_codec,
+                                      "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew",
+                                  ]
+                                  if ext_low == ".mp4":
+                                      mux_cmd += ["-movflags", "+faststart"]
+                                  mux_cmd.append(str(part_dst))
+                                  if subprocess.run(mux_cmd, capture_output=True, check=False).returncode == 0 and part_dst.exists() and part_dst.stat().st_size > 0:
+                                      has_internal_subs_preserved = True
+                                  else:
+                                      shutil.copy2(str(ch_fp), str(part_dst))
+                                      part_ext_srt = part_srt_fp
+                              else:
+                                  shutil.copy2(str(ch_fp), str(part_dst))
+                                  if subtitles == "files":
+                                      part_ext_srt = part_srt_fp
+                          else:
+                              shutil.copy2(str(ch_fp), str(part_dst))
+
+                          if part_dst.exists() and part_dst.stat().st_size <= int(18.5 * 1024 * 1024):
+                              parts_to_send.append((part_dst, int(round(c_dur_sec)), part_ext_srt))
+
+                      # יצירת קובץ פלייליסט .m3u8 (UTF-8) להפעלה אוטומטית ברצף של כל החלקים בתיקייה אחת!
+                      if len(parts_to_send) > 1:
+                          pl_lines = ["#EXTM3U"]
+                          for pf, pdur, _ in parts_to_send[:MAX_EMAIL_PARTS]:
+                              pl_lines.append(f"#EXTINF:{max(1, pdur)},{pf.stem}")
+                              pl_lines.append(pf.name)
+                          playlist_file = final_dir / f"00 - הפעל הכל לפי הסדר - {clean_stem}.m3u8"
+                          playlist_file.write_text("\n".join(pl_lines) + "\n", encoding="utf-8")
+
+                  if not parts_to_send:
+                      raise RuntimeError("אין קובץ תקין מתחת למגבלת Gmail")
+
+                  total_parts = min(len(parts_to_send), MAX_EMAIL_PARTS)
+                  truncated_note = f"\n⚠️ הערה: הקובץ פוצל ל-{len(parts_to_send)} חלקים; נשלחו {MAX_EMAIL_PARTS} החלקים הראשונים בשל מגבלת Gmail." if len(parts_to_send) > MAX_EMAIL_PARTS else ""
+                  thread_id = f"<ytcloud-{req_id}-part1@gmail.com>"
+                  base_subject = f"YouTube Cloud Ultra [{quality_report}] - {clean_stem}"
+
+                  def _open_smtp():
+                      s = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=120)
+                      s.login(smtp_user, smtp_pass)
+                      return s
+
+                  srv = _open_smtp()
+                  sent_ok = 0
+                  try:
+                      for p_idx, (part_fp, part_dur, part_srt) in enumerate(parts_to_send[:total_parts], 1):
+                          part_mb = round(part_fp.stat().st_size / (1024 * 1024), 1)
+                          msg = email.message.EmailMessage()
+                          msg["Subject"] = base_subject
+                          msg["From"] = smtp_user
+                          msg["To"] = recipient
+                          if p_idx == 1:
+                              msg["Message-ID"] = thread_id
+                          else:
+                              msg["Message-ID"] = f"<ytcloud-{req_id}-part{p_idx}@gmail.com>"
+                              msg["In-Reply-To"] = thread_id
+                              msg["References"] = thread_id
+
+                          if total_parts == 1:
+                              body_txt = (
+                                  f"שלום,\n\n"
+                                  f"הקובץ הורד ונשלח אליך באיכות המקורית המלאה (ללא דחיסה)!\n"
+                                  f"• שם הקובץ: {part_fp.name}\n"
+                                  f"• איכות / סוג: {quality_report}\n"
+                                  f"• גודל: {part_mb} MB\n"
+                                  + (f"• קישור Google Drive: {drive_web_link}\n" if drive_web_link else "")
+                              )
+                          else:
+                              sub_line = "• כתוביות פנימיות בעברית: מוטמעות ומסונכרנות אוטומטית בכל חלק!\n" if has_internal_subs_preserved else ""
+                              pl_line = (
+                                  f"• להפעלה אוטומטית לפי הסדר: שמור את כל {total_parts} החלקים + קובץ הפלייליסט (.m3u8 המצורף למייל #1) "
+                                  f"באותה תיקייה ולחץ דאבל-קליק על \"00 - הפעל הכל לפי הסדר...\" (או הפעל את Part 01 ב-VLC/Media Player/PotPlayer).\n"
+                              )
+                              body_txt = (
+                                  f"שלום,\n\n"
+                                  f"חלק {p_idx} מתוך {total_parts} — איכות מקורית מלאה ללא שום דחיסה!\n"
+                                  f"• קובץ מצורף: {part_fp.name} ({part_mb} MB)\n"
+                                  f"• איכות מקור: {quality_report} (גודל כולל: {file_mb} MB)\n"
+                                  f"{sub_line}{pl_line}{truncated_note}"
+                                  + (f"• קישור Google Drive: {drive_web_link}\n" if drive_web_link else "")
+                              )
+                          msg.set_content(body_txt)
+
+                          if p_idx == 1 and playlist_file and playlist_file.exists():
+                              msg.add_attachment(
+                                  playlist_file.read_bytes(),
+                                  maintype="application",
+                                  subtype="vnd.apple.mpegurl",
+                                  filename=playlist_file.name
+                              )
+
+                          msg.add_attachment(
+                              part_fp.read_bytes(),
+                              maintype="application",
+                              subtype="octet-stream",
+                              filename=part_fp.name
+                          )
+
+                          if part_srt and part_srt.exists() and part_srt.stat().st_size <= 2 * 1024 * 1024:
+                              msg.add_attachment(part_srt.read_bytes(), maintype="text", subtype="plain", filename=part_srt.name)
+
+                          for _try in range(2):
+                              try:
+                                  srv.send_message(msg)
+                                  sent_ok += 1
+                                  break
+                              except Exception:
+                                  if _try == 0:
+                                      try: srv.quit()
+                                      except Exception: pass
+                                      time.sleep(2)
+                                      srv = _open_smtp()
+                                  else:
+                                      raise
+                          if p_idx < total_parts:
+                              time.sleep(1.0)
+                  finally:
+                      try: srv.quit()
+                      except Exception: pass
+
+                  if total_parts == 1:
+                      email_sent_status = "נשלח למייל באיכות מקורית"
+                  else:
+                      sub_tag = " + כתוביות פנימיות" if has_internal_subs_preserved else ""
+                      email_sent_status = f"נשלח למייל באיכות מקורית ({sent_ok}/{total_parts} חלקים + פלייליסט ניגון רציף{sub_tag})"
+                  print(f">>> EMAIL OK: {email_sent_status}", flush=True)
               except Exception as e:
-                  print(f"Email delivery error: {type(e).__name__}", flush=True)
+                  print(f"Email delivery error: {type(e).__name__}: {e}", flush=True)
                   email_sent_status = f"שגיאת מייל ({type(e).__name__})"
 
           is_drv_only_done = bool(drive_only_flag and drive_web_link)
