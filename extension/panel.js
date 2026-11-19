@@ -377,12 +377,17 @@
 
   function renderSuggestedSearches(activeRec) {
     const wrap = el("suggestedSearchesWrap"), chips = el("suggestedSearchesChips");
-    const defaultSuggestions = ["לאמין ימאל בלה מאסיה", "תקצירי ברצלונה לה ליגה", "דוקומנטרי אקדמיות כדורגל", "דני אבדיה NBA תקציר", "משחקי קלאסיקו היסטוריים", "פודקאסט הפודיום כדורגל"];
-    const suggs = (activeRec && Array.isArray(activeRec.suggestedSearches) && activeRec.suggestedSearches.length) ? activeRec.suggestedSearches : (!activeRec ? defaultSuggestions : []);
+    const defaultSuggestions = ["לה מאסיה 2026", "ברצלונה נוער 2026/27", "אוריין גורן לה מאסיה", "תקצירי ברצלונה לה ליגה", "ליגת האלופות לנוער ברצלונה", "דני אבדיה NBA 2026", "משחקי קלאסיקו מלאים", "פודקאסט הפודיום 2026"];
+    let suggs = (activeRec && Array.isArray(activeRec.suggestedSearches) && activeRec.suggestedSearches.length) ? [...activeRec.suggestedSearches] : (!activeRec ? [...defaultSuggestions] : []);
+    const baseQ = (activeRec && activeRec.query && !String(activeRec.query).toUpperCase().startsWith("SIMILAR:")) ? String(activeRec.query).trim() : "";
+    if (baseQ && !baseQ.includes("2026")) {
+      const q26 = baseQ + " 2026";
+      if (!suggs.some((x) => x.trim() === q26)) suggs.unshift(q26);
+    }
     chips.replaceChildren();
     if (!suggs.length) { wrap.style.display = "none"; return; }
     wrap.style.display = "flex";
-    for (const s of suggs.slice(0, 10)) {
+    for (const s of suggs.slice(0, 16)) {
       const b = document.createElement("button");
       b.type = "button"; b.className = "btn suggest-chip"; b.textContent = "✨ " + s;
       b.onclick = () => runSuggestedSearch(s);
