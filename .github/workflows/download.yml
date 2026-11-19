@@ -916,7 +916,7 @@ jobs:
                           best_srt = srt_list[0]
                           embedded_srt_saved = Path("/tmp/mail_embedded_subs.he.srt")
                           shutil.copy2(str(best_srt), str(embedded_srt_saved))
-                          if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 1800 * 1024 * 1024:
+                          if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 8000 * 1024 * 1024:
                               emb_tmp = downloaded_media_for_url.with_name("sub_" + downloaded_media_for_url.name)
                               sub_c = "mov_text" if downloaded_media_for_url.suffix.lower() == ".mp4" else "srt"
                               ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c:v", "copy", "-c:a", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew", "-movflags", "+faststart", str(emb_tmp)]
@@ -990,53 +990,69 @@ jobs:
               subs_detail_msg = f"✅ {quality_report}"
           print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) | SUBS: {subs_detail_msg or 'none'} <<<", flush=True)
 
-          MAX_SINGLE_ZIP_BYTES = 1850 * 1024 * 1024
-          if primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES and primary_file.suffix.lower() in (".mp4", ".mkv", ".webm"):
-              num_parts = math.ceil(primary_file.stat().st_size / (1400 * 1024 * 1024))
-              part_dur = max(60, int(math.ceil((detected_dur or 7200.0) / num_parts)))
-              seg_pattern = str(out_dir / f"{primary_file.stem} - Part%02d{primary_file.suffix}")
-              seg_cmd = [
-                  "/usr/bin/ffmpeg", "-y", "-i", str(primary_file),
-                  "-map", "0:v:0", "-map", "0:a:0?",
-                  "-dn", "-map_chapters", "-1",
-                  "-c", "copy",
-                  "-f", "segment", "-segment_time", str(part_dur),
-                  "-reset_timestamps", "1",
-                  "-segment_format_options", "movflags=+faststart",
-                  seg_pattern
-              ]
-              if subprocess.run(seg_cmd, check=False).returncode == 0:
-                  primary_file.unlink(missing_ok=True)
-                  files = sorted([p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0])
-                  media_out = [p for p in files if p.suffix.lower() in (".mp4", ".mkv", ".webm")]
-                  if media_out:
-                      primary_file = media_out[0]
-
+          MAX_SINGLE_ZIP_BYTES = 1800 * 1024 * 1024
           tag = "dl-" + req_id
           zip_paths = []
-          cur_batch = []
-          cur_batch_bytes = 0
-          for f in files:
-              f_sz = f.stat().st_size
-              if cur_batch and (cur_batch_bytes + f_sz > MAX_SINGLE_ZIP_BYTES):
-                  z_idx = len(zip_paths) + 1
-                  zp = pkg_dir / f"{tag}-part{z_idx}.zip"
+          split_join_meta = None
+
+          if cloud_only_flag:
+              zip_paths = [primary_file]
+          elif primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES:
+              total_sz = primary_file.stat().st_size
+              num_parts = max(2, math.ceil(total_sz / MAX_SINGLE_ZIP_BYTES))
+              part_target = math.ceil(total_sz / num_parts)
+              part_names = []
+              print(f">>> Large file ({round(total_sz/(1024*1024), 1)} MB > 1800 MB): raw binary splitting into {num_parts} parts for automatic lossless reassembly <<<", flush=True)
+              with open(primary_file, "rb") as src_fp:
+                  for p_i in range(1, num_parts + 1):
+                      p_name = f"{tag}.part{p_i:02d}.bin"
+                      p_path = pkg_dir / p_name
+                      rem = part_target if p_i < num_parts else (total_sz - (p_i - 1) * part_target)
+                      with open(p_path, "wb") as dst_fp:
+                          while rem > 0:
+                              buf = src_fp.read(min(16 * 1024 * 1024, rem))
+                              if not buf:
+                                  break
+                              dst_fp.write(buf)
+                              rem -= len(buf)
+                      zip_paths.append(p_path)
+                      part_names.append(p_name)
+              split_join_meta = {
+                  "filename": primary_file.name,
+                  "total_size": total_sz,
+                  "parts": part_names,
+              }
+              extra_small = [f for f in files if f != primary_file]
+              if extra_small:
+                  zp_extra = pkg_dir / f"{tag}-extras.zip"
+                  with zipfile.ZipFile(zp_extra, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
+                      for bf in extra_small:
+                          zf.write(bf, bf.relative_to(out_dir))
+                  zip_paths.append(zp_extra)
+          else:
+              cur_batch = []
+              cur_batch_bytes = 0
+              for f in files:
+                  f_sz = f.stat().st_size
+                  if cur_batch and (cur_batch_bytes + f_sz > MAX_SINGLE_ZIP_BYTES):
+                      z_idx = len(zip_paths) + 1
+                      zp = pkg_dir / f"{tag}-part{z_idx}.zip"
+                      with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
+                          for bf in cur_batch:
+                              zf.write(bf, bf.relative_to(out_dir))
+                      zip_paths.append(zp)
+                      cur_batch = [f]
+                      cur_batch_bytes = f_sz
+                  else:
+                      cur_batch.append(f)
+                      cur_batch_bytes += f_sz
+
+              if cur_batch:
+                  zp = pkg_dir / (f"{tag}.zip" if not zip_paths else f"{tag}-part{len(zip_paths)+1}.zip")
                   with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
                       for bf in cur_batch:
                           zf.write(bf, bf.relative_to(out_dir))
                   zip_paths.append(zp)
-                  cur_batch = [f]
-                  cur_batch_bytes = f_sz
-              else:
-                  cur_batch.append(f)
-                  cur_batch_bytes += f_sz
-
-          if cur_batch:
-              zp = pkg_dir / (f"{tag}.zip" if not zip_paths else f"{tag}-part{len(zip_paths)+1}.zip")
-              with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
-                  for bf in cur_batch:
-                      zf.write(bf, bf.relative_to(out_dir))
-              zip_paths.append(zp)
 
           zip_path = zip_paths[0]
           zip_size = sum(z.stat().st_size for z in zip_paths)
@@ -1089,7 +1105,7 @@ jobs:
                           else:
                               fc = requests.post("https://www.googleapis.com/drive/v3/files", headers={**gd_h, "Content-Type": "application/json"}, json={"name": "YouTube Cloud Ultra", "mimeType": "application/vnd.google-apps.folder"}, timeout=15)
                               if fc.ok: gd_fld = fc.json().get("id", "")
-                      up_target = primary_file if len(files) == 1 else zip_path
+                      up_target = primary_file if (len(files) == 1 or split_join_meta or cloud_only_flag) else zip_path
                       f_total = up_target.stat().st_size
                       meta = {"name": up_target.name}
                       if gd_fld: meta["parents"] = [gd_fld]
@@ -1467,11 +1483,12 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.0,
+              "v": 23.1,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "subs_verified": subs_verified_flag,
               "subs_detail": subs_detail_msg,
+              "split_join": split_join_meta,
               "email_status": email_sent_status,
               "drive_status": drive_status,
               "drive_url_enc": drive_url_enc,
