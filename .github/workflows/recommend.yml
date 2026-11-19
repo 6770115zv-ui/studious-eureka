@@ -131,13 +131,13 @@ jobs:
 
           class AIRouter:
               PREFERRED_GEMINI = [
-                  "gemini-3.1-flash-lite",
-                  "gemini-2.5-flash",
-                  "gemini-2.5-flash-lite",
+                  "gemini-3.8-flash",
+                  "gemini-3.7-flash",
+                  "gemini-3.6-flash",
                   "gemini-3.5-flash-lite",
-                  "gemini-3-flash-preview",
+                  "gemini-3.1-flash-lite",
+                  "gemini-4-hydrogen",
                   "gemini-3.5-flash",
-                  "gemini-2.0-flash",
               ]
               GITHUB_MODELS = ["openai/gpt-4.1-mini", "openai/gpt-4o-mini"]
               GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
@@ -218,7 +218,7 @@ jobs:
                               low = name.lower()
                               if not low.startswith("gemini-"):
                                   continue
-                              if any(bad in low for bad in ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "computer-use", "deep-research", "1.0", "1.5")):
+                              if any(bad in low for bad in ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "computer-use", "deep-research", "omni", "preview", "exp", "1.0", "1.5", "2.0", "2.5")):
                                   continue
                               found.append(name)
                       else:
@@ -262,7 +262,7 @@ jobs:
                   low = model_name.lower()
                   fields = getattr(_gtypes.ThinkingConfig, "model_fields", {}) or {}
                   try:
-                      if "gemini-3" in low:
+                      if "gemini-3" in low or "gemini-4" in low:
                           if "thinking_level" in fields:
                               return _gtypes.ThinkingConfig(thinking_level="minimal")
                           if "thinking_budget" in fields:
@@ -323,7 +323,7 @@ jobs:
               def _call_openai_compat(self, url: str, headers: dict, model_name: str, prompt_text: str, timeout_sec: int):
                   r = requests.post(
                       url,
-                      headers={**headers, "Content-Type": "application/json"},
+                      headers={**headers, "Content-Type": "application/json", "Accept": "application/json"},
                       json={
                           "model": model_name,
                           "temperature": 0.15,
@@ -337,9 +337,16 @@ jobs:
                   )
                   if r.status_code != 200:
                       raise RuntimeError(f"HTTP {r.status_code}: {r.text[:140]}")
-                  content = ((((r.json().get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
+                  raw_body = (r.text or "").strip()
+                  if not raw_body:
+                      raise RuntimeError("HTTP 200 empty body")
+                  try:
+                      data_j = json.loads(raw_body)
+                  except Exception:
+                      raise RuntimeError(f"non-JSON HTTP 200: {raw_body[:100]}")
+                  content = ((((data_j.get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
                   if not content:
-                      raise RuntimeError("empty_response")
+                      raise RuntimeError("empty_choices_content")
                   return _parse_json_lenient(content)
 
               def _record(self, stage, provider, model, key_alias, status, ms, err=""):
@@ -374,7 +381,8 @@ jobs:
                           self.rr_cursor += 1
                       key_indices = [(start_k + i) % len(self.gemini_keys) for i in range(len(self.gemini_keys))]
 
-                      for round_i in range(2):
+                      max_rounds = 1 if len(self.gemini_models) >= 4 else 2
+                      for round_i in range(max_rounds):
                           for m_name in self.gemini_models:
                               if m_name in self.dead_models:
                                   continue
@@ -383,7 +391,7 @@ jobs:
                                   if alias in self.dead_keys:
                                       continue
                                   cd_until = self.cooldowns.get((alias, m_name), 0)
-                                  if round_i == 0 and cd_until > now:
+                                  if cd_until > now:
                                       continue
                                   t0 = time.time()
                                   try:
@@ -418,30 +426,37 @@ jobs:
                                           self.key_stats[alias]["status"] = "quota_429"
                                           if len(self.gemini_keys) == 1:
                                               self._add_alert("⚠️ מפתח Gemini הגיע למגבלת קצב/מכסה (429) — מומלץ להוסיף GEMINI_API_KEY_2 ב-Secrets לרוטציה.")
+                                      elif "504" in low_e or "deadline_exceeded" in low_e or "deadline expired" in low_e:
+                                          self.cooldowns[(alias, m_name)] = time.time() + 60
+                                          self.key_stats[alias]["status"] = "busy_503"
                                       elif "503" in low_e or "unavailable" in low_e or "high demand" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 18
+                                          self.cooldowns[(alias, m_name)] = time.time() + 25
                                           self.key_stats[alias]["status"] = "busy_503"
                                       elif "timeout" in low_e or "timed out" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 20
+                                          self.cooldowns[(alias, m_name)] = time.time() + 45
                           if round_i == 0:
                               time.sleep(0.8)
                               now = time.time()
 
                   # 2. גיבוי אוטומטי חינמי: GitHub Models API (דרך GH_TOKEN + permissions: models: read)
                   if self.gh_token and "GitHub-Models" not in self.dead_keys:
-                      gh_h = {"Authorization": f"Bearer {self.gh_token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-                      for gm in self.GITHUB_MODELS:
+                      gh_h = {"Authorization": f"Bearer {self.gh_token}"}
+                      gh_targets = [
+                          ("https://models.github.ai/inference/chat/completions", "openai/gpt-4.1-mini"),
+                          ("https://models.inference.ai.azure.com/chat/completions", "gpt-4o-mini"),
+                      ]
+                      for g_url, gm in gh_targets:
                           t0 = time.time()
                           try:
-                              res = self._call_openai_compat("https://models.github.ai/inference/chat/completions", gh_h, gm, prompt_text, min(timeout_sec, 35))
+                              res = self._call_openai_compat(g_url, gh_h, gm, prompt_text, min(timeout_sec, 22))
                               self._record(stage, "github_models", gm, "GitHub-Models", "ok", (time.time() - t0) * 1000)
-                              self._add_alert(f"🛡️ שרתי Gemini היו בעומס (503/Timeout) — בוצע מעבר אוטומטי וחלק ל-GitHub Models ({gm})!")
+                              self._add_alert(f"🛡️ שרתי Gemini היו בעומס — בוצע מעבר אוטומטי וחלק ל-GitHub Models ({gm})!")
                               return res, f"gh:{gm.split('/')[-1]}"
                           except Exception as e:
                               es = f"{type(e).__name__}: {str(e)}"
                               self._record(stage, "github_models", gm, "GitHub-Models", "fail", (time.time() - t0) * 1000, es)
                               print(f"AIRouter [{stage}] GitHub-Models/{gm} failed: {es[:130]}", flush=True)
-                              if "401" in es or "403" in es:
+                              if "401" in es or "403" in es or "empty body" in es.lower():
                                   self.dead_keys.add("GitHub-Models")
                                   self.key_stats["GitHub-Models"]["status"] = "denied"
                                   break
@@ -741,7 +756,7 @@ jobs:
                       "Task 4 - Refinement Tips (Hebrew): Generate 2-3 short tips ('refinement_tips_he') referencing the extension's own filters (כגון 'עונה / שנים', 'סוג תוכן', 'מיון לפי תאריך' או 'מילות שלילה') — never tell the user to use YouTube's website filters.\n"
                       "Return ONLY JSON: {\"strategy_he\": \"...\", \"queries\": [{\"q\": \"...\", \"angle\": \"...\", \"note_he\": \"...\"}], \"suggestions_he\": [...], \"refinement_tips_he\": [...]}"
                   )
-                  g_exp, planner_model_used = call_gemini_json(exp_prompt, timeout_sec=32, stage="planner")
+                  g_exp, planner_model_used = call_gemini_json(exp_prompt, timeout_sec=18, stage="planner")
                   if not isinstance(g_exp, dict):
                       compact_exp = (
                           f"User YouTube search: \"{clean_q}\" | Languages: {lang_desc}.\n"
@@ -749,7 +764,7 @@ jobs:
                           "Generate 10 focused YouTube search queries across the languages (each as {\"q\":\"...\",\"angle\":\"direct|entities|community|deep\",\"note_he\":\"...\"}) + short Hebrew strategy_he + 8 short Hebrew suggestions_he.\n"
                           "Return ONLY valid JSON: {\"strategy_he\":\"...\",\"queries\":[...],\"suggestions_he\":[...]}"
                       )
-                      g_exp, planner_model_used = call_gemini_json(compact_exp, timeout_sec=26, stage="planner_retry")
+                      g_exp, planner_model_used = call_gemini_json(compact_exp, timeout_sec=16, stage="planner_retry")
                   if isinstance(g_exp, dict):
                       ai_strategy_he = str(g_exp.get("strategy_he") or "").strip()
                       if isinstance(g_exp.get("refinement_tips_he"), list):
@@ -1043,7 +1058,7 @@ jobs:
                   for it_s in ai_slice:
                       sq_s = it_s.get("source_q") or ""
                       if sq_s: ai_sent_by_q[sq_s] = ai_sent_by_q.get(sq_s, 0) + 1
-                  chunk_sz = 65
+                  chunk_sz = 45
                   chunks_ai = [(off, ai_slice[off:off + chunk_sz]) for off in range(0, len(ai_slice), chunk_sz)]
 
                   def _score_ai_chunk(pair):
@@ -1072,7 +1087,7 @@ jobs:
                           "Return ONLY JSON: {\"keep\": [{\"i\": 0, \"s\": 9, \"r\": \"...\"}]}\n"
                           f"Videos: {json.dumps(compact, ensure_ascii=False)}"
                       )
-                      return call_gemini_json(ai_prompt, timeout_sec=40, stage=f"scorer_{offset//chunk_sz + 1}")
+                      return call_gemini_json(ai_prompt, timeout_sec=18, stage=f"scorer_{offset//chunk_sz + 1}")
 
                   score_map, reason_map, used_models = {}, {}, []
                   _ai_workers = min(len(chunks_ai), max(2, len(ai_router.gemini_keys) + 1))
@@ -1175,6 +1190,10 @@ jobs:
               (r"\bLionel Messi\b|\bLeo Messi\b", "ליונל מסי"), (r"\bAnsu Fati\b", "אנסו פאטי"), (r"\bGavi\b", "גאבי"),
               (r"\bMarc Bernal\b", "מארק ברנאל"), (r"\bDani Olmo\b", "דני אולמו"), (r"\bFerm[ií]n\b", "פרמין"),
               (r"\bEric Garc[ií]a\b", "אריק גרסיה"), (r"\bAndr[eé]s Iniesta\b", "אנדרס אינייסטה"),
+              (r"\bHansi\s+Flick\b|פליק של הנסי|פליק הנסי|הנסי פליק|האנסי פליק", "האנזי פליק"),
+              (r"\bFlick\b|ס[\u0591-\u05C7]*ט[\u0591-\u05C7]*י[\u0591-\u05C7]*ר[\u0591-\u05C7]*ה\s+ק[\u0591-\u05C7]*ל[\u0591-\u05C7]*ה", "פליק"),
+              (r"\bDeco\b", "דקו"), (r"\bBar[cç]a\s+Atl[eèé]tic\b|ברצלונה\s+ATL[EÈÉ]TIC", "ברצלונה אתלטיק"),
+              (r"פ[\u0591-\u05C7]*נ[\u0591-\u05C7]*י[\u0591-\u05C7]*נ[\u0591-\u05C7]*ה", "פנינה"),
               (r"\bדגשים\b|\bהבהרה\b|\bהבהרות\b", "תקציר")
           ]
           def polish_he(t: str) -> str:
@@ -1205,10 +1224,13 @@ jobs:
                   if w in ("FC", "UEFA", "FIFA", "NBA", "NFL", "UFC", "HD", "4K", "U19", "U18", "U17", "U16", "U14", "U12", "PSG", "TV", "VIP"):
                       return w
                   return w.lower()
-              return re.sub(r"\b[A-ZÁÉÍÓÚÑÇ]{3,}\b", _fix_w, str(s or ""))
+              return re.sub(r"\b[A-ZÀÈÌÒÙÁÉÍÓÚÑÇÜ]{2,}\b", _fix_w, str(s or ""))
 
           def translate_one_pure_he(orig_s: str) -> str:
               prep = _decap_latin(orig_s)
+              prep = re.sub(r"\bhansi\s+flick\b", "האנזי פליק", prep, flags=re.I)
+              prep = re.sub(r"\bflick\b", "פליק", prep, flags=re.I)
+              prep = re.sub(r"\bbar[cç]a\s+atl[eèé]tic\b", "ברצלונה אתלטיק", prep, flags=re.I)
               best = polish_he(gtrans_post(prep, "auto") or prep)
               if not has_foreign_words(best):
                   return best
@@ -1260,7 +1282,7 @@ jobs:
                           f"Return ONLY JSON object: {{\"titles\": [exactly {len(batch)} Hebrew strings in exact order]}}.\n"
                           f"Titles: {json.dumps([p[1] for p in batch], ensure_ascii=False)}"
                       )
-                      g_tr, _ = call_gemini_json(tr_prompt, timeout_sec=32, stage=f"translate_{b_s//35 + 1}")
+                      g_tr, _ = call_gemini_json(tr_prompt, timeout_sec=18, stage=f"translate_{b_s//35 + 1}")
                       arr_tr = g_tr.get("titles") if isinstance(g_tr, dict) else (g_tr if isinstance(g_tr, list) else None)
                       if isinstance(arr_tr, list) and len(arr_tr) == len(batch):
                           for (item_idx, orig_s), he_t in zip(batch, arr_tr):
@@ -1320,6 +1342,8 @@ jobs:
               item["channel"] = " • ".join(p for p in [item["channel"], f"🎬 {qb}" if qb else ""] if p)
               if item.get("title_he"): item["title"] = item["title_he"]
 
+          ai_trace["ai_infra"] = ai_router.export_telemetry()
+          ai_trace["gemini_errors"] = ai_router.errors[:12]
           payload_bytes = json.dumps({
               "query": query, "en_query": en_query, "expanded_queries": expanded_queries,
               "suggested_searches": suggested_searches, "channel": resolved_ch or channel_input,
