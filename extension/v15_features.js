@@ -27,7 +27,7 @@
   }
 
   function stripNoiseBeforeTranslate(t) {
-    return String(t || "").replace(/[\u2066-\u2069\u200e\u200f]/g, "").replace(/\\u[0-9a-fA-F]{4}/g, " ").replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, "").replace(/\s+/g, " ").trim();
+    return String(t || "").replace(/[\u2066-\u2069\u200e\u200f]/g, "").replace(/^\s*\[(?:ESP|ENG|CAT|FR|ITA|DE|PT|AR|HD|4K)\]\s*/i, "").replace(/\\u[0-9a-fA-F]{4}/g, " ").replace(/#[a-zA-Z0-9_\u0590-\u05FF]+/g, "").replace(/\s+/g, " ").trim();
   }
 
   // מילון השלמה סופי לעברית (רץ רק אחרי התרגום כדי לא לשבור sl=auto!)
@@ -93,13 +93,20 @@
       const tr = await gtransPost(cleanOrig, sl);
       if (tr) return polishSportsHebrew(tr);
     }
-    const trAuto = await gtransPost(cleanOrig, "auto");
-    let out = polishSportsHebrew(trAuto || cleanOrig);
-    if (needsHebrewTranslation(out)) {
-      const trEn = await gtransPost(out, "en");
-      if (trEn) out = polishSportsHebrew(trEn);
+    const countForeign = (s) => (String(s || "").match(/[a-zA-Z\u00C0-\u024F\u0600-\u06FF\u0400-\u04FF]/g) || []).length;
+    let best = polishSportsHebrew((await gtransPost(cleanOrig, "auto")) || cleanOrig);
+    let bestScore = countForeign(best);
+    if (bestScore >= 3) {
+      for (const sl of ["es", "en", "fr"]) {
+        const tr = await gtransPost(cleanOrig, sl);
+        if (tr) {
+          const cand = polishSportsHebrew(tr);
+          const sc = countForeign(cand);
+          if (sc < bestScore) { best = cand; bestScore = sc; if (bestScore < 3) break; }
+        }
+      }
     }
-    return out;
+    return best;
   }
 
   async function translateTitlesBatchToHebrew(titlesList) {
