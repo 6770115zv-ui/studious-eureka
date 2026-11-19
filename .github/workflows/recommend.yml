@@ -382,15 +382,75 @@ jobs:
           resolved_ch, target_uc_id = channel_input, ""
           date_op = f" {season_info[2]}" if season_info else ""
 
+          NETWORK_CLUSTERS = {
+              "@one-1004": ["@one-1004", "@one4576", "@one5353", "@onepodcasts3641"],
+              "@one4576": ["@one4576", "@one-1004", "@one5353"],
+              "@one5353": ["@one5353", "@one-1004", "@one4576"],
+              "@hapodium_podcast": ["@hapodium_podcast", "@hapodium_sport"],
+              "@hapodium_sport": ["@hapodium_sport", "@hapodium_podcast"],
+          }
+          def fetch_channel_playlists_videos(uc_id_str: str, ch_title_str: str):
+              if not uc_id_str: return []
+              pl_ids = []
+              try:
+                  r = requests.post("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", headers=build_headers(), json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00","hl":"he","gl":"IL"}},"browseId":uc_id_str,"params":"EglwbGF5bGlzdHPyBgQKAkIA"}, timeout=15)
+                  if r.status_code == 200:
+                      for m_pl in re.finditer(r'"playlistId"\s*:\s*"(PL[a-zA-Z0-9_-]{16,})"', r.text):
+                          if m_pl.group(1) not in pl_ids: pl_ids.append(m_pl.group(1))
+              except Exception: pass
+              out_pl = []
+              if pl_ids:
+                  with ThreadPoolExecutor(max_workers=8) as ex:
+                      for b in ex.map(lambda pid: fetch_playlist_browse("VL" + pid, ch_title_str, uc_id_str, 20, 400), pl_ids[:25]): out_pl.extend(b)
+              return out_pl
+
           if channel_input:
               ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
               target_uc_id = uc_id
               if uc_id: allowed_uc_ids.add(uc_id)
               if resolved_ch: allowed_ch_names.add(resolved_ch.strip().lower())
-              if clean_q:
-                  s_qs = [(f'"{resolved_ch}" {eq}{date_op}', "") for eq in expanded_queries[:4]] + [(f'"{resolved_ch}" {eq}{date_op}', sp_code) for eq in expanded_queries[:2]]
-                  with ThreadPoolExecutor(max_workers=8) as ex:
-                      for b in ex.map(lambda p: fetch_search(p[0], p[1], 180, uc_id, resolved_ch), s_qs): raw.extend(b)
+              ch_key = channel_input.strip().lower()
+              for net_k, net_list in NETWORK_CLUSTERS.items():
+                  if net_k in ch_key:
+                      for sib_h in net_list:
+                          if sib_h.lower() != ch_key:
+                              try:
+                                  s_base, s_uc, s_name = resolve_channel(sib_h)
+                                  if s_uc: allowed_uc_ids.add(s_uc)
+                                  if s_name: allowed_ch_names.add(s_name.strip().lower())
+                                  if season_info and s_uc: raw.extend(fetch_channel_vids(s_base, s_uc, s_name or resolved_ch, sort_by, 350))
+                              except Exception: pass
+                      break
+              if season_info or clean_q:
+                  def build_date_slices(s_min_s: str, s_max_s: str):
+                      try:
+                          ds, de, sls = datetime.datetime.strptime(s_min_s, "%Y%m%d"), datetime.datetime.strptime(s_max_s, "%Y%m%d"), []
+                          cur = ds
+                          while cur < de:
+                              nxt = min(de, cur + datetime.timedelta(days=45))
+                              sls.append(f"after:{(cur - datetime.timedelta(days=1)).strftime('%Y-%m-%d')} before:{(nxt + datetime.timedelta(days=1)).strftime('%Y-%m-%d')}")
+                              cur = nxt + datetime.timedelta(days=1)
+                          return sls
+                      except Exception: return [date_op.strip()] if date_op.strip() else []
+                  s_qs = []
+                  if clean_q:
+                      for eq in expanded_queries[:4]:
+                          s_qs.append((f'"{resolved_ch}" {eq}{date_op}', ""))
+                          s_qs.append((f'"{resolved_ch}" {eq}{date_op}', sp_code))
+                  elif season_info:
+                      for sl_op in build_date_slices(season_info[0], season_info[1]):
+                          s_qs.append((f'"{resolved_ch}" {sl_op}', ""))
+                          s_qs.append((f'"{resolved_ch}" תקציר {sl_op}', ""))
+                  with ThreadPoolExecutor(max_workers=10) as ex:
+                      for b in ex.map(lambda p: fetch_search(p[0], p[1], 220, uc_id, resolved_ch), s_qs):
+                          for it_b in b: it_b["matched_date_op"] = True
+                          raw.extend(b)
+              if season_info and uc_id:
+                  pl_vids = fetch_channel_playlists_videos(uc_id, resolved_ch)
+                  if clean_q:
+                      qw = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3]
+                      raw.extend([v for v in pl_vids if any(w in str(v.get("title") or "").lower() for w in qw)])
+                  else: raw.extend(pl_vids)
               ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 500))
               if clean_q:
                   q_words = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3]
