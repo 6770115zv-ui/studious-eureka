@@ -79,6 +79,7 @@ async function addHistoryEntry(entry) {
     url: entry.url || "",
     quality: entry.quality || "best",
     actualQuality: entry.actualQuality || "",
+    driveUrl: entry.driveUrl || "",
     timestamp: Date.now()
   });
   const trimmed = filtered.slice(0, 80);
@@ -220,6 +221,17 @@ async function encryptCookies(text, hexKey) {
   const blob = new Uint8Array(iv.length + ct.length);
   blob.set(iv, 0); blob.set(ct, iv.length);
   return bytesToB64(blob);
+}
+
+async function decryptText(b64, hexKey) {
+  if (!b64 || !hexKey || hexKey.length !== 64) return "";
+  try {
+    const raw = hexToBytes(hexKey);
+    const key = await crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["decrypt"]);
+    const data = b64ToBytes(b64);
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: data.slice(0, 12) }, key, data.slice(12));
+    return new TextDecoder("utf-8").decode(pt);
+  } catch { return ""; }
 }
 
 async function persistJobs() {
@@ -364,7 +376,7 @@ async function findReleaseAssetsByTag(cfg, tag, logFn = null) {
   let blobShas = [];
   let qualityInfo = "";
   let emailStatus = "";
-  let cloudTempPath = "";
+  let cloudTempPath = "", driveUrlEnc = "", driveStatus = "", driveOnly = false;
   if (rel.body && String(rel.body).trim().startsWith("{")) {
     try {
       const parsed = JSON.parse(String(rel.body).trim());
@@ -372,10 +384,13 @@ async function findReleaseAssetsByTag(cfg, tag, logFn = null) {
       if (parsed.quality_info) qualityInfo = String(parsed.quality_info);
       if (parsed.email_status) emailStatus = String(parsed.email_status);
       if (parsed.cloud_temp_path) cloudTempPath = String(parsed.cloud_temp_path);
+      if (parsed.drive_url_enc) driveUrlEnc = String(parsed.drive_url_enc);
+      if (parsed.drive_status) driveStatus = String(parsed.drive_status);
+      if (parsed.drive_only) driveOnly = Boolean(parsed.drive_only);
     } catch {}
   }
   const assets = (rel.assets || []).filter((a) => a.url || a.browser_download_url).map((a) => ({
-    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath
+    id: a.id, name: a.name, size: a.size || 0, apiUrl: a.url, url: a.browser_download_url, releaseId: rel.id, tagName: rel.tag_name, blobShas, qualityInfo, emailStatus, cloudTempPath, driveUrlEnc, driveStatus, driveOnly
   }));
   return assets.length ? assets : null;
 }
@@ -579,14 +594,32 @@ async function driveJob(jobId) {
     let files = null;
     let detectedQuality = "";
     let detectedEmailStatus = "";
+    let detectedDriveStatus = "";
+    let detectedDriveUrl = "";
 
     for (let a = 0; a < 10 && !files; a++) {
       const assets = await findReleaseAssetsByTag(cfg, tag).catch(() => null);
       if (assets && assets.length) {
         if (assets[0].qualityInfo) detectedQuality = assets[0].qualityInfo;
         if (assets[0].emailStatus) detectedEmailStatus = assets[0].emailStatus;
+        if (assets[0].driveStatus) detectedDriveStatus = assets[0].driveStatus;
+        if (assets[0].driveUrlEnc && !detectedDriveUrl) {
+          detectedDriveUrl = await decryptText(assets[0].driveUrlEnc, cfg.cookieKey);
+          if (detectedDriveUrl) patchJob(jobId, { driveUrl: detectedDriveUrl });
+        }
         if (assets[0].cloudTempPath) patchJob(jobId, { tempPath: assets[0].cloudTempPath });
         if (detectedQuality) patchJob(jobId, { actualQuality: detectedQuality });
+
+        if (job.driveOnly || assets[0].driveOnly) {
+          if (cfg.autoCleanRelease === "true") await deleteReleaseAndTagByName(cfg, tag);
+          await addHistoryEntry({ url: job.url, title: job.title || job.url, quality: job.quality, actualQuality: detectedQuality, driveUrl: detectedDriveUrl });
+          const qN = detectedQuality ? (" | איכות: " + detectedQuality) : "";
+          const dN = detectedDriveStatus ? (" | " + detectedDriveStatus) : "";
+          const eN = detectedEmailStatus ? (" | " + detectedEmailStatus) : "";
+          patchJob(jobId, { status: "completed", localDlPct: 100, actualQuality: detectedQuality, driveUrl: detectedDriveUrl, detail: "הושלם בענן!" + dN + qN + eN, percent: 100 });
+          notifyUser("הועלה ל-Google Drive", (job.title || "הקובץ הועלה") + dN + qN);
+          return;
+        }
 
         const isBundle = job.mode === "collection";
         const inner = [];
@@ -627,11 +660,13 @@ async function driveJob(jobId) {
       url: job.url,
       title: saved[0] || job.title || job.url,
       quality: job.quality,
-      actualQuality: detectedQuality
+      actualQuality: detectedQuality,
+      driveUrl: detectedDriveUrl
     });
 
     if (cfg.autoCleanRelease === "true") await deleteReleaseAndTagByName(cfg, tag);
     const qualityNote = detectedQuality ? (" | איכות: " + detectedQuality) : "";
+    const driveNote = detectedDriveStatus ? (" | " + detectedDriveStatus) : "";
     const emailNote = detectedEmailStatus
       ? (" | " + detectedEmailStatus)
       : (job.sendEmail ? " | נשלח גם למייל הקבוע" : "");
@@ -640,7 +675,8 @@ async function driveJob(jobId) {
       status: "completed",
       localDlPct: 100,
       actualQuality: detectedQuality,
-      detail: "הושלם ונשמר במחשב! (" + saved.length + " קבצים)" + qualityNote + emailNote,
+      driveUrl: detectedDriveUrl,
+      detail: "הושלם ונשמר במחשב! (" + saved.length + " קבצים)" + qualityNote + driveNote + emailNote,
       files: saved,
       percent: 100
     });
@@ -675,7 +711,12 @@ async function startDownload(payload) {
     repUrl = list[0];
   }
 
-  const targetEmail = payload.sendEmail ? (payload.emailTo || cfg.emailTo || "AUTO_SECRET") : "";
+  const rawTargetEmail = (payload.sendEmail || payload.uploadDrive) ? (payload.emailTo || cfg.emailTo || "") : "";
+  let emailEnc = "";
+  if (rawTargetEmail && rawTargetEmail.includes("@") && cfg.cookieKey && cfg.cookieKey.length === 64) {
+    try { emailEnc = await encryptCookies(rawTargetEmail, cfg.cookieKey); } catch {}
+  }
+  const targetEmail = payload.sendEmail ? (emailEnc ? "ENCRYPTED" : (rawTargetEmail || "AUTO_SECRET")) : "";
   const extOptions = JSON.stringify({
     sb: Boolean(payload.sponsorblock),
     geo: payload.geoCountry || "IL",
@@ -683,7 +724,10 @@ async function startDownload(payload) {
     norm: Boolean(payload.normalizeAudio),
     speed: payload.speedFactor || "1",
     send_email: Boolean(payload.sendEmail),
-    email: targetEmail
+    upload_drive: Boolean(payload.uploadDrive),
+    drive_only: Boolean(payload.uploadDrive && payload.driveOnly),
+    email_enc: emailEnc,
+    email: emailEnc ? "" : (rawTargetEmail || (payload.sendEmail ? "AUTO_SECRET" : ""))
   });
 
   const effectiveQuality = (payload.subtitles === "only" || payload.quality === "subs_only") ? "subs_only" : (payload.quality || "best");
@@ -698,7 +742,10 @@ async function startDownload(payload) {
     normalizeAudio: Boolean(payload.normalizeAudio),
     speedFactor: payload.speedFactor || "1",
     sendEmail: Boolean(payload.sendEmail),
-    emailTo: targetEmail,
+    uploadDrive: Boolean(payload.uploadDrive),
+    driveOnly: Boolean(payload.uploadDrive && payload.driveOnly),
+    driveUrl: "",
+    emailTo: rawTargetEmail,
     geoCountry: payload.geoCountry || "IL",
     localDlPct: null,
     tempPath: "/tmp/stage -> /tmp/out (Cloud Runner Initializing)",
@@ -752,6 +799,25 @@ async function patchRecSession(requestId, patch, logLine = null) {
     logs.push("[" + nowTimeStr() + "] " + logLine);
   }
   sessions[requestId] = { ...cur, ...patch, logs: logs.slice(-80) };
+  try {
+    let rawLen = JSON.stringify(sessions).length;
+    if (rawLen > 4200000) {
+      const oldestFirst = Object.values(sessions).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+      for (const s of oldestFirst) {
+        if (rawLen <= 4200000) break;
+        if (!s || s.requestId === requestId || !Array.isArray(s.items)) continue;
+        let changed = false;
+        for (const it of s.items) {
+          if (it && typeof it.thumbnail === "string" && it.thumbnail.startsWith("data:image/")) {
+            const v = it.id || (self.extractYoutubeId ? self.extractYoutubeId(it.url) : "");
+            it.thumbnail = v ? ("https://i.ytimg.com/vi/" + v + "/hqdefault.jpg") : "";
+            changed = true;
+          }
+        }
+        if (changed) rawLen = JSON.stringify(sessions).length;
+      }
+    }
+  } catch {}
   await chrome.storage.local.set({ [REC_SESSIONS_KEY]: sessions });
   void updateActionBadge();
   chrome.runtime.sendMessage({ type: "RECS_CHANGED", sessions }).catch(() => {});
@@ -828,6 +894,7 @@ async function driveRecommendations(requestId) {
     const minViews = cur.minViews || "0";
     const tag = "rec-" + requestId;
     const sortLabels = {
+      relevance: "רלוונטיות (AI + צפיות)",
       views: "צפיות היסטוריות",
       likes: "כמות לייקים",
       date_desc: "תאריך (מהחדש לישן)",
@@ -877,6 +944,7 @@ async function driveRecommendations(requestId) {
       tabTitle: shortName,
       channel: data.channel || channel,
       aiStatus: data.ai_status || "",
+      suggestedSearches: Array.isArray(data.suggested_searches) ? data.suggested_searches : [],
       detail: "התקבלו " + data.items.length + " תוצאות ממוינות לפי " + sortText + chResolved + trLabel + aiLabel,
       items: data.items,
       updatedAt: Date.now()
@@ -1062,7 +1130,7 @@ async function handle(msg) {
         url: old.url, urls: old.urls, title: old.title, thumbnail: old.thumbnail, quality: old.quality, mode: old.mode,
         clipStart: old.clipStart, clipEnd: old.clipEnd, subtitles: old.subtitles, sponsorblock: old.sponsorblock === "true",
         splitChapters: Boolean(old.splitChapters), normalizeAudio: Boolean(old.normalizeAudio),
-        speedFactor: old.speedFactor || "1", sendEmail: Boolean(old.sendEmail), emailTo: old.emailTo === "AUTO_SECRET" ? "" : (old.emailTo || ""), geoCountry: old.geoCountry || "IL"
+        speedFactor: old.speedFactor || "1", sendEmail: Boolean(old.sendEmail), uploadDrive: Boolean(old.uploadDrive), driveOnly: Boolean(old.driveOnly), emailTo: old.emailTo === "AUTO_SECRET" ? "" : (old.emailTo || ""), geoCountry: old.geoCountry || "IL"
       });
     }
     case "RUN_CLEANUP": return runCloudCleanup();
