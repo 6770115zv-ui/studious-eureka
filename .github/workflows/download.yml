@@ -111,6 +111,7 @@ jobs:
           email_enc = str(opts.get("email_enc") or "").strip()
           upload_drive_flag = bool(opts.get("upload_drive"))
           drive_only_flag = bool(opts.get("drive_only")) and upload_drive_flag
+          cloud_only_flag = bool((opts.get("cloud_only") or opts.get("drive_only")) and (upload_drive_flag or bool(opts.get("send_email"))))
           if email_enc and len(secret_key_env) == 64:
               try:
                   _re = base64.b64decode(email_enc)
@@ -931,7 +932,7 @@ jobs:
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           blob_shas = []
 
-          if len(zip_paths) == 1 and zip_size <= 65 * 1024 * 1024:
+          if not cloud_only_flag and len(zip_paths) == 1 and zip_size <= 65 * 1024 * 1024:
               raw_bytes = zip_path.read_bytes()
               chunk_size = 12 * 1024 * 1024
               for offset in range(0, len(raw_bytes), chunk_size):
@@ -1333,22 +1334,24 @@ jobs:
                   print(f"Email delivery error: {type(e).__name__}: {e}", flush=True)
                   email_sent_status = f"שגיאת מייל ({type(e).__name__})"
 
-          is_drv_only_done = bool(drive_only_flag and drive_web_link)
+          _email_ok = bool(email_sent_status and not email_sent_status.startswith("שגיאת"))
+          is_cloud_only_done = bool(cloud_only_flag and (drive_web_link or _email_ok))
           rel_files = [str(z) for z in zip_paths]
-          if is_drv_only_done:
-              drv_marker = pkg_dir / "drive-ok.txt"
-              drv_marker.write_text("Uploaded directly to Google Drive.\n", encoding="utf-8")
+          if cloud_only_flag:
+              drv_marker = pkg_dir / "cloud-ok.txt"
+              drv_marker.write_text("Cloud-Only delivery (Drive/Email). Zero local PC download.\n", encoding="utf-8")
               rel_files = [str(drv_marker)]
               blob_shas = []
           notes = json.dumps({
-              "v": 19.1,
+              "v": 22.0,
               "size": zip_size,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "email_status": email_sent_status,
               "drive_status": drive_status,
               "drive_url_enc": drive_url_enc,
-              "drive_only": is_drv_only_done,
-              "cloud_temp_path": "Google Drive Cloud" if is_drv_only_done else ("/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name),
+              "drive_only": is_cloud_only_done,
+              "cloud_only": is_cloud_only_done,
+              "cloud_temp_path": "Cloud-Only (0MB Local Traffic -> Drive/Email)" if cloud_only_flag else ("/tmp/stage -> /tmp/out -> /tmp/pkg/" + zip_path.name),
               "blobs": blob_shas
           }, ensure_ascii=False)
 
