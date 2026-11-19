@@ -1,16 +1,24 @@
-# YouTube Cloud Ultra v3.0 — מערכת הורדה מתקדמת דרך GitHub Actions
+# YouTube Cloud Ultra v22.1 — מערכת חיפוש, תרגום והורדת מדיה דרך GitHub Actions
 
-מערכת להורדת קובצי מדיה ואודיו באמצעות **GitHub Actions** ותוסף דפדפן (Chrome / Edge / Brave), כולל הצפנת עוגיות מקצה לקצה (**AES-256-GCM**), עקיפת חסימות אזוריות אוטומטית (**Geo-Bypass XFF**) ומנגנון התאוששות חכם.
+מערכת הורדה וחיפוש חכם ליוטיוב המבוססת על **GitHub Actions** ותוסף Chrome / Edge (Manifest V3), מותאמת במיוחד לעבודה מאחורי סינון רשת ובחיבורים מוגבלי נפח.
 
-## יכולות עיקריות בגרסה 3.0
+## יכולות עיקריות (v22.1)
 
-1. **12 פורמטים ואיכויות**: `4K (2160p)`, `2K (1440p)`, `1080p`, `720p`, `480p`, `360p`, `Auto Best`, `MP3 320kbps`, `FLAC`, `WAV`, `M4A`, `OPUS`.
-2. **עקיפת חסימת מדינה אוטומטית (Geo-Bypass)**: פתרון מלא לשגיאת `The uploader has not made this video available in your country` באמצעות כותרות מיקום (`IL`, `GB`, `US`) ו-8 שלבי גיבוי.
-3. **משיכת API ישירה עם Retry אוטומטי**: משיכת הקבצים דרך `apiUrl` עם כותרת `Accept: application/octet-stream`, גשר `CacheStorage` מה-Service Worker ו-4 ניסיונות חוזרים אוטומטיים למניעת `Failed to fetch` ב-75%.
-4. **חיתוך קטעים לפי זמנים (Clipper)**, **SponsorBlock מובנה** ו**כתוביות בעברית ובאנגלית**.
+1. **חיפוש חכם רב-לשוני (Gemini 3.5 Flash-Lite):** הרחבת שאילתות במספר שפות, סינון ודירוג AI, אינדקס של 65 ערוצי ספורט ופודקאסטים, תרגום מלא לעברית והטמעת תמונות ממוזערות בפורמט WebP 16:9 ישירות ב-JSON.
+2. **הורדות איכותיות וגשר Zero-Copy:** תמיכה ב-4K/2K/1080p/720p, אודיו (MP3/M4A/OPUS/FLAC/WAV), חיתוך זמנים, SponsorBlock, פיצול פרקים, נרמול שמע ושינוי מהירות (ללא פגיעה בכתוביות מוטמעות).
+3. **מצב Cloud-Only (0MB תעבורה מקומית):** העלאה ישירה ל-**Google Drive** באיכות מקורית ו/או שליחה בטוחה למייל (עם קישור Drive אוטומטי לקבצים גדולים והגנת חסימת Gmail).
+4. **מנוע כתוביות בעברית:** איחוד משפטים קטועים, תרגום אוטומטי לעברית עם יישור RTL מדויק, הטמעה בווידאו או הורדת SRT נפרד, ומתרגם כתוביות מקומי.
+5. **אבטחה ופרטיות למאגר ציבורי:** הצפנת **AES-256-GCM** (`COOKIE_KEY`) לעוגיות, כתובות מייל מותאמות וקישורי Drive, מיסוך סודות בלוגים וניקוי אוטומטי מתוזמן של ריצות ו-Releases.
 
-## התקנה מהירה
+## הגדרת GitHub Secrets נדרשים
 
-1. העלה את כל הקבצים בתיקייה זו למאגר ה-GitHub שלך (כולל `.github/workflows`).
-2. הרץ את `set-token.bat` (או הגדר ישירות מתוך דף ההגדרות של התוסף), והוסף את `COOKIE_KEY` ל-GitHub תחת `Settings -> Secrets and variables -> Actions -> New repository secret`.
-3. טען את התיקייה `extension/` בדפדפן דרך `chrome://extensions` במצב מפתח (**Load unpacked**).
+תחת `Settings -> Secrets and variables -> Actions`:
+* `COOKIE_KEY` — מפתח 64 תווי hex (להצפנת עוגיות, מייל וקישורי Drive).
+* `GEMINI_API_KEY` — מפתח לסינון, דירוג ותרגום AI.
+* `GDRIVE_CLIENT_ID`, `GDRIVE_CLIENT_SECRET`, `GDRIVE_REFRESH_TOKEN`, `GDRIVE_FOLDER_ID` — להעלאה ל-Google Drive.
+* `SMTP_USER`, `SMTP_PASS` (ואופציונלי `SMTP_TO`) — לשליחה למייל.
+
+## טעינת התוסף
+
+1. פתח `chrome://extensions`, הפעל **מצב מפתח (Developer mode)** ולחץ **טען תוסף לא ארוז (Load unpacked)** על תיקיית `extension/`.
+2. פתח את דף ההגדרות בתוסף והזן את פרטי המאגר, הטוקן ו-`COOKIE_KEY` (אל תשמור סודות בקובץ `config.js`).
