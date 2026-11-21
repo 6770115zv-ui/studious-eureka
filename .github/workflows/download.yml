@@ -66,6 +66,8 @@ jobs:
           GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          IL_PROXY: ${{ secrets.IL_PROXY }}
+          CUSTOM_PROXY: ${{ secrets.CUSTOM_PROXY }}
         run: |
           python3 - << 'EOF'
           import os, sys, re, html, json, time, math, base64, shutil, zipfile, subprocess, smtplib, email.message, urllib.parse, requests
@@ -735,7 +737,7 @@ jobs:
               pot_ep = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
               attempts = []
 
-              # ניסיון 1: ברירת מחדל נקייה (ללא עוגיות וללא --xff שעלול לגרום ל-HTTP 403 על API של יוטיוב)
+              # ניסיון 1: ברירת מחדל נקייה (ללא עוגיות וללא --xff)
               attempts.append((
                   "2026 Native Default (Clean, No XFF + PO-Token)", [
                       "--concurrent-fragments", "8",
@@ -744,35 +746,34 @@ jobs:
               ))
 
               if has_ck:
-                  # ניסיון 2: עוגיות + Chrome TLS Impersonate (ללא --xff)
+                  # ניסיון 2: קליינט web + default + web_safari עם עוגיות + Chrome Impersonate
                   attempts.append((
-                      "2026 Native + Cookies + Impersonate Chrome (No XFF)", [
+                      "2026 Web+Default + Cookies + Impersonate Chrome (No XFF)", [
                           "--cookies", str(cookie_file),
                           "--impersonate", "chrome",
                           "--concurrent-fragments", "8",
-                          "--extractor-args", "youtube:player_client=default,web_safari;fetch_pot=always",
+                          "--extractor-args", "youtube:player_client=web,default,web_safari;fetch_pot=always",
                           "--extractor-args", pot_ep
                       ], True, False
                   ))
 
-              # ניסיון 3: קליינטי מובייל/VR נקיים ללא עוגיות וללא --xff (תומכים ב-visionos/ios/android_vr בלי דילוג)
+              # ניסיון 3: מובייל/VR נקיים לגמרי (ללא עוגיות, ללא --xff וללא bgutil-pot למקרה שהטוקן נחסם)
               attempts.append((
-                  "2026 Mobile/VR Clean Fallback (No Cookies, No XFF)", [
+                  "2026 Mobile/VR Pure Clean (No Cookies, No XFF, No POT)", [
                       "--impersonate", "chrome",
                       "--concurrent-fragments", "6",
-                      "--extractor-args", "youtube:player_client=android_vr,ios,visionos,mweb",
-                      "--extractor-args", pot_ep
+                      "--extractor-args", "youtube:player_client=android_vr,ios,visionos,mweb"
                   ], False, False
               ))
 
-              # ניסיון 4: גיבוי Geo (--xff) + HLS עם קליינטים תואמי עוגיות בלבד
+              # ניסיון 4: גיבוי Geo (--xff) + TV/Web Embedded + HLS
               attempts.append((
-                  "Geo-XFF + HLS Resilient Fallback",
+                  "Geo-XFF + TV/Web Resilient Fallback",
                   (["--cookies", str(cookie_file)] if has_ck else []) + [
                       "--xff", geo,
                       "--impersonate", "chrome",
                       "--concurrent-fragments", "4",
-                      "--extractor-args", "youtube:player_client=default,web_safari,web_embedded;fetch_pot=always",
+                      "--extractor-args", "youtube:player_client=tv,default,web_safari,web_embedded;fetch_pot=always",
                       "--extractor-args", pot_ep
                   ], False, True
               ))
@@ -780,20 +781,62 @@ jobs:
               def get_stage_files():
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
 
-              def discover_working_proxies(country: str = "IL"):
+              def extract_vid_id(u: str) -> str:
+                  m = re.search(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})", str(u or ""))
+                  return m.group(1) if m else ""
+
+              def probe_playability(vid: str, px: str = None, timeout_s: float = 5.0):
+                  if not vid:
+                      return "", ""
+                  proxies = {"http": px, "https": px} if px else None
+                  body = {
+                      "context": {
+                          "client": {
+                              "clientName": "ANDROID_VR",
+                              "clientVersion": "1.61.48",
+                              "deviceMake": "Oculus",
+                              "deviceModel": "Quest 3",
+                              "osName": "Android",
+                              "osVersion": "12L",
+                              "hl": "en",
+                              "gl": "IL"
+                          }
+                      },
+                      "videoId": vid
+                  }
+                  try:
+                      r = requests.post(
+                          "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                          json=body,
+                          headers={"Content-Type": "application/json", "User-Agent": "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; Quest 3)"},
+                          proxies=proxies,
+                          timeout=timeout_s
+                      )
+                      if r.status_code != 200:
+                          return f"HTTP_{r.status_code}", ""
+                      ps = (r.json().get("playabilityStatus") or {})
+                      return str(ps.get("status") or ""), str(ps.get("reason") or "")
+                  except Exception as ex:
+                      return f"ERR_{type(ex).__name__}", str(ex)[:60]
+
+              def discover_working_proxies(target_vid: str, country: str = "ALL"):
+                  priority_px = []
+                  for env_name in ("CUSTOM_PROXY", "IL_PROXY"):
+                      val = os.environ.get(env_name, "").strip().strip("\"'")
+                      if val:
+                          print(f"::add-mask::{val}", flush=True)
+                          if env_name == "CUSTOM_PROXY" or country == "IL":
+                              priority_px.append(val)
+
                   cand_proxies = []
-                  if country == "IL":
-                      env_px = os.environ.get("IL_PROXY", "").strip()
-                      if env_px:
-                          cand_proxies.append(env_px)
                   c_param = f"&country={country}" if country and country.upper() != "ALL" else ""
                   sources = [
-                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=4500{c_param}&ssl=all&anonymity=all",
-                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=4500{c_param}",
+                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=4000{c_param}&ssl=all&anonymity=all",
+                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=4000{c_param}",
                       f"https://www.proxy-list.download/api/v1/get?type=http{c_param}",
                       f"https://www.proxy-list.download/api/v1/get?type=socks5{c_param}",
                   ]
-                  seen_px = set()
+                  seen_px = set(priority_px)
                   for src in sources:
                       try:
                           r = requests.get(src, timeout=6)
@@ -809,31 +852,48 @@ jobs:
                       except Exception:
                           pass
 
-                  working = []
-                  probe_body = {"context": {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00"}}, "videoId": "dQw4w9WgXcQ"}
+                  # מקור גיבוי נוסף (GeoNode JSON)
+                  try:
+                      gn_url = "https://proxylist.geonode.com/api/proxy-list?limit=60&page=1&sort_by=lastChecked&sort_type=desc"
+                      if country and country.upper() != "ALL":
+                          gn_url += f"&country={country.upper()}"
+                      gr = requests.get(gn_url, timeout=6)
+                      if gr.ok:
+                          for row in (gr.json().get("data") or []):
+                              ip_s, port_s = str(row.get("ip") or ""), str(row.get("port") or "")
+                              protos = row.get("protocols") or []
+                              if ip_s and port_s:
+                                  pr = "socks5://" if "socks5" in protos else ("http://" if "http" in protos else "")
+                                  if pr:
+                                      full_px = f"{pr}{ip_s}:{port_s}"
+                                      if full_px not in seen_px:
+                                          seen_px.add(full_px)
+                                          cand_proxies.append(full_px)
+                  except Exception:
+                      pass
+
+                  verified_ok = []
+                  check_vid = target_vid or "dQw4w9WgXcQ"
                   def test_px(px):
-                      try:
-                          tr = requests.post(
-                              "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                              json=probe_body,
-                              headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-                              proxies={"http": px, "https": px},
-                              timeout=4.0
-                          )
-                          if tr.status_code == 200 and "playabilityStatus" in tr.text:
-                              working.append(px)
-                      except Exception:
-                          pass
+                      st, _ = probe_playability(check_vid, px=px, timeout_s=4.5)
+                      if st == "OK":
+                          verified_ok.append(px)
+
                   if cand_proxies:
-                      with ThreadPoolExecutor(max_workers=24) as ex:
-                          list(ex.map(test_px, cand_proxies[:65]))
-                  return working + [p for p in cand_proxies if p not in working][:4]
+                      with ThreadPoolExecutor(max_workers=30) as ex:
+                          list(ex.map(test_px, cand_proxies[:80]))
+                  return priority_px + verified_ok
 
               for u_idx, cur_url in enumerate(target_urls, 1):
+                  cur_vid = extract_vid_id(cur_url)
                   print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
+                  if cur_vid:
+                      p_st, p_rsn = probe_playability(cur_vid, px=None, timeout_s=6.0)
+                      print(f">>> Direct Runner Playability Probe [{cur_vid}]: status={p_st} reason={p_rsn!r}", flush=True)
+                      telemetry["direct_probe"] = f"{p_st}: {p_rsn}"
+
                   downloaded_media_for_url = None
                   il_geo_blocked = False
-                  api_403_hits = 0
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
                       if att_idx > 1:
@@ -864,8 +924,6 @@ jobs:
                       combined_out = (proc.stdout or "") + "\n" + (proc.stderr or "")
                       if "available in Israel" in combined_out or "not made this video available in your country" in combined_out:
                           il_geo_blocked = True
-                      if "Unable to download API page: HTTP Error 403" in combined_out:
-                          api_403_hits += 1
 
                       s_files = get_stage_files()
                       media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
@@ -891,11 +949,14 @@ jobs:
                           print(">>> Detected Israel-Only Geo-Restriction! Engaging Israel Proxy Tunnel...", flush=True)
                           break
 
-                  if not downloaded_media_for_url and (il_geo_blocked or api_403_hits >= 2):
+                  # אם כל הניסיונות הישירים משרת Azure נכשלו (חסימת מדינה / 403 / 'This content isn't available' / בוט):
+                  if not downloaded_media_for_url:
                       px_country = "IL" if il_geo_blocked else "ALL"
-                      px_reason = "Israel Geo-Block" if il_geo_blocked else "Azure Runner IP HTTP 403 API Ban"
-                      proxies_list = discover_working_proxies(px_country)
-                      print(f">>> [{px_reason}] Found {len(proxies_list)} API-verified proxies ({px_country}). Testing download...", flush=True)
+                      px_reason = "Israel Geo-Block" if il_geo_blocked else "Direct Runner Block / Unavailable"
+                      proxies_list = discover_working_proxies(cur_vid, px_country)
+                      if not proxies_list and px_country == "IL":
+                          proxies_list = discover_working_proxies(cur_vid, "ALL")
+                      print(f">>> [{px_reason}] Found {len(proxies_list)} proxies verified playabilityStatus=OK for {cur_vid or 'target'}. Testing download...", flush=True)
                       for px_idx, px_url in enumerate(proxies_list[:6], 1):
                           _t_px = time.time()
                           if stage_dir.exists():
@@ -907,15 +968,16 @@ jobs:
                               "--proxy", px_url,
                               "--impersonate", "chrome",
                               "--ffmpeg-location", "/usr/bin/ffmpeg",
-                              "--concurrent-fragments", "4",
-                              "--socket-timeout", "15",
-                              "--retries", "4",
-                              "--extractor-args", "youtube:player_client=default,android_vr,web_safari,ios",
-                              "--extractor-args", pot_ep,
+                              "--concurrent-fragments", "6",
+                              "--socket-timeout", "18",
+                              "--retries", "5",
+                              "--extractor-args", "youtube:player_client=android_vr,ios,default,web_safari",
                               "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
                           ] + (["--xff", "IL"] if il_geo_blocked else []) + get_fmt_args(False, False) + extra_args + [cur_url]
-                          print(f"=== Trying Proxy #{px_idx} ({px_country}): {px_url} ===", flush=True)
-                          subprocess.run(px_cmd, check=False)
+                          print(f"=== Trying Verified Proxy #{px_idx} ({px_country}) ===", flush=True)
+                          px_proc = subprocess.run(px_cmd, capture_output=True, text=True, check=False)
+                          if px_proc.stderr:
+                              print(px_proc.stderr[-1200:], flush=True)
                           s_files = get_stage_files()
                           media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
                           if media_files:
@@ -925,10 +987,10 @@ jobs:
                                   if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
                                       downloaded_media_for_url = dest_f
                               _px_sec = round(time.time() - _t_px, 1)
-                              telemetry["winner"] = f"Proxy Tunnel ({px_country} #{px_idx})"
+                              telemetry["winner"] = f"Verified Proxy ({px_country} #{px_idx})"
                               telemetry["dl_sec"] = round(telemetry["dl_sec"] + _px_sec, 1)
                               telemetry["attempts"].append({"n": 100 + px_idx, "label": telemetry["winner"], "ok": True, "sec": _px_sec})
-                              print(f"=== Success via Proxy #{px_idx} ({_px_sec}s)! ===", flush=True)
+                              print(f"=== Success via Verified Proxy #{px_idx} ({_px_sec}s)! ===", flush=True)
                               break
                   if downloaded_media_for_url and (not is_audio) and subtitles in ("embed", "files"):
                       time.sleep(0.5)
