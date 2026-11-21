@@ -902,6 +902,7 @@ jobs:
               for u_idx, cur_url in enumerate(target_urls, 1):
                   cur_vid = extract_vid_id(cur_url)
                   print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
+                  p_st, p_rsn = "", ""
                   if cur_vid:
                       p_st, p_rsn = probe_playability(cur_vid, px=None, timeout_s=6.0, gl_code="US")
                       print(f">>> Direct Runner Playability Probe [{cur_vid}]: status={p_st} reason={p_rsn!r}", flush=True)
@@ -909,8 +910,13 @@ jobs:
 
                   downloaded_media_for_url = None
                   il_geo_blocked = False
+                  api_403_fails = 0
+                  has_custom_px = bool(os.environ.get("CUSTOM_PROXY", "").strip() or os.environ.get("IL_PROXY", "").strip())
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
+                      if p_st == "HTTP_403" and att_idx == 1 and has_ck:
+                          print(">>> Runner IP returned HTTP_403 on anonymous probe — skipping Attempt 1 and testing Cookies directly...", flush=True)
+                          continue
                       if att_idx > 1:
                           time.sleep(0.5)
                       _t_att = time.time()
@@ -959,6 +965,15 @@ jobs:
                       _err_lines = [ln.strip() for ln in (proc.stderr or "").splitlines() if "ERROR:" in ln or "HTTP Error 403" in ln]
                       _short_err = (_err_lines[-1][:140] if _err_lines else f"exit={proc.returncode}")
                       telemetry["attempts"].append({"n": att_idx, "label": label, "ok": False, "sec": _att_sec, "err": _short_err})
+
+                      is_api_403 = ("Unable to download API page: HTTP Error 403" in combined_out) or ("Failed to extract any player response" in combined_out)
+                      if is_api_403:
+                          api_403_fails += 1
+
+                      # עצירה מהירה (~20 שנ' במקום 4.5 דק') כשהשרת הזמני ב-Azure חסום גורף ב-HTTP 403 -> התוסף קופץ מיד ל-VM נקי!
+                      if (not has_custom_px) and (not il_geo_blocked) and ((p_st == "HTTP_403" and is_api_403) or api_403_fails >= 2):
+                          print(">>> FAST-ABORT: Azure runner IP is banned by YouTube API (HTTP 403). Exiting immediately for instant Fresh-VM retry!", flush=True)
+                          raise SystemExit("::error::AZURE_IP_403_BANNED")
 
                       if il_geo_blocked and att_idx >= 4:
                           print(">>> Detected Israel-Only Geo-Restriction! Engaging Israel Proxy Tunnel...", flush=True)
@@ -1588,8 +1603,9 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.6,
+              "v": 23.7,
               "size": zip_size,
+              "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
               "subs_verified": subs_verified_flag,
               "subs_detail": subs_detail_msg,
