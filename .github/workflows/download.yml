@@ -1130,7 +1130,7 @@ jobs:
                           il_geo_blocked = True
 
                       s_files = get_stage_files()
-                      media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
+                      media_files = [p for p in s_files if p.suffix.lower() in ((".mp3", ".m4a", ".flac", ".wav", ".opus") if is_audio else (".mp4", ".mkv", ".webm")) and not re.search(r"\.f\d+(?:-\d+)?$", p.stem)]
                       if media_files:
                           for f in s_files:
                               if f.name.endswith(".info.json"):
@@ -1196,17 +1196,22 @@ jobs:
                               "--impersonate", "chrome",
                               "--ffmpeg-location", "/usr/bin/ffmpeg",
                               "--concurrent-fragments", "2",
-                              "--socket-timeout", "25",
-                              "--retries", "5",
+                              "--socket-timeout", "15",
+                              "--retries", "3",
+                              "--fragment-retries", "3",
                               "--extractor-args", "youtube:player_client=web,android_vr,ios,default,web_safari",
                               "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
                           ] + (["--cookies", str(cookie_file)] if (px_use_ck and has_ck) else []) + (["--xff", used_country] if len(used_country) == 2 else []) + get_fmt_args(True, False) + extra_args + [cur_url]
                           print(f"=== Trying Verified Proxy #{px_idx} ({used_country}, cookies={px_use_ck and has_ck}) ===", flush=True)
-                          px_proc = subprocess.run(px_cmd, capture_output=True, text=True, check=False)
-                          if px_proc.stderr:
-                              print(px_proc.stderr[-1200:], flush=True)
+                          try:
+                              px_proc = subprocess.run(px_cmd, capture_output=True, text=True, timeout=160, check=False)
+                              if px_proc.stderr:
+                                  print(px_proc.stderr[-1200:], flush=True)
+                          except subprocess.TimeoutExpired:
+                              print(f"=== Proxy #{px_idx} timed out after 160s — switching to next proxy ===", flush=True)
+                              continue
                           s_files = get_stage_files()
-                          media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
+                          media_files = [p for p in s_files if p.suffix.lower() in ((".mp3", ".m4a", ".flac", ".wav", ".opus") if is_audio else (".mp4", ".mkv", ".webm")) and not re.search(r"\.f\d+(?:-\d+)?$", p.stem)]
                           if media_files:
                               winning_proxy = px_url
                               for f in s_files:
@@ -1896,7 +1901,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.12,
+              "v": 23.13,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
