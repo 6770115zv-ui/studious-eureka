@@ -987,42 +987,58 @@ jobs:
                   return last_st, last_rsn
 
               def discover_working_proxies(target_vid: str, country: str = "US"):
+                  import threading
+                  cc = (country or "US").upper()
                   priority_px = []
                   for env_name in ("CUSTOM_PROXY", "IL_PROXY"):
                       val = os.environ.get(env_name, "").strip().strip("\"'")
                       if val:
                           print(f"::add-mask::{val}", flush=True)
-                          if env_name == "CUSTOM_PROXY" or country == "IL":
-                              priority_px.append(val)
+                          if env_name == "CUSTOM_PROXY" or cc == "IL":
+                              priority_px.append((val, has_ck))
 
                   cand_proxies = []
-                  c_param = f"&country={country}" if country and country.upper() != "ALL" else ""
+                  c_param = f"&country={cc}" if cc != "ALL" else ""
                   sources = [
-                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=4000{c_param}&ssl=all&anonymity=all",
-                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=4000{c_param}",
-                      f"https://www.proxy-list.download/api/v1/get?type=http{c_param}",
-                      f"https://www.proxy-list.download/api/v1/get?type=socks5{c_param}",
+                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=4500{c_param}&ssl=all&anonymity=all",
+                      f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=4500{c_param}",
                   ]
-                  seen_px = set(priority_px)
+                  if cc != "ALL":
+                      sources.append(f"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/countries/{cc}/data.txt")
+                  else:
+                      sources += [
+                          "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt",
+                          "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+                          "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+                          "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt",
+                          "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+                          "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+                      ]
+                  seen_px = set(p[0] for p in priority_px)
                   for src in sources:
                       try:
-                          r = requests.get(src, timeout=6)
+                          r = requests.get(src, timeout=7)
                           if r.status_code == 200:
                               proto = "socks5://" if "socks5" in src else "http://"
                               for ln in r.text.splitlines():
                                   ln = ln.strip()
-                                  if re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", ln):
+                                  m_full = re.match(r"^(https?|socks5)://(\d+\.\d+\.\d+\.\d+:\d+)$", ln, re.I)
+                                  if m_full:
+                                      full_px = f"{m_full.group(1).lower()}://{m_full.group(2)}"
+                                  elif re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", ln):
                                       full_px = proto + ln
-                                      if full_px not in seen_px:
-                                          seen_px.add(full_px)
-                                          cand_proxies.append(full_px)
+                                  else:
+                                      continue
+                                  if full_px not in seen_px:
+                                      seen_px.add(full_px)
+                                      cand_proxies.append(full_px)
                       except Exception:
                           pass
 
                   try:
-                      gn_url = "https://proxylist.geonode.com/api/proxy-list?limit=60&page=1&sort_by=lastChecked&sort_type=desc"
-                      if country and country.upper() != "ALL":
-                          gn_url += f"&country={country.upper()}"
+                      gn_url = "https://proxylist.geonode.com/api/proxy-list?limit=80&page=1&sort_by=lastChecked&sort_type=desc"
+                      if cc != "ALL":
+                          gn_url += f"&country={cc}"
                       gr = requests.get(gn_url, timeout=6)
                       if gr.ok:
                           for row in (gr.json().get("data") or []):
@@ -1039,17 +1055,26 @@ jobs:
                       pass
 
                   verified_ok = []
+                  verified_login = []
+                  px_lock = threading.Lock()
                   check_vid = target_vid or "dQw4w9WgXcQ"
-                  gl_for_probe = "IL" if country == "IL" else "US"
+                  gl_for_probe = cc if len(cc) == 2 else "US"
                   def test_px(px):
-                      st, _ = probe_playability(check_vid, px=px, timeout_s=4.5, gl_code=gl_for_probe)
+                      with px_lock:
+                          if len(verified_ok) >= 4 or (len(verified_ok) + len(verified_login) >= 8):
+                              return
+                      st, rsn = probe_playability(check_vid, px=px, timeout_s=4.5, gl_code=gl_for_probe)
                       if st == "OK":
-                          verified_ok.append(px)
+                          with px_lock:
+                              verified_ok.append((px, False))
+                      elif has_ck and st == "LOGIN_REQUIRED" and ("country" not in str(rsn or "").lower()):
+                          with px_lock:
+                              verified_login.append((px, True))
 
                   if cand_proxies:
-                      with ThreadPoolExecutor(max_workers=30) as ex:
-                          list(ex.map(test_px, cand_proxies[:90]))
-                  return priority_px + verified_ok
+                      with ThreadPoolExecutor(max_workers=40) as ex:
+                          list(ex.map(test_px, cand_proxies[:140]))
+                  return priority_px + verified_ok + verified_login[:6]
 
               for u_idx, cur_url in enumerate(target_urls, 1):
                   cur_vid = extract_vid_id(cur_url)
@@ -1147,15 +1172,19 @@ jobs:
                           break
 
                   if (not downloaded_media_for_url) and (not perm_unavail_reason):
-                      px_order = ["IL", "US", "GB", "DE", "ALL"] if il_geo_blocked else ["US", "IL", "GB", "ALL"]
+                      base_order = [geo] + (["IL", "US", "GB", "DE", "ES", "NL", "ALL"] if il_geo_blocked else ["US", "IL", "GB", "DE", "ALL"])
+                      px_order = []
+                      for _c in base_order:
+                          if _c and _c not in px_order:
+                              px_order.append(_c)
                       proxies_list, used_country = [], px_order[0]
                       for cand_c in px_order:
                           proxies_list = discover_working_proxies(cur_vid, cand_c)
                           if proxies_list:
                               used_country = cand_c
                               break
-                      print(f">>> [Proxy Tunnel ({used_country})] Found {len(proxies_list)} proxies verified playabilityStatus=OK for {cur_vid or 'target'}.", flush=True)
-                      for px_idx, px_url in enumerate(proxies_list[:6], 1):
+                      print(f">>> [Proxy Tunnel ({used_country})] Found {len(proxies_list)} verified proxies (OK/Login+Cookies) for {cur_vid or 'target'}.", flush=True)
+                      for px_idx, (px_url, px_use_ck) in enumerate(proxies_list[:8], 1):
                           _t_px = time.time()
                           if stage_dir.exists():
                               shutil.rmtree(stage_dir, ignore_errors=True)
@@ -1171,8 +1200,8 @@ jobs:
                               "--retries", "5",
                               "--extractor-args", "youtube:player_client=web,android_vr,ios,default,web_safari",
                               "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
-                          ] + (["--xff", "IL"] if il_geo_blocked else []) + get_fmt_args(True, False) + extra_args + [cur_url]
-                          print(f"=== Trying Verified Proxy #{px_idx} ({used_country}) ===", flush=True)
+                          ] + (["--cookies", str(cookie_file)] if (px_use_ck and has_ck) else []) + (["--xff", used_country] if len(used_country) == 2 else []) + get_fmt_args(True, False) + extra_args + [cur_url]
+                          print(f"=== Trying Verified Proxy #{px_idx} ({used_country}, cookies={px_use_ck and has_ck}) ===", flush=True)
                           px_proc = subprocess.run(px_cmd, capture_output=True, text=True, check=False)
                           if px_proc.stderr:
                               print(px_proc.stderr[-1200:], flush=True)
@@ -1867,7 +1896,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.11,
+              "v": 23.12,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
