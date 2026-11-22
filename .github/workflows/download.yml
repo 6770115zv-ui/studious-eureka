@@ -896,7 +896,11 @@ jobs:
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
 
               def extract_vid_id(u: str) -> str:
-                  m = re.search(r"(?:\[|v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})", str(u or ""))
+                  s_u = str(u or "")
+                  m_br = re.findall(r"\[([a-zA-Z0-9_-]{11})\]", s_u)
+                  if m_br:
+                      return m_br[-1]
+                  m = re.search(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})", s_u)
                   return m.group(1) if m else ""
 
               def probe_playability(vid: str, px: str = None, timeout_s: float = 5.0, gl_code: str = "US"):
@@ -1160,11 +1164,19 @@ jobs:
                           if suf in (".mp4", ".mkv", ".webm"):
                               ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-dn", "-map_chapters", "-1"]
                               if abs(spd - 1.0) >= 0.01:
-                                  ff_cmd += ["-filter:v", f"setpts=PTS/{spd}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p"]
+                                  ff_cmd += ["-filter:v", f"setpts=PTS/{spd}"]
+                                  if suf in (".mp4", ".mkv"):
+                                      ff_cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p"]
+                                  else:
+                                      ff_cmd += ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "6", "-crf", "30", "-b:v", "0"]
                               else:
                                   ff_cmd += ["-c:v", "copy"]
                               if af:
-                                  ff_cmd += ["-filter:a", ",".join(af), "-c:a", "aac", "-b:a", "192k"]
+                                  ff_cmd += ["-filter:a", ",".join(af)]
+                                  if suf in (".mp4", ".mkv"):
+                                      ff_cmd += ["-c:a", "aac", "-b:a", "192k"]
+                                  else:
+                                      ff_cmd += ["-c:a", "libopus", "-b:a", "128k"]
                               else:
                                   ff_cmd += ["-c:a", "copy"]
                               if suf == ".mp4":
@@ -1189,7 +1201,7 @@ jobs:
                           sub_req_url = f"https://www.youtube.com/watch?v={mf_vid}" if (len(_sub_targets) > 1 and mf_vid) else cur_url
                           cand_info = info_cache_dir / f"{mf_item.stem}.info.json"
                           if (not cand_info.exists()) and mf_vid:
-                              cand_info = next(info_cache_dir.glob(f"*[{mf_vid}].info.json"), cand_info)
+                              cand_info = next((p for p in info_cache_dir.glob("*.info.json") if f"[{mf_vid}]" in p.name), cand_info)
                           time.sleep(0.2)
                           _t_sub = time.time()
                           srt_list, sub_label = fetch_subtitles_for_url(
@@ -1763,7 +1775,10 @@ jobs:
                           )
                           if attach_fp:
                               msg.add_attachment(attach_fp.read_bytes(), maintype="application", subtype="octet-stream", filename=attach_fp.name)
-                          for srt_f in out_dir.glob("*.srt"):
+                          _anti_srts = list(out_dir.glob("*.srt"))
+                          if not _anti_srts and embedded_srt_saved and embedded_srt_saved.exists():
+                              _anti_srts = [embedded_srt_saved]
+                          for srt_f in _anti_srts:
                               if srt_f.stat().st_size <= 2 * 1024 * 1024:
                                   msg.add_attachment(srt_f.read_bytes(), maintype="text", subtype="plain", filename=f"{clean_stem}.he.srt")
                           with _open_smtp() as srv:
@@ -1794,7 +1809,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.9,
+              "v": 23.10,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
