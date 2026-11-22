@@ -642,11 +642,6 @@ jobs:
           def walk_items(obj, out_vids, out_grid_toks, out_chip_toks):
               if isinstance(obj, dict):
                   if "feedFilterChipBarRenderer" in obj:
-                      for idx, cw in enumerate((obj["feedFilterChipBarRenderer"] or {}).get("contents") or []):
-                          cr = cw.get("chipCloudChipRenderer") or {}
-                          lbl = "".join(r.get("text","") for r in ((cr.get("text") or {}).get("runs") or [])).strip().lower() or (cr.get("text") or {}).get("simpleText","").strip().lower()
-                          ct = find_tokens(cr)
-                          if ct: out_chip_toks.append((idx, lbl, ct[0]))
                       return
                   vr = obj.get("videoRenderer") or obj.get("playlistVideoRenderer") or obj.get("compactVideoRenderer") or obj.get("gridVideoRenderer")
                   if isinstance(vr, dict):
@@ -1142,7 +1137,10 @@ jobs:
 
           if selected_pool:
               enrich_cap = 600 if (channel_input or season_info or min_views > 0) else min(len(selected_pool), 300)
-              with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:enrich_cap]))
+              to_enrich = list(selected_pool[:enrich_cap])
+              if len(selected_pool) > enrich_cap:
+                  to_enrich.extend([c for c in selected_pool[enrich_cap:] if c.get("is_il_stub")][:40])
+              with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, to_enrich))
               # סינון חוזר אחרי enrich עבור il_seed_ids והסרת שלדים שלא נפתחו לכותרת אמיתית
               selected_pool = [c for c in selected_pool if not (c.get("is_il_stub") and str(c.get("title") or "").strip() == str(c.get("id") or "").strip())]
               if no_gaming: selected_pool = [c for c in selected_pool if not GAMING_RX.search(f"{c['title']} {c['channel']}")]
@@ -1339,7 +1337,7 @@ jobs:
               (r"\bBEST OF\b", "מיטב הרגעים של"), (r"\bFINAL\b", "גמר"), (r"\bVS\.?\b", "נגד"),
               (r"\bTorneo\b", "טורניר"), (r"\bAlev[ií]n\b", "ילדים"), (r"\bInfantil\b", "נערים"),
               (r"\bJuvenil\b", "נוער"), (r"\bCadete\b", "קדטים"), (r"\bBenjam[ií]n\b", "טרום-ילדים"),
-              (r"\bEntrenamiento\b", "אימון"), (r"\bGoles\b", "שערים"), (r"\bBar[cç]a Atl[eè]tic\b", "ברצלונה אתלטיק"),
+              (r"\bEntrenamiento\b", "אימון"), (r"\bGoles\b", "שערים"), (r"\bBar[cç]a\s+Atl[eèé]tic\b|ברצלונה\s+ATL[EÈÉ]TIC", "ברצלונה אתלטיק"),
               (r"\bFC Barcelona\b|\bBar[cç]a\b|\bBarcelona\b", "ברצלונה"), (r"\bReal Madrid\b", "ריאל מדריד"),
               (r"\bAtl[eé]tico de Madrid\b", "אתלטיקו מדריד"), (r"\bValencia\b", "ולנסיה"), (r"\bSevilla\b", "סביליה"),
               (r"\bReal Betis\b", "ריאל בטיס"), (r"\bGirona\s*FC\b|\bGirona\b", "ג'ירונה"), (r"\bVillarreal\b", "ויאריאל"),
@@ -1352,7 +1350,7 @@ jobs:
               (r"\bEric Garc[ií]a\b", "אריק גרסיה"), (r"\bAndr[eé]s Iniesta\b", "אנדרס אינייסטה"),
               (r"\bHansi\s+Flick\b|פליק של הנסי|פליק הנסי|הנסי פליק|האנסי פליק", "האנזי פליק"),
               (r"\bFlick\b|ס[\u0591-\u05C7]*ט[\u0591-\u05C7]*י[\u0591-\u05C7]*ר[\u0591-\u05C7]*ה\s+ק[\u0591-\u05C7]*ל[\u0591-\u05C7]*ה", "פליק"),
-              (r"\bDeco\b", "דקו"), (r"\bBar[cç]a\s+Atl[eèé]tic\b|ברצלונה\s+ATL[EÈÉ]TIC", "ברצלונה אתלטיק"),
+              (r"\bDeco\b", "דקו"),
               (r"פ[\u0591-\u05C7]*נ[\u0591-\u05C7]*י[\u0591-\u05C7]*נ[\u0591-\u05C7]*ה", "פנינה"),
               (r"\bדגשים\b|\bהבהרה\b|\bהבהרות\b", "תקציר")
           ]
