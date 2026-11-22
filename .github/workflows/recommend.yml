@@ -14,19 +14,23 @@ on:
 run-name: rec-${{ inputs.request_id }}
 permissions:
   contents: write
-  models: read
 jobs:
   recommend:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Set up Deno
+        if: contains(inputs.filter_prompt, '[PL_STREAMS]')
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
       - name: Install yt-dlp + Pillow
         run: |
-          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs requests cryptography pillow google-genai
+          PKGS="requests cryptography pillow google-genai"
+          if echo "${{ inputs.filter_prompt }}" | grep -qi '\[PL_STREAMS\]'; then
+            PKGS="$PKGS yt-dlp[default,curl-cffi] yt-dlp-ejs"
+          fi
+          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre $PKGS
       - name: Smart Multi-Language + Gemini 3.5 Flash-Lite + Sharp WebP Engine
         env:
           REQ_ID: ${{ inputs.request_id }}
@@ -152,12 +156,11 @@ jobs:
                   "openai/gpt-oss-20b",
                   "moonshotai/kimi",
                   "deepseek",
-                  "llama-3.3-70b",
                   "llama-3.1-8b",
                   "gemma",
               ]
               CEREBRAS_MODELS = ["llama-3.3-70b", "qwen-3-32b"]
-              OPENROUTER_MODELS = ["google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free"]
+              OPENROUTER_MODELS = ["qwen/qwen3-32b:free", "meta-llama/llama-3.3-70b-instruct:free"]
 
               def __init__(self):
                   self.lock = threading.Lock()
@@ -229,29 +232,32 @@ jobs:
                   if not self.gemini_keys:
                       return []
                   found = []
-                  bad_toks = ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "computer-use", "deep-research", "omni", "preview", "exp", "nano", "1.0", "1.5", "2.0", "2.5")
-                  try:
-                      cl = self._get_client("Gemini#1", self.gemini_keys[0], 10)
-                      if cl is not None:
-                          for m in cl.models.list():
-                              name = str(getattr(m, "name", "") or "").replace("models/", "").strip()
-                              actions = [str(a) for a in (getattr(m, "supported_actions", None) or [])]
-                              if not name or (actions and "generateContent" not in actions):
-                                  continue
-                              low = name.lower()
-                              if low.startswith("gemini-") and not any(b in low for b in bad_toks):
-                                  found.append(name)
-                      else:
-                          r = requests.get("https://generativelanguage.googleapis.com/v1beta/models", headers={"x-goog-api-key": self.gemini_keys[0]}, timeout=10)
-                          if r.status_code == 200:
-                              for m in (r.json().get("models") or []):
-                                  name = str(m.get("name") or "").replace("models/", "").strip()
-                                  methods = m.get("supportedGenerationMethods") or []
+                  bad_toks = ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "computer-use", "deep-research", "omni", "preview", "exp", "nano", "live", "1.0", "1.5", "2.0", "2.5")
+                  for k_i, k_val in enumerate(self.gemini_keys, 1):
+                      try:
+                          cl = self._get_client(f"Gemini#{k_i}", k_val, 10)
+                          if cl is not None:
+                              for m in cl.models.list():
+                                  name = str(getattr(m, "name", "") or "").replace("models/", "").strip()
+                                  actions = [str(a) for a in (getattr(m, "supported_actions", None) or [])]
+                                  if not name or (actions and "generateContent" not in actions):
+                                      continue
                                   low = name.lower()
-                                  if low.startswith("gemini-") and "generateContent" in methods and not any(b in low for b in bad_toks):
+                                  if low.startswith("gemini-") and not any(b in low for b in bad_toks):
                                       found.append(name)
-                  except Exception as e:
-                      self.errors.append(f"gemini_discovery: {type(e).__name__}: {str(e)[:80]}")
+                          else:
+                              r = requests.get("https://generativelanguage.googleapis.com/v1beta/models", headers={"x-goog-api-key": k_val}, timeout=10)
+                              if r.status_code == 200:
+                                  for m in (r.json().get("models") or []):
+                                      name = str(m.get("name") or "").replace("models/", "").strip()
+                                      methods = m.get("supportedGenerationMethods") or []
+                                      low = name.lower()
+                                      if low.startswith("gemini-") and "generateContent" in methods and not any(b in low for b in bad_toks):
+                                          found.append(name)
+                          if found:
+                              break
+                      except Exception as e:
+                          self.errors.append(f"gemini_discovery#G{k_i}: {type(e).__name__}: {str(e)[:80]}")
 
                   self.discovered_models = sorted(set(found))
                   if not found:
@@ -447,12 +453,17 @@ jobs:
                           es = f"{type(e).__name__}: {str(e)}"
                           self._record(stage, prov, m_name, alias, "fail", (time.time() - t0) * 1000, es)
                           print(f"AIRouter [{stage}] {alias}/{m_name} failed: {es[:130]}", flush=True)
-                          if "401" in es or "403" in es:
-                              self.dead_keys.add(alias)
-                              self.key_stats[alias]["status"] = "invalid_key"
-                              break
-                          elif "404" in es:
-                              self.dead_models.add(m_name)
+                          with self.lock:
+                              if "401" in es or "403" in es:
+                                  self.dead_keys.add(alias)
+                                  self.key_stats[alias]["status"] = "invalid_key"
+                                  break
+                              elif "404" in es:
+                                  self.dead_models.add(m_name)
+                              elif "429" in es or "rate_limit" in es.lower():
+                                  self.cooldowns[(alias, m_name)] = time.time() + 30
+                                  self.key_stats[alias]["status"] = "quota_429"
+                                  break
                   return None, ""
 
               def call_json(self, prompt_text: str, timeout_sec: int = 16, stage: str = "general"):
@@ -486,7 +497,7 @@ jobs:
                                   tried_any = True
                                   t0 = time.time()
                                   # דגמי Lite מקבלים 15-16s; דגמי Flash כבדים מקבלים 12s כדי לא לבזבז 24s על 504
-                                  m_timeout = min(timeout_sec, 16) if "lite" in m_name else 12
+                                  m_timeout = min(timeout_sec, 20) if "lite" in m_name else min(timeout_sec, 16)
                                   try:
                                       res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
                                       self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
@@ -508,21 +519,25 @@ jobs:
                                       stage_gem_fails += 1
                                       self._record(stage, "gemini", m_name, alias, "fail", ms, es)
                                       print(f"AIRouter [{stage}] {alias}/{m_name} failed ({int(ms)}ms): {es[:130]}", flush=True)
-                                      if "401" in low_e or "403" in low_e or "api_key_invalid" in low_e or "permission_denied" in low_e:
-                                          self.dead_keys.add(alias)
-                                          self.key_stats[alias]["status"] = "invalid_key"
+                                      _bad_k_alert = False
+                                      with self.lock:
+                                          if "401" in low_e or "403" in low_e or "api_key_invalid" in low_e or "permission_denied" in low_e:
+                                              self.dead_keys.add(alias)
+                                              self.key_stats[alias]["status"] = "invalid_key"
+                                              _bad_k_alert = True
+                                          elif "404" in low_e or "not_found" in low_e:
+                                              self.dead_models.add(m_name)
+                                          elif "429" in low_e or "resource_exhausted" in low_e or "quota" in low_e:
+                                              self.cooldowns[(alias, m_name)] = time.time() + 30
+                                              self.key_stats[alias]["status"] = "quota_429"
+                                          elif "504" in low_e or "500" in low_e or "internal" in low_e or "deadline_exceeded" in low_e or "timeout" in low_e:
+                                              self.cooldowns[(alias, m_name)] = time.time() + 14
+                                              self.key_stats[alias]["status"] = "busy_503"
+                                          elif "503" in low_e or "unavailable" in low_e or "high demand" in low_e:
+                                              self.cooldowns[(alias, m_name)] = time.time() + 10
+                                              self.key_stats[alias]["status"] = "busy_503"
+                                      if _bad_k_alert:
                                           self._add_alert(f"⚠️ {alias} לא תקין או חסום (401/403) — בדוק את ה-Secret ב-GitHub.")
-                                      elif "404" in low_e or "not_found" in low_e:
-                                          self.dead_models.add(m_name)
-                                      elif "429" in low_e or "resource_exhausted" in low_e or "quota" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 30
-                                          self.key_stats[alias]["status"] = "quota_429"
-                                      elif "504" in low_e or "500" in low_e or "internal" in low_e or "deadline_exceeded" in low_e or "timeout" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 14
-                                          self.key_stats[alias]["status"] = "busy_503"
-                                      elif "503" in low_e or "unavailable" in low_e or "high demand" in low_e:
-                                          self.cooldowns[(alias, m_name)] = time.time() + 10
-                                          self.key_stats[alias]["status"] = "busy_503"
 
                                       # Fast-Failover ל-Groq אחרי 2 כשלים ב-Gemini (תשובה תוך ~1s במקום להיתקע!)
                                       if has_fast_backup and not backups_tried and stage_gem_fails >= 2:
@@ -806,19 +821,20 @@ jobs:
               query_meta_map[clean_q.lower()] = {"angle": "original", "note_he": "השאילתה המקורית שלך"}
               if ai_router.has_any_provider() and not is_similar:
                   lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
+                  _today_str = datetime.date.today().strftime("%B %Y")
                   exp_prompt = (
-                      f"Current date: November 2026 (Current sports season: 2026/27; recent seasons: 2025/26 and 2024/25).\n"
+                      f"Current date: {_today_str}.\n"
                       f"User input (short keyword OR free-form natural-language request): \"{clean_q}\"\n"
                       f"Target Languages: {lang_desc} | Content preference: {content_type}.\n"
-                      "You are an elite YouTube Research & Discovery Strategist. Turn the user's exact intent into razor-sharp, high-signal YouTube search queries.\n"
-                      "STRICT ANCHORING RULE: Identify ALL core entities/concepts in the user's input and keep EVERY query tightly anchored to their intersection! NEVER generate generic broad queries (like generic club podcasts, generic fan reactions, or generic tactical videos) that drop the user's specific focus.\n"
-                      "NATIVE TERMINOLOGY & DISAMBIGUATION RULE: Always include official local/native terms in the target languages AND strictly disambiguate similar team names! For example, in Hebrew 'ברצלונה אתלטיק' means Barça Atlètic (Barcelona B reserve team), NEVER Atlético Madrid or Athletic Club Bilbao! Use 'Barça Atlètic', 'Barcelona B', 'filial', 'cantera', etc.\n"
-                      "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you combined ALL parts of the user's request, which specific 2025-2026 players/coaches/angles you chose, and why.\n"
+                      "You are an elite YouTube Research & Discovery Strategist. Turn the user's exact intent into razor-sharp, high-signal YouTube search queries across ANY domain (sports, tech, history, lectures, documentaries, etc.).\n"
+                      "STRICT ANCHORING RULE: Identify ALL core entities/concepts in the user's input and keep EVERY query tightly anchored to their intersection! NEVER generate generic broad queries that drop the user's specific focus.\n"
+                      "NATIVE TERMINOLOGY & DISAMBIGUATION RULE: Always include official local/native terms in the target languages AND strictly disambiguate similar names (e.g. reserve/youth teams vs rival clubs with similar names, homonyms, or distinct public figures).\n"
+                      "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you combined ALL parts of the user's request, which specific entities/angles you chose, and why.\n"
                       "Task 2 - Search Queries: Generate 13 realistic YouTube search queries (2 to 6 words each — real creator title phrasing!) across the target languages, split into 4 buckets:\n"
-                      "  - angle='direct' (4 queries): direct analytical breakdowns, interviews, reports, and stories combining the user's exact concepts (at least 1 in Spanish/native language if applicable).\n"
-                      "  - angle='entities' (4 queries): MUST include ACTUAL PROPER NAMES of specific real players, youth prospects, goalkeepers, or reserve coaches relevant to THIS topic (never just generic words like 'promesas' or 'jovenes' without real player/coach names!). Also in Hebrew translate Spanish 'filial' as 'קבוצת הבת' (never 'פילים').\n"
-                      "  - angle='community' (3 queries): dedicated club fan channels, club podcasts, and talk shows in Spanish/English/Hebrew that specifically discuss THIS exact topic (MUST include the specific topic keyword, never just a generic club podcast!).\n"
-                      "  - angle='deep' (2 queries): full matches, press conferences, documentaries, or long-form tactical deep-dives tightly on THIS exact topic (NEVER FIFA/EA FC/PES).\n"
+                      "  - angle='direct' (4 queries): direct analytical breakdowns, interviews, reports, and stories combining the user's exact concepts (include native-language phrasing where relevant).\n"
+                      "  - angle='entities' (4 queries): SPECIFIC real named people, sub-topics, creators, or key figures directly relevant to THIS exact user input (use actual proper names, not vague filler words).\n"
+                      "  - angle='community' (3 queries): dedicated community channels, podcasts, and discussion shows in the target languages that specifically discuss THIS exact topic.\n"
+                      "  - angle='deep' (2 queries): full-length sessions, matches, lectures, documentaries, or deep-dives tightly on THIS exact topic (NEVER gaming/FIFA/PES unless explicitly requested).\n"
                       "Each query item MUST be an object: {\"q\": \"...\", \"angle\": \"direct|entities|community|deep\", \"note_he\": \"3-6 Hebrew words explaining what this query hunts for\"}.\n"
                       "Task 3 - Clickable YouTube Follow-Up Suggestions (Hebrew): Generate 14 SHORT, punchy YouTube search terms in Hebrew (STRICTLY 2 to 5 words each, NO questions or question marks).\n"
                       "Task 4 - Refinement Tips (Hebrew): Generate 2-3 short tips ('refinement_tips_he') referencing the extension's own filters (כגון 'עונה / שנים', 'סוג תוכן', 'מיון לפי תאריך' או 'מילות שלילה') — never tell the user to use YouTube's website filters.\n"
@@ -828,7 +844,7 @@ jobs:
                   if not isinstance(g_exp, dict):
                       compact_exp = (
                           f"User YouTube search: \"{clean_q}\" | Languages: {lang_desc}.\n"
-                          "Disambiguate carefully (e.g. ברצלונה אתלטיק = Barça Atlètic / Barcelona B, NOT Atlético Madrid or Athletic Bilbao).\n"
+                          "Disambiguate similar names/entities carefully so unrelated teams, people, or topics are excluded.\n"
                           "Generate 10 focused YouTube search queries across the languages (each as {\"q\":\"...\",\"angle\":\"direct|entities|community|deep\",\"note_he\":\"...\"}) + short Hebrew strategy_he + 8 short Hebrew suggestions_he.\n"
                           "Return ONLY valid JSON: {\"strategy_he\":\"...\",\"queries\":[...],\"suggestions_he\":[...]}"
                       )
@@ -872,7 +888,6 @@ jobs:
           query_hits_map = {}
           if seed_video and not is_similar: raw.append(seed_video)
           if related_videos: raw.extend(related_videos)
-          for il_vid in il_seed_ids: raw.append({"id":il_vid,"title":il_vid,"channel":"","channel_id":"","view_count":0,"duration":0,"matched_date_op":True})
           resolved_ch, target_uc_id = channel_input, ""
           date_op = f" {season_info[2]}" if season_info else ""
 
@@ -941,14 +956,16 @@ jobs:
                           raw.extend(b)
               if season_info and uc_id:
                   pl_vids = fetch_channel_playlists_videos(uc_id, resolved_ch)
+                  _STOP_W = {"the","and","for","with","from","this","that","are","was","you","your","not","but","all","can","how","who","why","what","עם","של","על","את","אל","כל","הוא","היא","גם","לא","או","מה","איך"}
                   if clean_q:
-                      qw = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3]
-                      raw.extend([v for v in pl_vids if any(w in str(v.get("title") or "").lower() for w in qw)])
+                      qw = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3 and w.lower() not in _STOP_W]
+                      raw.extend([v for v in pl_vids if (not qw) or any(w in str(v.get("title") or "").lower() for w in qw)])
                   else: raw.extend(pl_vids)
               ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 500))
               if clean_q:
-                  q_words = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3]
-                  raw.extend([v for v in ch_all if any(w in str(v.get("title") or "").lower() for w in q_words)])
+                  _STOP_W = {"the","and","for","with","from","this","that","are","was","you","your","not","but","all","can","how","who","why","what","עם","של","על","את","אל","כל","הוא","היא","גם","לא","או","מה","איך"}
+                  q_words = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3 and w.lower() not in _STOP_W]
+                  raw.extend([v for v in ch_all if (not q_words) or any(w in str(v.get("title") or "").lower() for w in q_words)])
               else: raw.extend(ch_all)
           else:
               jobs = []
@@ -978,6 +995,8 @@ jobs:
                       if r_i < len(ql):
                           raw.append(ql[r_i])
 
+          for il_vid in il_seed_ids:
+              raw.append({"id":il_vid,"title":il_vid,"channel":"","channel_id":"","view_count":0,"duration":0,"matched_date_op":True,"is_il_stub":True})
           seen_ids = {direct_vid} if (is_similar and direct_vid) else (set() if (channel_input or direct_vid) else set(exclude))
           cands = []
           for idx_pos, e in enumerate(raw):
@@ -987,7 +1006,7 @@ jobs:
               if target_uc_id and e_cid and e_cid != target_uc_id and e_cid not in allowed_uc_ids: continue
               if channel_input and resolved_ch and not e_cid and e_ch and e_ch.strip().lower() != resolved_ch.strip().lower(): continue
               seen_ids.add(vid)
-              cands.append({"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","channel":resolved_ch if channel_input else (e_ch or resolved_ch),"channel_id":e_cid,"views":parse_views_text(e.get("view_count") or 0),"likes":int(e.get("like_count") or 0),"upload_date":str(e.get("upload_date") or "").strip().replace("-",""),"published_rel":str(e.get("published_rel") or ""),"max_height":0,"orig_pos":idx_pos,"source_q":str(e.get("source_q") or ""),"matched_date_op":bool(e.get("matched_date_op")),"duration":int(e.get("duration") or 0),"thumbnail":f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"})
+              cands.append({"id":vid,"title":title,"url":f"https://www.youtube.com/watch?v={vid}","channel":resolved_ch if channel_input else (e_ch or resolved_ch),"channel_id":e_cid,"views":parse_views_text(e.get("view_count") or 0),"likes":int(e.get("like_count") or 0),"upload_date":str(e.get("upload_date") or "").strip().replace("-",""),"published_rel":str(e.get("published_rel") or ""),"max_height":0,"orig_pos":idx_pos,"source_q":str(e.get("source_q") or ""),"is_il_stub":bool(e.get("is_il_stub")),"matched_date_op":bool(e.get("matched_date_op")),"duration":int(e.get("duration") or 0),"thumbnail":f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"})
 
           GAMING_RX = re.compile(r"\b(fifa\s*\d*|ea\s*fc\s*\d*|fc\s*2[4567]|efootball|pes\s*\d*|fc\s*mobile|dream\s*league|dls\s*\d*|football\s*manager|fm2[3456]|career\s*mode|pack\s*opening|fut\s*draft|sbc|ultimate\s*team|new\s*showtime|pesmaster|eafc|gameplay)\b", re.I)
           if no_gaming: cands = [c for c in cands if not GAMING_RX.search(f"{c['title']} {c['channel']}")]
@@ -1081,7 +1100,7 @@ jobs:
                               if ml2 and re.search(r'\d', ml2.group(1)):
                                   c["likes"] = parse_views_text(ml2.group(1))
               except Exception: pass
-              if not c.get("upload_date") or not c.get("duration") or not c.get("channel_id"):
+              if not c.get("upload_date") or not c.get("duration") or not c.get("channel_id") or ((high_quality_only or sort_by == "quality_score") and not c.get("max_height")):
                   try:
                       r = sess.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", json={"context":{"client":{"clientName":"WEB","clientVersion":"2.20261101.00.00","hl":"en","gl":"IL"}},"videoId":vid}, timeout=10)
                       if r.status_code == 200:
@@ -1100,6 +1119,10 @@ jobs:
           if selected_pool:
               enrich_cap = 600 if (channel_input or season_info or min_views > 0) else min(len(selected_pool), 300)
               with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, selected_pool[:enrich_cap]))
+              # סינון חוזר אחרי enrich עבור il_seed_ids והסרת שלדים שלא נפתחו לכותרת אמיתית
+              selected_pool = [c for c in selected_pool if not (c.get("is_il_stub") and str(c.get("title") or "").strip() == str(c.get("id") or "").strip())]
+              if no_gaming: selected_pool = [c for c in selected_pool if not GAMING_RX.search(f"{c['title']} {c['channel']}")]
+              if exclude_terms: selected_pool = [c for c in selected_pool if not any(w in f"{c['title']} {c['channel']}".lower() for w in exclude_terms)]
 
           if allowed_uc_ids: selected_pool = [c for c in selected_pool if c.get("channel_id") in allowed_uc_ids or str(c.get("channel") or "").strip().lower() in allowed_ch_names]
           elif channel_input and resolved_ch: selected_pool = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
@@ -1148,11 +1171,11 @@ jobs:
                           + (f"Strategy: {ai_strategy_he}\n" if ai_strategy_he else "")
                           + f"User Modesty/Focus Rule: {filter_prompt}\n"
                           + "IMPORTANT MULTI-CONCEPT SCORING RUBRIC (DO NOT require EVERY query word to appear in the same title!):\n"
-                          + "  * Score 9-10 (Top ~12%): Directly combines ALL core parts of the query (e.g. Flick + Deco + Barça Atlètic / youth squad planning).\n"
-                          + "  * Score 7-8 (Strong): Strongly covers ANY TWO core concepts (e.g. Flick + Barça Atlètic/La Masia, OR Flick + Deco strategy, OR Deco + Barça Atlètic/Belletti).\n"
-                          + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this club/theme (specific Barça Atlètic prospect/coach, Flick youth press conference, club podcast discussing this topic).\n"
-                          + "  * DROP (<5): Wrong team (e.g. Atlético Madrid or Athletic Bilbao match/press conf unless directly about our topic), gaming (FIFA/EA FC), unrelated sports/celebrities, clickbait spam, or modesty rule violations.\n"
-                          + "Note: 'ללא דמויות אחרות' means no unrelated celebrities/other sports — relevant players, youth prospects, directors & coaches of the requested club are WELCOME!\n"
+                          + "  * Score 9-10 (Top ~12%): Directly combines ALL core parts of the user's query.\n"
+                          + "  * Score 7-8 (Strong): Strongly covers most core concepts or the primary entity/angle of the query.\n"
+                          + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this theme (specific key figure, interview, podcast, or deep breakdown).\n"
+                          + "  * DROP (<5): Confused/similar-named wrong entity, gaming/FIFA/EA FC (unless asked), unrelated topics/celebrities, clickbait spam, or filter-rule violations.\n"
+                          + "Note: 'ללא דמויות אחרות' means no unrelated people/topics — directly relevant figures within the requested subject are WELCOME!\n"
                           + "CRITICAL RECALL TARGET: Aim to keep ~22 to 40 valid items from this 90-item batch! If fewer than 20 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related club/youth/podcast/press-conference videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
                           + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
                           + f"Items: {json.dumps(compact, ensure_ascii=False)}"
@@ -1173,14 +1196,17 @@ jobs:
                           return False
                       for r in rows:
                           idx_r, sc_r, rs_r = None, 7, ""
-                          if isinstance(r, list) and len(r) >= 2 and isinstance(r[0], int):
-                              idx_r = r[0]
-                              sc_r = int(r[1] or 7)
-                              rs_r = str(r[2] or "").strip() if len(r) >= 3 else ""
-                          elif isinstance(r, dict) and isinstance(r.get("i"), int):
-                              idx_r = r["i"]
-                              sc_r = int(r.get("s") or 7)
-                              rs_r = str(r.get("r") or "").strip()
+                          try:
+                              if isinstance(r, list) and len(r) >= 2 and str(r[0]).strip().isdigit():
+                                  idx_r = int(str(r[0]).strip())
+                                  sc_r = int(float(r[1] or 7))
+                                  rs_r = str(r[2] or "").strip() if len(r) >= 3 else ""
+                              elif isinstance(r, dict) and str(r.get("i", "")).strip().isdigit():
+                                  idx_r = int(str(r["i"]).strip())
+                                  sc_r = int(float(r.get("s") or 7))
+                                  rs_r = str(r.get("r") or "").strip()
+                          except Exception:
+                              idx_r = None
                           if idx_r is not None and sc_r >= 4:
                               score_map[idx_r] = min(10, max(4, sc_r))
                               if rs_r:
@@ -1264,7 +1290,7 @@ jobs:
               "pipeline": {
                   "raw_total": len(raw),
                   "unique_cands": len(cands),
-                  "sent_to_ai": sum(_sent_map.values()) if _sent_map else min(len(cands), 240),
+                  "sent_to_ai": sum(_sent_map.values()) if _sent_map else 0,
                   "ai_kept": len(selected_pool),
                   "final_shown": len(pool)
               },
@@ -1430,7 +1456,7 @@ jobs:
               suggested_searches = [f"{base_t} 2026", f"{base_t} 2025/26", f"{base_t} תקציר", f"{base_t} כישרונות חדשים", f"{base_t} שערים ומהלכים", f"{base_t} משחק מלא", f"{base_t} אימון", f"{base_t} דוקומנטרי"]
 
           for item in pool:
-              item.pop("orig_pos", None); item.pop("source_q", None); item.pop("matched_date_op", None); item.pop("channel_id", None)
+              item.pop("orig_pos", None); item.pop("source_q", None); item.pop("is_il_stub", None); item.pop("matched_date_op", None); item.pop("channel_id", None)
               rd = str(item.get("upload_date") or "").strip()
               item["date_formatted"] = f"{rd[6:8]}/{rd[4:6]}/{rd[0:4]}" if (len(rd) == 8 and rd.isdigit()) else item.get("published_rel", "")
               mh = int(item.get("max_height") or 0)
@@ -1451,5 +1477,7 @@ jobs:
           r = requests.post(f"https://api.github.com/repos/{gh_repo}/git/blobs", headers={"Authorization":f"Bearer {gh_token}","Accept":"application/vnd.github+json"}, json={"content":base64.b64encode(payload_bytes).decode("ascii"),"encoding":"base64"}, timeout=60)
           sha = r.json().get("sha", "") if r.status_code == 201 else ""
           tag = f"rec-{req_id}"
-          subprocess.run(["gh","release","create",tag,"recommendations.json","--repo",gh_repo,"--title",tag,"--notes",json.dumps({"blobs":[sha] if sha else [],"count":len(pool)})], capture_output=True, text=True, check=False)
+          rel_p = subprocess.run(["gh","release","create",tag,"recommendations.json","--repo",gh_repo,"--title",tag,"--notes",json.dumps({"blobs":[sha] if sha else [],"count":len(pool)})], capture_output=True, text=True, check=False)
+          if rel_p.returncode != 0:
+              raise SystemExit(f"::error::gh release create failed: {rel_p.stderr[:250]}")
           EOF
