@@ -29,6 +29,13 @@ jobs:
         with:
           deno-version: v2.x
 
+      - name: Cache Python packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-ytcloud-v23-9
+          restore-keys: pip-ytcloud-
+
       - name: Install yt-dlp + ffmpeg + curl_cffi + atomicparsley
         run: |
           if command -v docker >/dev/null 2>&1; then
@@ -37,7 +44,7 @@ jobs:
           if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
             (curl -fsSL https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o /tmp/ff.tar.xz && tar -xf /tmp/ff.tar.xz -C /tmp && sudo cp /tmp/ffmpeg-*/bin/ffmpeg /tmp/ffmpeg-*/bin/ffprobe /usr/bin/ && sudo chmod +x /usr/bin/ffmpeg /usr/bin/ffprobe && rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-*) &
           fi
-          python3 -m pip install --break-system-packages --no-cache-dir -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests PySocks deep-translator mutagen
+          python3 -m pip install --break-system-packages -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests PySocks deep-translator mutagen
           wait
           which ffmpeg && ffmpeg -version | head -n 1
           for i in $(seq 1 14); do
@@ -263,7 +270,7 @@ jobs:
                   new_lines = []
                   for ln in t_lines:
                       norm_ln = re.sub(r"\s+", " ", ln).strip().lower()
-                      is_rollup_dup = any((rl == norm_ln and (start_ms - prev_e) <= 2500) for prev_e, rl in recent_lines)
+                      is_rollup_dup = any((rl == norm_ln and (start_ms - prev_e) <= 450) for prev_e, rl in recent_lines)
                       if not is_rollup_dup:
                           new_lines.append(ln)
                           recent_lines.append((end_ms, norm_ln))
@@ -466,8 +473,8 @@ jobs:
               print(f"Translation finished: {len(translated_cues)} cues, {hebrew_chars} Hebrew chars.", flush=True)
               return translated_cues if hebrew_chars > 0 else None
 
-          def _scale_cues_for_speed(cues_in):
-              if is_subs_only:
+          def _scale_cues_for_speed(cues_in, do_scale: bool = False):
+              if is_subs_only or not do_scale:
                   return cues_in
               try:
                   _sp = float(speed_val or 1.0)
@@ -477,7 +484,7 @@ jobs:
                   return cues_in
               return [[int(s / _sp), max(int(s / _sp) + 120, int(e / _sp)), t] for s, e, t in cues_in]
 
-          def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single: bool = False):
+          def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single: bool = False, proxy_url: str = "", info_json_path: Path = None, apply_speed_scale: bool = False):
               if subs_dir.exists():
                   shutil.rmtree(subs_dir, ignore_errors=True)
               subs_dir.mkdir(parents=True, exist_ok=True)
@@ -496,29 +503,49 @@ jobs:
               ]
               if not is_pl_sub:
                   base_sub_cmd.append("--no-playlist")
-              if has_ck:
+              if proxy_url:
+                  base_sub_cmd += ["--proxy", proxy_url]
+              elif has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
+              direct_tracks = {}
               def detect_best_sub_candidates():
-                  """מזהה מראש שפת מקור יחידה; מחזיר (probe_ok, plan) כדי לעצור מיד כשאין 0 כתוביות."""
+                  """קורא .info.json מקומי בחינם (0.01s) ורק אם חסר מריץ --dump-single-json."""
                   if is_pl_sub:
                       return False, []
-                  probe_cmd = [
-                      "python3", "-m", "yt_dlp",
-                      "--ignore-config", "--force-ipv4", "--skip-download", "--no-playlist",
-                      "--dump-single-json", "--no-warnings",
-                      "--js-runtimes", "deno",
-                      "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                  ]
-                  if has_ck:
-                      probe_cmd += ["--cookies", str(cookie_file)]
-                  try:
-                      pr = subprocess.run(probe_cmd + [video_url], capture_output=True, text=True, timeout=45, check=False)
-                      if pr.returncode != 0 or not pr.stdout.strip():
+                  info = None
+                  if info_json_path and info_json_path.exists():
+                      try:
+                          info = json.loads(info_json_path.read_text(encoding="utf-8", errors="replace"))
+                          print(f"Subtitle pre-detect loaded from local info.json ({info_json_path.name}) — 0 extra yt-dlp calls!", flush=True)
+                      except Exception:
+                          info = None
+                  if info is None:
+                      probe_cmd = [
+                          "python3", "-m", "yt_dlp",
+                          "--ignore-config", "--force-ipv4", "--skip-download", "--no-playlist",
+                          "--dump-single-json", "--no-warnings",
+                          "--js-runtimes", "deno",
+                          "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+                      ]
+                      if proxy_url:
+                          probe_cmd += ["--proxy", proxy_url]
+                      elif has_ck:
+                          probe_cmd += ["--cookies", str(cookie_file)]
+                      try:
+                          pr = subprocess.run(probe_cmd + [video_url], capture_output=True, text=True, timeout=45, check=False)
+                          if pr.returncode != 0 or not pr.stdout.strip():
+                              return False, []
+                          info = json.loads(pr.stdout)
+                      except Exception:
                           return False, []
-                      info = json.loads(pr.stdout)
-                  except Exception:
-                      return False, []
+                  for _src_flag, _src_dict in (("--write-subs", info.get("subtitles") or {}), ("--write-auto-subs", info.get("automatic_captions") or {})):
+                      for _lk, _fmts in _src_dict.items():
+                          if not _lk or _lk == "live_chat" or not isinstance(_fmts, list):
+                              continue
+                          best_f = next((f for f in _fmts if isinstance(f, dict) and f.get("url") and str(f.get("ext") or "").lower() in ("vtt", "srt")), None)
+                          if best_f:
+                              direct_tracks[(_src_flag, _lk)] = best_f["url"]
 
                   manual = [k for k in (info.get("subtitles") or {}).keys() if k and k != "live_chat"]
                   auto = [k for k in (info.get("automatic_captions") or {}).keys() if k and k != "live_chat"]
@@ -574,7 +601,41 @@ jobs:
                   else [[], ["--extractor-args", "youtube:player_client=android_vr,mweb"]]
               )
 
+              def _process_raw_sub_text(raw_txt: str, clean_stem: str, lang_code: str, expect_he: bool):
+                  clean_cues = clean_and_reconstruct_sentences(raw_txt)
+                  if not clean_cues:
+                      return None
+                  if expect_he or has_hebrew(" ".join(c[2] for c in clean_cues[:12])):
+                      final_he = subs_dir / f"{clean_stem}.he.srt"
+                      final_he.write_text(build_srt_string(_scale_cues_for_speed(clean_cues, apply_speed_scale)), encoding="utf-8")
+                      telemetry["sub_cues"] = len(clean_cues)
+                      telemetry["sub_source"] = lang_code
+                      return [final_he], f"כתוביות בעברית ({len(clean_cues)} שורות)"
+                  he_cues = translate_cues_to_hebrew(clean_cues)
+                  if he_cues:
+                      final_he = subs_dir / f"{clean_stem}.he.srt"
+                      final_he.write_text(build_srt_string(_scale_cues_for_speed(he_cues, apply_speed_scale)), encoding="utf-8")
+                      telemetry["sub_cues"] = len(he_cues)
+                      telemetry["sub_source"] = f"{lang_code}->he"
+                      return [final_he], f"מתורגם לעברית מ-{lang_code} ({len(he_cues)} שורות)"
+                  final_orig = subs_dir / f"{clean_stem}.orig.srt"
+                  final_orig.write_text(build_srt_string(_scale_cues_for_speed(clean_cues, apply_speed_scale)), encoding="utf-8")
+                  telemetry["sub_cues"] = len(clean_cues)
+                  telemetry["sub_source"] = lang_code
+                  return [final_orig], f"כתוביות מקור {lang_code} ({len(clean_cues)} שורות)"
+
               def try_download_single_sub(flag_args, lang_code, expect_he):
+                  if len(flag_args) == 1 and (flag_args[0], lang_code) in direct_tracks and base_stem and not is_pl_sub:
+                      try:
+                          px_d = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+                          dr = requests.get(direct_tracks[(flag_args[0], lang_code)], headers=HTTP_HEADERS, proxies=px_d, timeout=18)
+                          if dr.status_code == 200 and len(dr.text) > 30 and ("-->" in dr.text):
+                              res_direct = _process_raw_sub_text(dr.text, base_stem, lang_code, expect_he)
+                              if res_direct:
+                                  print(f"Direct VTT subtitle fetch succeeded ({lang_code}) — 0 extra yt-dlp runs!", flush=True)
+                                  return res_direct
+                      except Exception:
+                          pass
                   for extra_cl in sub_clients:
                       subprocess.run(base_sub_cmd + extra_cl + flag_args + ["--sub-langs", lang_code, video_url], check=False)
                       cand_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15 and not p.name.endswith("live_chat.json")]
@@ -602,7 +663,7 @@ jobs:
                               continue
                           if expect_he or has_hebrew(" ".join(c[2] for c in clean_cues[:12])):
                               final_he = subs_dir / f"{clean_stem}.he.srt"
-                              final_he.write_text(build_srt_string(_scale_cues_for_speed(clean_cues)), encoding="utf-8")
+                              final_he.write_text(build_srt_string(_scale_cues_for_speed(clean_cues, apply_speed_scale)), encoding="utf-8")
                               out_srts.append(final_he)
                               total_cues_n += len(clean_cues)
                               telemetry["sub_source"] = lang_code
@@ -611,14 +672,14 @@ jobs:
                               he_cues = translate_cues_to_hebrew(clean_cues)
                               if he_cues:
                                   final_he = subs_dir / f"{clean_stem}.he.srt"
-                                  final_he.write_text(build_srt_string(_scale_cues_for_speed(he_cues)), encoding="utf-8")
+                                  final_he.write_text(build_srt_string(_scale_cues_for_speed(he_cues, apply_speed_scale)), encoding="utf-8")
                                   out_srts.append(final_he)
                                   total_cues_n += len(he_cues)
                                   telemetry["sub_source"] = f"{lang_code}->he"
                                   last_lbl = f"מתורגם לעברית מ-{lang_code} ({total_cues_n} שורות)"
                               else:
                                   final_orig = subs_dir / f"{clean_stem}.orig.srt"
-                                  final_orig.write_text(build_srt_string(_scale_cues_for_speed(clean_cues)), encoding="utf-8")
+                                  final_orig.write_text(build_srt_string(_scale_cues_for_speed(clean_cues, apply_speed_scale)), encoding="utf-8")
                                   out_srts.append(final_orig)
                                   total_cues_n += len(clean_cues)
                                   telemetry["sub_source"] = lang_code
@@ -651,11 +712,15 @@ jobs:
           if is_subs_only:
               quality_report = "כתוביות בלבד (SRT)"
               detected_dur = 0.0
+              ok_sub_labels = []
               for u_idx, cur_url in enumerate(target_urls, 1):
                   srt_list, q_label = fetch_subtitles_for_url(cur_url)
-                  quality_report = q_label
-                  for s_file in srt_list:
-                      shutil.copy2(str(s_file), str(out_dir / s_file.name))
+                  if srt_list:
+                      ok_sub_labels.append(q_label)
+                      for s_file in srt_list:
+                          shutil.copy2(str(s_file), str(out_dir / s_file.name))
+              if ok_sub_labels:
+                  quality_report = ok_sub_labels[0] if len(ok_sub_labels) == 1 else f"{len(ok_sub_labels)}/{len(target_urls)} קובצי כתוביות בעברית"
 
               files = [p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0]
               if not files:
@@ -831,7 +896,7 @@ jobs:
                   return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
 
               def extract_vid_id(u: str) -> str:
-                  m = re.search(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})", str(u or ""))
+                  m = re.search(r"(?:\[|v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})", str(u or ""))
                   return m.group(1) if m else ""
 
               def probe_playability(vid: str, px: str = None, timeout_s: float = 5.0, gl_code: str = "US"):
@@ -945,8 +1010,11 @@ jobs:
                       print(f">>> Direct Runner Playability Probe [{cur_vid}]: status={p_st} reason={p_rsn!r}", flush=True)
                       telemetry["direct_probe"] = f"{p_st}: {p_rsn}"
 
+                  info_cache_dir = Path("/tmp/info_cache")
+                  info_cache_dir.mkdir(parents=True, exist_ok=True)
                   downloaded_media_for_url = None
                   downloaded_media_list = []
+                  winning_proxy = ""
                   il_geo_blocked = False
                   api_403_fails = 0
                   has_custom_px = bool(os.environ.get("CUSTOM_PROXY", "").strip() or os.environ.get("IL_PROXY", "").strip())
@@ -965,7 +1033,7 @@ jobs:
 
                       cmd = [
                           "python3", "-m", "yt_dlp",
-                          "--ignore-config", "--rm-cache-dir",
+                          "--ignore-config", "--rm-cache-dir", "--write-info-json",
                           "--ffmpeg-location", "/usr/bin/ffmpeg",
                           "--retries", "8",
                           "--fragment-retries", "8",
@@ -988,6 +1056,9 @@ jobs:
                       media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
                       if media_files:
                           for f in s_files:
+                              if f.name.endswith(".info.json"):
+                                  shutil.move(str(f), str(info_cache_dir / f.name))
+                                  continue
                               dest_f = out_dir / f.name
                               shutil.move(str(f), str(dest_f))
                               if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
@@ -1034,7 +1105,7 @@ jobs:
                           stage_dir.mkdir(parents=True, exist_ok=True)
                           px_cmd = [
                               "python3", "-m", "yt_dlp",
-                              "--ignore-config", "--rm-cache-dir",
+                              "--ignore-config", "--rm-cache-dir", "--write-info-json",
                               "--proxy", px_url,
                               "--impersonate", "chrome",
                               "--ffmpeg-location", "/usr/bin/ffmpeg",
@@ -1051,25 +1122,82 @@ jobs:
                           s_files = get_stage_files()
                           media_files = [p for p in s_files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
                           if media_files:
+                              winning_proxy = px_url
                               for f in s_files:
+                                  if f.name.endswith(".info.json"):
+                                      shutil.move(str(f), str(info_cache_dir / f.name))
+                                      continue
                                   dest_f = out_dir / f.name
                                   shutil.move(str(f), str(dest_f))
                                   if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
                                       downloaded_media_for_url = dest_f
+                                      downloaded_media_list.append(dest_f)
                               _px_sec = round(time.time() - _t_px, 1)
                               telemetry["winner"] = f"Verified Proxy ({used_country} #{px_idx})"
                               telemetry["dl_sec"] = round(telemetry["dl_sec"] + _px_sec, 1)
                               telemetry["attempts"].append({"n": 100 + px_idx, "label": telemetry["winner"], "ok": True, "sec": _px_sec})
                               print(f"=== Success via Verified Proxy #{px_idx} ({_px_sec}s)! ===", flush=True)
                               break
+                  speed_applied_files = set()
+                  if downloaded_media_list and ((speed_val not in ("1", "1.0", "")) or norm_audio):
+                      _t_ff = time.time()
+                      for fpath in list(downloaded_media_list):
+                          suf = fpath.suffix.lower()
+                          if suf not in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
+                              continue
+                          try:
+                              spd = float(speed_val) if speed_val else 1.0
+                          except Exception:
+                              spd = 1.0
+                          if spd <= 0 or (abs(spd - 1.0) < 0.01 and not norm_audio):
+                              continue
+                          tmp_p = fpath.with_name("proc_" + fpath.name)
+                          af = []
+                          if abs(spd - 1.0) >= 0.01:
+                              af.append(f"atempo={spd}")
+                          if norm_audio:
+                              af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+                          if suf in (".mp4", ".mkv", ".webm"):
+                              ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-dn", "-map_chapters", "-1"]
+                              if abs(spd - 1.0) >= 0.01:
+                                  ff_cmd += ["-filter:v", f"setpts=PTS/{spd}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p"]
+                              else:
+                                  ff_cmd += ["-c:v", "copy"]
+                              if af:
+                                  ff_cmd += ["-filter:a", ",".join(af), "-c:a", "aac", "-b:a", "192k"]
+                              else:
+                                  ff_cmd += ["-c:a", "copy"]
+                              if suf == ".mp4":
+                                  ff_cmd += ["-movflags", "+faststart"]
+                          else:
+                              ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:a:0", "-dn", "-map_chapters", "-1"]
+                              if af:
+                                  ff_cmd += ["-filter:a", ",".join(af)]
+                              if suf == ".m4a":
+                                  ff_cmd += ["-movflags", "+faststart"]
+                          ff_cmd.append(str(tmp_p))
+                          if subprocess.run(ff_cmd, check=False).returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 0:
+                              tmp_p.replace(fpath)
+                              if abs(spd - 1.0) >= 0.01:
+                                  speed_applied_files.add(fpath)
+                      telemetry["ff_sec"] = round(telemetry["ff_sec"] + (time.time() - _t_ff), 1)
+
                   if downloaded_media_list and (not is_audio) and subtitles in ("embed", "files"):
                       _sub_targets = downloaded_media_list if len(downloaded_media_list) > 1 else [downloaded_media_list[0]]
                       for mf_item in _sub_targets:
-                          mf_vid = extract_vid_id(mf_item.name) if len(_sub_targets) > 1 else ""
-                          sub_req_url = f"https://www.youtube.com/watch?v={mf_vid}" if mf_vid else cur_url
-                          time.sleep(0.4)
+                          mf_vid = extract_vid_id(mf_item.name) if len(_sub_targets) > 1 else extract_vid_id(cur_url)
+                          sub_req_url = f"https://www.youtube.com/watch?v={mf_vid}" if (len(_sub_targets) > 1 and mf_vid) else cur_url
+                          cand_info = info_cache_dir / f"{mf_item.stem}.info.json"
+                          if (not cand_info.exists()) and mf_vid:
+                              cand_info = next(info_cache_dir.glob(f"*[{mf_vid}].info.json"), cand_info)
+                          time.sleep(0.2)
                           _t_sub = time.time()
-                          srt_list, sub_label = fetch_subtitles_for_url(sub_req_url, mf_item.stem, force_single=True)
+                          srt_list, sub_label = fetch_subtitles_for_url(
+                              sub_req_url, mf_item.stem, force_single=True,
+                              proxy_url=winning_proxy,
+                              info_json_path=(cand_info if cand_info.exists() else None),
+                              apply_speed_scale=(mf_item in speed_applied_files)
+                          )
                           telemetry["sub_sec"] = round(telemetry["sub_sec"] + (time.time() - _t_sub), 1)
                           if srt_list:
                               best_srt = srt_list[0]
@@ -1100,45 +1228,6 @@ jobs:
               if not files:
                   raise SystemExit("::error::הורדת המדיה נכשלה בכל הקליינטים")
 
-              if (speed_val not in ("1", "1.0", "")) or norm_audio:
-                  _t_ff = time.time()
-                  for fpath in list(files):
-                      suf = fpath.suffix.lower()
-                      if suf not in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
-                          continue
-                      try:
-                          spd = float(speed_val) if speed_val else 1.0
-                      except Exception:
-                          spd = 1.0
-                      if spd <= 0 or (abs(spd - 1.0) < 0.01 and not norm_audio):
-                          continue
-                      tmp_p = fpath.with_name("proc_" + fpath.name)
-                      af = []
-                      if abs(spd - 1.0) >= 0.01:
-                          af.append(f"atempo={spd}")
-                      if norm_audio:
-                          af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
-                      if suf in (".mp4", ".mkv", ".webm"):
-                          ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-dn", "-map_chapters", "-1"]
-                          if abs(spd - 1.0) >= 0.01:
-                              ff_cmd += ["-filter:v", f"setpts=PTS/{spd}"]
-                          else:
-                              ff_cmd += ["-c:v", "copy"]
-                          ff_cmd += ["-c:s", "copy"]
-                          if af:
-                              ff_cmd += ["-filter:a", ",".join(af)]
-                          if suf == ".mp4":
-                              ff_cmd += ["-movflags", "+faststart"]
-                      else:
-                          ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:a:0", "-dn", "-map_chapters", "-1"]
-                          if af:
-                              ff_cmd += ["-filter:a", ",".join(af)]
-                          if suf == ".m4a":
-                              ff_cmd += ["-movflags", "+faststart"]
-                      ff_cmd.append(str(tmp_p))
-                      if subprocess.run(ff_cmd, check=False).returncode == 0 and tmp_p.exists():
-                          tmp_p.replace(fpath)
-                  telemetry["ff_sec"] = round(time.time() - _t_ff, 1)
 
               media_out = [p for p in files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
               primary_file = media_out[0] if media_out else files[0]
@@ -1204,7 +1293,7 @@ jobs:
               extra_small = [f for f in files if f != primary_file]
               if extra_small:
                   zp_extra = pkg_dir / f"{tag}-extras.zip"
-                  with zipfile.ZipFile(zp_extra, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
+                  with zipfile.ZipFile(zp_extra, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
                       for bf in extra_small:
                           zf.write(bf, bf.relative_to(out_dir))
                   zip_paths.append(zp_extra)
@@ -1449,6 +1538,7 @@ jobs:
               return sorted([p for p in dst_dir.glob(f"{prefix}_*{ext}") if p.is_file() and p.stat().st_size > 0])
 
           email_sent_status = ""
+          email_delivered_ok = False
           if send_email_flag and not (smtp_user and smtp_pass and recipient and "@" in recipient):
               email_sent_status = "⚠️ חסרים Secrets של מייל (SMTP_USER/SMTP_PASS)"
           elif send_email_flag:
@@ -1485,6 +1575,7 @@ jobs:
                               msg.add_attachment(srt_f.read_bytes(), maintype="text", subtype="plain", filename=f"{clean_stem}.he.srt")
                       with _open_smtp() as srv:
                           srv.send_message(msg)
+                      email_delivered_ok = True
                       email_sent_status = "נשלח מייל אחד עם קישור Google Drive (איכות מלאה)"
                       print(f">>> EMAIL OK: {email_sent_status}", flush=True)
 
@@ -1508,6 +1599,7 @@ jobs:
                               msg.add_attachment(srt_f.read_bytes(), maintype="text", subtype="plain", filename=f"{clean_stem}.he.srt")
                       with _open_smtp() as srv:
                           srv.send_message(msg)
+                      email_delivered_ok = True
                       email_sent_status = "נשלח למייל באיכות מקורית"
                       print(f">>> EMAIL OK: {email_sent_status}", flush=True)
 
@@ -1561,7 +1653,7 @@ jobs:
                       if raw_chunks and len(raw_chunks) <= MAX_SAFE_SMTP_PARTS:
                           final_dir = mail_work / "final"
                           final_dir.mkdir(parents=True, exist_ok=True)
-                          cursor_ms, parts_to_send, has_internal_subs_preserved = 0, [], False
+                          cursor_ms, parts_to_send, has_internal_subs_preserved, skipped_mail_parts = 0, [], False, 0
                           for idx_p, ch_fp in enumerate(raw_chunks, 1):
                               c_dur_sec = _probe_dur_sec(ch_fp)
                               c_dur_ms = max(1000, int(round(c_dur_sec * 1000)))
@@ -1591,6 +1683,7 @@ jobs:
                               if part_dst.exists() and part_dst.stat().st_size <= int(18.5 * 1024 * 1024):
                                   parts_to_send.append((part_dst, int(round(c_dur_sec)), part_ext_srt))
                               else:
+                                  skipped_mail_parts += 1
                                   print(f"WARNING: Email part #{idx_p} exceeded 18.5MB limit and was skipped.", flush=True)
 
                           pl_lines = ["#EXTM3U"]
@@ -1633,7 +1726,9 @@ jobs:
                                   print(f"Waiting {SMTP_COOLDOWN_SEC}s before next email part to protect Gmail account...", flush=True)
                                   time.sleep(SMTP_COOLDOWN_SEC)
 
-                          email_sent_status = f"נשלח למייל באיכות מקורית ({sent_ok}/{total_parts} חלקים מושהים + פלייליסט)"
+                          email_delivered_ok = (sent_ok > 0)
+                          _skip_note = f" (⚠️ {skipped_mail_parts} חלקים חרגו מ-18.5MB ודולגו)" if skipped_mail_parts else ""
+                          email_sent_status = f"נשלח למייל באיכות מקורית ({sent_ok}/{total_parts} חלקים מושהים + פלייליסט){_skip_note}"
                           print(f">>> EMAIL OK: {email_sent_status}", flush=True)
                       else:
                           # קובץ גדול מ-~75MB ללא Drive: מגן Gmail — שולח מייל 1 בטוח בלבד כדי לא לנעול את החשבון!
@@ -1673,6 +1768,7 @@ jobs:
                                   msg.add_attachment(srt_f.read_bytes(), maintype="text", subtype="plain", filename=f"{clean_stem}.he.srt")
                           with _open_smtp() as srv:
                               srv.send_message(msg)
+                          email_delivered_ok = True
                           email_sent_status = f"נשלח מייל אחד מוגן (הגנת חסימת Gmail לקובץ {file_mb}MB — חבר Drive לאיכות מלאה)"
                           print(f">>> EMAIL OK (ANTI-LOCKOUT): {email_sent_status}", flush=True)
               except Exception as e:
@@ -1681,7 +1777,7 @@ jobs:
               finally:
                   telemetry["email_sec"] = round(time.time() - _t_em, 1)
 
-          _email_ok = bool(email_sent_status and not email_sent_status.startswith("שגיאת"))
+          _email_ok = bool(email_delivered_ok)
           is_cloud_only_done = bool(cloud_only_flag and (drive_web_link or _email_ok))
           rel_files = [str(z) for z in zip_paths]
           if cloud_only_flag:
@@ -1698,7 +1794,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.8,
+              "v": 23.9,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
