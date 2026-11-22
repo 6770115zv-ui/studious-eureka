@@ -55,7 +55,9 @@ jobs:
 
           del_rel = 0
           rel_page = 1
-          while rel_page <= 8:
+          rel_iters = 0
+          while rel_page <= 8 and rel_iters < 16:
+              rel_iters += 1
               st, rels = api("GET", f"releases?per_page=100&page={rel_page}")
               if st != 200 or not rels:
                   break
@@ -71,12 +73,14 @@ jobs:
                   deleted_page += 1
               if len(rels) < 100:
                   break
-              if deleted_page == 0:
+              if deleted_page < 50:
                   rel_page += 1
 
           del_runs = 0
           run_page = 1
-          while run_page <= 10:
+          run_iters = 0
+          while run_page <= 10 and run_iters < 20:
+              run_iters += 1
               st, data = api("GET", f"actions/runs?per_page=100&page={run_page}")
               runs = (data or {}).get("workflow_runs") or []
               if st != 200 or not runs:
@@ -96,7 +100,7 @@ jobs:
                       deleted_page += 1
               if len(runs) < 100:
                   break
-              if deleted_page == 0:
+              if deleted_page < 50:
                   run_page += 1
 
           print(f"Cleanup finished (mode={'schedule' if is_schedule else 'manual'}): deleted {del_rel} releases, {del_runs} runs.")
