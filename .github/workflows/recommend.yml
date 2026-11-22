@@ -25,9 +25,11 @@ jobs:
         with:
           deno-version: v2.x
       - name: Install yt-dlp + Pillow
+        env:
+          FILTER_PROMPT: ${{ inputs.filter_prompt }}
         run: |
           PKGS="requests cryptography pillow google-genai"
-          if echo "${{ inputs.filter_prompt }}" | grep -qi '\[PL_STREAMS\]'; then
+          if printf '%s' "$FILTER_PROMPT" | grep -qi '\[PL_STREAMS\]'; then
             PKGS="$PKGS yt-dlp[default,curl-cffi] yt-dlp-ejs"
           fi
           python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre $PKGS
@@ -78,7 +80,7 @@ jobs:
               if _m and len(_m) >= 8: print(f"::add-mask::{_m}", flush=True)
 
           fp_low = filter_prompt.lower()
-          high_quality_only = "[hq_only]" in fp_low or "|hq" in sort_raw.lower() or sort_raw.lower() == "quality_score"
+          high_quality_only = "[hq_only]" in fp_low or "|hq" in sort_raw.lower()
           translate_titles = "[tr_he]" in fp_low or "|tr" in sort_raw.lower()
           playlist_mode = "streams" if "[pl_streams]" in fp_low else ("uu_all" if "[pl_uu]" in fp_low else ("uulp" if "[pl_uulp]" in fp_low else "auto"))
           m_dur = re.search(r"\[dur:([a-z0-9_]+)\]", fp_low); dur_filter = m_dur.group(1) if m_dur else "all"
@@ -442,7 +444,14 @@ jobs:
                           if m not in self.dead_models:
                               backups.append(("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", {"Authorization": f"Bearer {self.openrouter_key}"}, m))
 
+                  skip_aliases = set()
+                  now_bk = time.time()
                   for prov, alias, url, hdrs, m_name in backups:
+                      with self.lock:
+                          if alias in skip_aliases or alias in self.dead_keys or m_name in self.dead_models:
+                              continue
+                          if self.cooldowns.get((alias, m_name), 0) > now_bk or self.cooldowns.get((alias, "*"), 0) > now_bk:
+                              continue
                       t0 = time.time()
                       try:
                           res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 18)
@@ -457,13 +466,14 @@ jobs:
                               if "401" in es or "403" in es:
                                   self.dead_keys.add(alias)
                                   self.key_stats[alias]["status"] = "invalid_key"
-                                  break
+                                  skip_aliases.add(alias)
                               elif "404" in es:
                                   self.dead_models.add(m_name)
                               elif "429" in es or "rate_limit" in es.lower():
                                   self.cooldowns[(alias, m_name)] = time.time() + 30
+                                  self.cooldowns[(alias, "*")] = time.time() + 15
                                   self.key_stats[alias]["status"] = "quota_429"
-                                  break
+                                  skip_aliases.add(alias)
                   return None, ""
 
               def call_json(self, prompt_text: str, timeout_sec: int = 16, stage: str = "general"):
@@ -507,7 +517,7 @@ jobs:
                                       es = f"{type(e).__name__}: {str(e)}"
                                       low_e = es.lower()
                                       if ("400" in low_e or "invalid_argument" in low_e) and ("thinking" in low_e or "budget" in low_e or "level" in low_e) and m_name not in self.no_thinking_models:
-                                          self.no_thinking_models.add(m_name)
+                                          with self.lock: self.no_thinking_models.add(m_name)
                                           t_r = time.time()
                                           try:
                                               res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
@@ -597,10 +607,19 @@ jobs:
 
           def parse_views_text(v_str) -> int:
               if isinstance(v_str, (int, float)): return int(v_str)
-              s = str(v_str or "").strip().upper().replace(",", "")
-              m = re.search(r"([\d.]+)\s*([KMB])?", s)
-              if not m: d = re.sub(r"\D", "", s); return int(d) if d else 0
-              return int(float(m.group(1)) * {"K":1_000,"M":1_000_000,"B":1_000_000_000}.get(m.group(2) or "", 1))
+              raw_s = str(v_str or "").strip()
+              s_clean = raw_s.replace(",", "").replace("\u200f", "").replace("\u200e", "")
+              m_he = re.search(r"([\d.]+)\s*(מיליארד|מיליון|אלף)", s_clean)
+              if m_he:
+                  return int(float(m_he.group(1)) * {"אלף": 1_000, "מיליון": 1_000_000, "מיליארד": 1_000_000_000}[m_he.group(2)])
+              s = s_clean.upper()
+              m = re.search(r"([\d.]+)\s*(MIL\b|[KMB])?", s)
+              if not m:
+                  d = re.sub(r"\D", "", s)
+                  return int(d) if d else 0
+              unit = (m.group(2) or "").strip()
+              mult = {"K": 1_000, "MIL": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(unit, 1)
+              return int(float(m.group(1)) * mult)
 
           def extract_11char_id(s: str) -> str:
               s = str(s or "").strip()
@@ -657,7 +676,7 @@ jobs:
           def fetch_search(q_str: str, sp_param: str = "", target_count: int = 120, must_match_uc: str = "", must_match_name: str = ""):
               if not q_str: return []
               api_url = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false"
-              ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "he", "gl": "IL"}}
+              ctx = {"client": {"clientName": "WEB", "clientVersion": "2.20261101.00.00", "hl": "en", "gl": "IL"}}
               payload = {"context": ctx, "query": q_str}
               if sp_param: payload["params"] = sp_param
               collected, seen_vids, visited = [], set(), set()
@@ -944,15 +963,19 @@ jobs:
                   s_qs = []
                   if clean_q:
                       for eq in expanded_queries[:4]:
-                          s_qs.append((f'"{resolved_ch}" {eq}{date_op}', ""))
-                          s_qs.append((f'"{resolved_ch}" {eq}{date_op}', sp_code))
+                          s_qs.append((eq, f'"{resolved_ch}" {eq}{date_op}', ""))
+                          s_qs.append((eq, f'"{resolved_ch}" {eq}{date_op}', sp_code))
                   elif season_info:
                       for sl_op in build_date_slices(season_info[0], season_info[1]):
-                          s_qs.append((f'"{resolved_ch}" {sl_op}', ""))
-                          s_qs.append((f'"{resolved_ch}" תקציר {sl_op}', ""))
+                          s_qs.append((resolved_ch, f'"{resolved_ch}" {sl_op}', ""))
+                          s_qs.append((resolved_ch, f'"{resolved_ch}" תקציר {sl_op}', ""))
                   with ThreadPoolExecutor(max_workers=10) as ex:
-                      for b in ex.map(lambda p: fetch_search(p[0], p[1], 220, uc_id, resolved_ch), s_qs):
-                          for it_b in b: it_b["matched_date_op"] = True
+                      for base_eq, b in ex.map(lambda p: (p[0], fetch_search(p[1], p[2], 220, uc_id, resolved_ch)), s_qs):
+                          s_set = query_hits_map.setdefault(base_eq, set())
+                          for it_b in b:
+                              it_b["matched_date_op"] = True
+                              if base_eq: it_b["source_q"] = base_eq
+                              if it_b.get("id"): s_set.add(it_b["id"])
                           raw.extend(b)
               if season_info and uc_id:
                   pl_vids = fetch_channel_playlists_videos(uc_id, resolved_ch)
@@ -1053,10 +1076,11 @@ jobs:
                                           p_dt = parse_dt(raw_dt)
                                           if p_dt: c["upload_date"] = p_dt
                                           else: c["published_rel"] = raw_dt
-                                  if not c.get("views"):
-                                      vc_r = (p_info.get("viewCount") or {}).get("videoViewCountRenderer") or {}
-                                      vc_s = str((vc_r.get("viewCount") or {}).get("simpleText") or "")
-                                      if vc_s: c["views"] = parse_views_text(vc_s)
+                                  vc_r = (p_info.get("viewCount") or {}).get("videoViewCountRenderer") or {}
+                                  vc_s = str((vc_r.get("viewCount") or {}).get("simpleText") or "")
+                                  if vc_s:
+                                      pv_n = parse_views_text(vc_s)
+                                      if pv_n > int(c.get("views") or 0): c["views"] = pv_n
                                   if c["likes"] == 0:
                                       va_str = json.dumps(p_info.get("videoActions") or {}, ensure_ascii=False)
                                       ml = re.search(r'"likeCount"\s*:\s*"?(\d+)"?', va_str)
@@ -1106,7 +1130,7 @@ jobs:
                       if r.status_code == 200:
                           pd = r.json(); vd = pd.get("videoDetails") or {}; mf = (pd.get("microformat") or {}).get("playerMicroformatRenderer") or {}
                           if vd.get("channelId"): c["channel_id"] = str(vd["channelId"]).strip()
-                          if vd.get("viewCount") and not c.get("views"): c["views"] = int(vd["viewCount"])
+                          if vd.get("viewCount") and int(vd["viewCount"]) > int(c.get("views") or 0): c["views"] = int(vd["viewCount"])
                           if vd.get("lengthSeconds") and not c["duration"]: c["duration"] = int(vd["lengthSeconds"])
                           if vd.get("author"): c["channel"] = str(vd["author"]).strip()
                           if vd.get("title"): c["title"] = str(vd["title"]).strip()
@@ -1176,7 +1200,7 @@ jobs:
                           + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this theme (specific key figure, interview, podcast, or deep breakdown).\n"
                           + "  * DROP (<5): Confused/similar-named wrong entity, gaming/FIFA/EA FC (unless asked), unrelated topics/celebrities, clickbait spam, or filter-rule violations.\n"
                           + "Note: 'ללא דמויות אחרות' means no unrelated people/topics — directly relevant figures within the requested subject are WELCOME!\n"
-                          + "CRITICAL RECALL TARGET: Aim to keep ~22 to 40 valid items from this 90-item batch! If fewer than 20 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related club/youth/podcast/press-conference videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
+                          + "CRITICAL RECALL TARGET: Aim to keep ~22 to 40 valid items from this 90-item batch! If fewer than 20 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related interviews, podcasts, breakdowns, or deep-dive videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
                           + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
                           + f"Items: {json.dumps(compact, ensure_ascii=False)}"
                       )
@@ -1453,7 +1477,8 @@ jobs:
           # הצעות חיפוש גיבוי אם Gemini לא החזיר
           if not suggested_searches and (clean_q or resolved_ch):
               base_t = clean_q or resolved_ch
-              suggested_searches = [f"{base_t} 2026", f"{base_t} 2025/26", f"{base_t} תקציר", f"{base_t} כישרונות חדשים", f"{base_t} שערים ומהלכים", f"{base_t} משחק מלא", f"{base_t} אימון", f"{base_t} דוקומנטרי"]
+              _yr = datetime.date.today().year
+              suggested_searches = [f"{base_t} {_yr}", f"{base_t} ניתוח מעמיק", f"{base_t} סיכום", f"{base_t} ראיון", f"{base_t} פודקאסט", f"{base_t} מלא", f"{base_t} הסבר", f"{base_t} דוקומנטרי"]
 
           for item in pool:
               item.pop("orig_pos", None); item.pop("source_q", None); item.pop("is_il_stub", None); item.pop("matched_date_op", None); item.pop("channel_id", None)
