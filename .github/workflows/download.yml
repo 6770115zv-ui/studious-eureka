@@ -24,6 +24,38 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
+      - name: Pre-Flight Azure IP Check (2s Fast-Abort on 403)
+        env:
+          TARGET_URL: ${{ inputs.url }}
+          IL_PROXY: ${{ secrets.IL_PROXY }}
+          CUSTOM_PROXY: ${{ secrets.CUSTOM_PROXY }}
+        run: |
+          python3 - << 'PREFLIGHT_EOF'
+          import json, os, re, urllib.error, urllib.request
+          if os.environ.get('CUSTOM_PROXY', '').strip() or os.environ.get('IL_PROXY', '').strip():
+              print('Custom proxy configured; skipping pre-flight IP abort.', flush=True)
+              raise SystemExit(0)
+          u = os.environ.get('TARGET_URL', '').strip()
+          m = re.search(r'(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})', u)
+          vid = m.group(1) if m else 'dQw4w9WgXcQ'
+          payload = json.dumps({'context': {'client': {'clientName': 'WEB', 'clientVersion': '2.20261121.00.00', 'hl': 'en', 'gl': 'US'}}, 'videoId': vid}).encode('utf-8')
+          req = urllib.request.Request(
+              'https://www.youtube.com/youtubei/v1/player?prettyPrint=false',
+              data=payload,
+              headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'},
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=7) as r:
+                  print(f'Pre-flight IP check OK (HTTP {r.status}).', flush=True)
+          except urllib.error.HTTPError as e:
+              print(f'Pre-flight HTTP error: {e.code}', flush=True)
+              if e.code == 403:
+                  raise SystemExit('::error::AZURE_IP_403_BANNED|Pre-flight YouTube API returned HTTP 403 on this Azure VM')
+          except Exception as ex:
+              print(f'Pre-flight warning (continuing): {type(ex).__name__}: {ex}', flush=True)
+          PREFLIGHT_EOF
+
       - name: Set up Deno
         uses: denoland/setup-deno@v2
         with:
@@ -389,13 +421,13 @@ jobs:
           def has_hebrew(text: str) -> bool:
               return any("\u0590" <= ch <= "\u05FF" for ch in str(text or ""))
 
-          def translate_batch_guaranteed(batch_cues):
+          def translate_batch_guaranteed(batch_cues, _depth: int = 0):
               if not batch_cues:
                   return []
               src_lines = [c[2].replace("\n", " ").strip() for c in batch_cues]
               joined_lines = "\n".join(src_lines)
 
-              # ניסיון 1: פרוטוקול JSON מובנה (dj=1) של Google Translate ללא מספור מלאכותי שמשבש את התחביר!
+              # ניסיון 1: פרוטוקול JSON מובנה (dj=1) — ללא חזרה כפולה אחרי HTTP 200!
               for client_id in ("gtx", "dict-chrome-ex"):
                   for attempt in range(2):
                       try:
@@ -404,7 +436,7 @@ jobs:
                               params={"client": client_id, "sl": "auto", "tl": "iw", "dt": "t", "dj": "1"},
                               data={"q": joined_lines},
                               headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-                              timeout=20
+                              timeout=18
                           )
                           if r.status_code == 200:
                               data = r.json()
@@ -413,10 +445,18 @@ jobs:
                               tr_lines = [ln.strip() for ln in full_trans.splitlines() if ln.strip()]
                               if len(tr_lines) == len(batch_cues) and has_hebrew(full_trans):
                                   return [[c[0], c[1], t_ln] for c, t_ln in zip(batch_cues, tr_lines)]
-                          elif r.status_code == 429:
-                              time.sleep(1.5 * (attempt + 1))
+                              break
+                          elif r.status_code in (429, 502, 503):
+                              time.sleep(1.2 * (attempt + 1))
+                          else:
+                              break
                       except Exception:
-                          time.sleep(0.5)
+                          time.sleep(0.4)
+
+              # פיצול בינארי מהיר במקום ליפול מיד ל-25 בקשות בודדות!
+              if len(batch_cues) > 4 and _depth < 3:
+                  mid = len(batch_cues) // 2
+                  return translate_batch_guaranteed(batch_cues[:mid], _depth + 1) + translate_batch_guaranteed(batch_cues[mid:], _depth + 1)
 
               # ניסיון 2: deep-translator (GoogleTranslator)
               try:
@@ -461,11 +501,11 @@ jobs:
                   return cues_list
 
               print(f"Translating {len(cues_list)} reconstructed sentences to Hebrew...", flush=True)
-              batch_size = 45
+              batch_size = 25
               batches = [cues_list[i:i + batch_size] for i in range(0, len(cues_list), batch_size)]
 
               translated_cues = []
-              with ThreadPoolExecutor(max_workers=6) as ex:
+              with ThreadPoolExecutor(max_workers=8) as ex:
                   for res_batch in ex.map(translate_batch_guaranteed, batches):
                       translated_cues.extend(res_batch)
 
@@ -578,14 +618,19 @@ jobs:
                           pref_m = next((k for k in manual if k.lower().split("-")[0] in ("en", "es", "fr", "pt", "de", "it")), manual[0])
                       add_plan("--write-subs", pref_m, pref_m.lower().startswith(("he", "iw")))
 
+                  if vlang:
+                      for _vc in (f"{vlang}-orig", f"{vlang_base}-orig", vlang, vlang_base):
+                          m_a = next((k for k in auto if k.lower() == _vc), None)
+                          if m_a:
+                              add_plan("--write-auto-subs", m_a, m_a.lower().startswith(("he", "iw")))
+
                   orig_autos = [k for k in auto if k.lower().endswith("-orig")]
+                  for _plg in ("he", "iw", "en", "es", "fr", "pt", "de", "it"):
+                      m_po = next((k for k in orig_autos if k.lower() == f"{_plg}-orig" or k.lower().startswith(f"{_plg}-")), None)
+                      if m_po:
+                          add_plan("--write-auto-subs", m_po, m_po.lower().startswith(("he", "iw")))
                   for k in orig_autos[:2]:
                       add_plan("--write-auto-subs", k, k.lower().startswith(("he", "iw")))
-
-                  if vlang:
-                      m_a = next((k for k in auto if k.lower() in (vlang, vlang_base)), None)
-                      if m_a:
-                          add_plan("--write-auto-subs", m_a, m_a.lower().startswith(("he", "iw")))
                   for fb in ("he", "iw", "en", "es"):
                       if fb in auto:
                           add_plan("--write-auto-subs", fb, fb in ("he", "iw"))
@@ -859,9 +904,10 @@ jobs:
                       ], True, False
                   ))
 
-              # ניסיון 3: עקיפת Geo ארה"ב (ללא עוגיות ישראליות!) — משחרר NBC Sports וערוצים חסומים לארה"ב ב-1080p
+              # ניסיון 3: עקיפת Geo ארה"ב (עם עוגיות לעקיפת LOGIN_REQUIRED ב-Azure)
               attempts.append((
-                  "2026 US Geo-Bypass HD (No IL Cookies, --xff US + Impersonate)", [
+                  "2026 US Geo-Bypass HD (--xff US + Cookies + Impersonate)",
+                  (["--cookies", str(cookie_file)] if has_ck else []) + [
                       "--xff", "US",
                       "--impersonate", "chrome",
                       "--concurrent-fragments", "8",
@@ -1019,13 +1065,14 @@ jobs:
                   downloaded_media_for_url = None
                   downloaded_media_list = []
                   winning_proxy = ""
-                  il_geo_blocked = False
+                  il_geo_blocked = (p_st == "UNPLAYABLE" and "country" in p_rsn.lower())
+                  perm_unavail_reason = ""
                   api_403_fails = 0
                   has_custom_px = bool(os.environ.get("CUSTOM_PROXY", "").strip() or os.environ.get("IL_PROXY", "").strip())
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
-                      if p_st == "HTTP_403" and att_idx == 1 and has_ck:
-                          print(">>> Runner IP returned HTTP_403 on anonymous probe — skipping Attempt 1 and testing Cookies directly...", flush=True)
+                      if p_st in ("HTTP_403", "LOGIN_REQUIRED") and att_idx == 1 and has_ck:
+                          print(f">>> Anonymous probe returned {p_st} — skipping Attempt 1 and testing Cookies directly...", flush=True)
                           continue
                       if att_idx > 1:
                           time.sleep(0.5)
@@ -1053,7 +1100,8 @@ jobs:
                           print(proc.stderr[-1800:], flush=True)
 
                       combined_out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-                      if "available in Israel" in combined_out:
+                      low_comb = combined_out.lower()
+                      if ("available in israel" in low_comb) or ("not made this video available in your country" in low_comb) or ("blocked it in your country" in low_comb):
                           il_geo_blocked = True
 
                       s_files = get_stage_files()
@@ -1080,21 +1128,26 @@ jobs:
                       _short_err = (_err_lines[-1][:140] if _err_lines else f"exit={proc.returncode}")
                       telemetry["attempts"].append({"n": att_idx, "label": label, "ok": False, "sec": _att_sec, "err": _short_err})
 
+                      if (not il_geo_blocked) and ("sign in to confirm" not in low_comb) and ("available in your country" not in low_comb):
+                          if any(k in low_comb for k in ("private video", "this video has been removed", "members-only", "join this channel to get access", "drm protected", "this live event will begin")):
+                              perm_unavail_reason = _short_err
+                              break
+
                       is_api_403 = ("Unable to download API page: HTTP Error 403" in combined_out) or ("Failed to extract any player response" in combined_out)
                       if is_api_403:
                           api_403_fails += 1
 
-                      # עצירה מהירה (~20 שנ' במקום 4.5 דק') כשהשרת הזמני ב-Azure חסום גורף ב-HTTP 403 -> התוסף קופץ מיד ל-VM נקי!
+                      # עצירה מהירה כשהשרת הזמני ב-Azure חסום גורף ב-HTTP 403 -> התוסף קופץ מיד ל-VM נקי!
                       if (not has_custom_px) and (not il_geo_blocked) and ((p_st == "HTTP_403" and is_api_403) or api_403_fails >= 2):
                           print(">>> FAST-ABORT: Azure runner IP is banned by YouTube API (HTTP 403). Exiting immediately for instant Fresh-VM retry!", flush=True)
-                          raise SystemExit("::error::AZURE_IP_403_BANNED")
+                          raise SystemExit(f"::error::AZURE_IP_403_BANNED|{_short_err}")
 
                       if il_geo_blocked and att_idx >= 4:
                           print(">>> Detected Israel-Only Geo-Restriction! Engaging Israel Proxy Tunnel...", flush=True)
                           break
 
-                  if not downloaded_media_for_url:
-                      px_order = ["IL", "US", "ALL"] if il_geo_blocked else ["US", "ALL"]
+                  if (not downloaded_media_for_url) and (not perm_unavail_reason):
+                      px_order = ["IL", "US", "GB", "DE", "ALL"] if il_geo_blocked else ["US", "IL", "GB", "ALL"]
                       proxies_list, used_country = [], px_order[0]
                       for cand_c in px_order:
                           proxies_list = discover_working_proxies(cur_vid, cand_c)
@@ -1113,8 +1166,8 @@ jobs:
                               "--proxy", px_url,
                               "--impersonate", "chrome",
                               "--ffmpeg-location", "/usr/bin/ffmpeg",
-                              "--concurrent-fragments", "6",
-                              "--socket-timeout", "18",
+                              "--concurrent-fragments", "2",
+                              "--socket-timeout", "25",
                               "--retries", "5",
                               "--extractor-args", "youtube:player_client=web,android_vr,ios,default,web_safari",
                               "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
@@ -1238,7 +1291,12 @@ jobs:
 
               files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
               if not files:
-                  raise SystemExit("::error::הורדת המדיה נכשלה בכל הקליינטים")
+                  _last_errs = " ; ".join(f"#{a.get('n')}:{a.get('err','')}" for a in telemetry.get("attempts", [])[-3:] if not a.get("ok"))
+                  if locals().get("perm_unavail_reason"):
+                      raise SystemExit(f"::error::PERMANENT_UNAVAILABLE|{perm_unavail_reason}")
+                  if locals().get("il_geo_blocked"):
+                      raise SystemExit(f"::error::GEO_BLOCKED|הסרטון חסום גיאוגרפית ולא נמצא Proxy פעיל | {_last_errs[:160]}")
+                  raise SystemExit(f"::error::ALL_CLIENTS_FAILED|{_last_errs[:200] or 'הורדת המדיה נכשלה בכל הקליינטים'}")
 
 
               media_out = [p for p in files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
@@ -1809,7 +1867,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.10,
+              "v": 23.11,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
