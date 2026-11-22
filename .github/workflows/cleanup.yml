@@ -54,8 +54,9 @@ jobs:
                   return False
 
           del_rel = 0
-          for _ in range(5):
-              st, rels = api("GET", "releases?per_page=100")
+          rel_page = 1
+          while rel_page <= 8:
+              st, rels = api("GET", f"releases?per_page=100&page={rel_page}")
               if st != 200 or not rels:
                   break
               deleted_page = 0
@@ -68,12 +69,15 @@ jobs:
                       api("DELETE", f"git/refs/tags/{urllib.parse.quote(tag, safe='')}")
                   del_rel += 1
                   deleted_page += 1
-              if deleted_page == 0:
+              if len(rels) < 100:
                   break
+              if deleted_page == 0:
+                  rel_page += 1
 
           del_runs = 0
-          for _ in range(8):
-              st, data = api("GET", "actions/runs?per_page=100")
+          run_page = 1
+          while run_page <= 10:
+              st, data = api("GET", f"actions/runs?per_page=100&page={run_page}")
               runs = (data or {}).get("workflow_runs") or []
               if st != 200 or not runs:
                   break
@@ -90,8 +94,10 @@ jobs:
                   if ds in (200, 204):
                       del_runs += 1
                       deleted_page += 1
-              if deleted_page == 0:
+              if len(runs) < 100:
                   break
+              if deleted_page == 0:
+                  run_page += 1
 
           print(f"Cleanup finished (mode={'schedule' if is_schedule else 'manual'}): deleted {del_rel} releases, {del_runs} runs.")
           EOF
