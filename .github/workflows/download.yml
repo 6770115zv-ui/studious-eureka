@@ -37,7 +37,7 @@ jobs:
           if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
             (curl -fsSL https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o /tmp/ff.tar.xz && tar -xf /tmp/ff.tar.xz -C /tmp && sudo cp /tmp/ffmpeg-*/bin/ffmpeg /tmp/ffmpeg-*/bin/ffprobe /usr/bin/ && sudo chmod +x /usr/bin/ffmpeg /usr/bin/ffprobe && rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-*) &
           fi
-          python3 -m pip install --break-system-packages --no-cache-dir -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests deep-translator mutagen
+          python3 -m pip install --break-system-packages --no-cache-dir -q -U --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs bgutil-ytdlp-pot-provider cryptography requests PySocks deep-translator mutagen
           wait
           which ffmpeg && ffmpeg -version | head -n 1
           for i in $(seq 1 14); do
@@ -256,16 +256,17 @@ jobs:
                       continue
                   parsed_cues.append([start_ms, end_ms, text_lines])
 
-              # 1. הסרת שורות מתגלגלות כפולות (Rollup Deduplication)
+              # 1. הסרת שורות מתגלגלות כפולות בחלון זמן קצר בלבד (2.5 שנ') כדי לא למחוק דיאלוגים חוזרים!
               deduped = []
               recent_lines = []
               for start_ms, end_ms, t_lines in parsed_cues:
                   new_lines = []
                   for ln in t_lines:
                       norm_ln = re.sub(r"\s+", " ", ln).strip().lower()
-                      if norm_ln not in recent_lines:
+                      is_rollup_dup = any((rl == norm_ln and (start_ms - prev_e) <= 2500) for prev_e, rl in recent_lines)
+                      if not is_rollup_dup:
                           new_lines.append(ln)
-                          recent_lines.append(norm_ln)
+                          recent_lines.append((end_ms, norm_ln))
                           if len(recent_lines) > 6:
                               recent_lines.pop(0)
                   if not new_lines:
@@ -465,11 +466,23 @@ jobs:
               print(f"Translation finished: {len(translated_cues)} cues, {hebrew_chars} Hebrew chars.", flush=True)
               return translated_cues if hebrew_chars > 0 else None
 
-          def fetch_subtitles_for_url(video_url: str, base_stem: str = None):
+          def _scale_cues_for_speed(cues_in):
+              if is_subs_only:
+                  return cues_in
+              try:
+                  _sp = float(speed_val or 1.0)
+              except Exception:
+                  return cues_in
+              if _sp <= 0 or abs(_sp - 1.0) < 0.01:
+                  return cues_in
+              return [[int(s / _sp), max(int(s / _sp) + 120, int(e / _sp)), t] for s, e, t in cues_in]
+
+          def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single: bool = False):
               if subs_dir.exists():
                   shutil.rmtree(subs_dir, ignore_errors=True)
               subs_dir.mkdir(parents=True, exist_ok=True)
 
+              is_pl_sub = (mode == "collection" and not force_single)
               out_tmpl = f"/tmp/subs/{base_stem}.%(ext)s" if base_stem else "/tmp/subs/%(title).120B [%(id)s].%(ext)s"
               base_sub_cmd = [
                   "python3", "-m", "yt_dlp",
@@ -481,14 +494,14 @@ jobs:
                   "--sub-format", "vtt/srt/best",
                   "-o", out_tmpl,
               ]
-              if mode != "collection":
+              if not is_pl_sub:
                   base_sub_cmd.append("--no-playlist")
               if has_ck:
                   base_sub_cmd += ["--cookies", str(cookie_file)]
 
               def detect_best_sub_candidates():
                   """מזהה מראש שפת מקור יחידה; מחזיר (probe_ok, plan) כדי לעצור מיד כשאין 0 כתוביות."""
-                  if mode == "collection":
+                  if is_pl_sub:
                       return False, []
                   probe_cmd = [
                       "python3", "-m", "yt_dlp",
@@ -567,31 +580,55 @@ jobs:
                       cand_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15 and not p.name.endswith("live_chat.json")]
                       if not cand_files:
                           continue
-                      src_f = max(cand_files, key=lambda p: p.stat().st_size)
-                      clean_stem = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_f.stem)
-                      clean_cues = clean_and_reconstruct_sentences(src_f.read_text(encoding="utf-8", errors="replace"))
+                      # במצב פלייליסט כתוביות בלבד — שומר את כל הקבצים (הגדול ביותר לכל סרטון) במקום למחוק את כולם!
+                      if is_subs_only and is_pl_sub:
+                          by_stem = {}
+                          for cf in cand_files:
+                              st_k = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", cf.stem)
+                              if st_k not in by_stem or cf.stat().st_size > by_stem[st_k].stat().st_size:
+                                  by_stem[st_k] = cf
+                          src_targets = list(by_stem.items())
+                      else:
+                          src_f = max(cand_files, key=lambda p: p.stat().st_size)
+                          st_k = re.sub(r"(\.f\d+(?:-\d+)?)?(\.[a-zA-Z0-9_-]+)?$", "", src_f.stem)
+                          src_targets = [(st_k, src_f)]
+
+                      out_srts = []
+                      total_cues_n = 0
+                      last_lbl = ""
+                      for clean_stem, src_f in src_targets:
+                          clean_cues = clean_and_reconstruct_sentences(src_f.read_text(encoding="utf-8", errors="replace"))
+                          if not clean_cues:
+                              continue
+                          if expect_he or has_hebrew(" ".join(c[2] for c in clean_cues[:12])):
+                              final_he = subs_dir / f"{clean_stem}.he.srt"
+                              final_he.write_text(build_srt_string(_scale_cues_for_speed(clean_cues)), encoding="utf-8")
+                              out_srts.append(final_he)
+                              total_cues_n += len(clean_cues)
+                              telemetry["sub_source"] = lang_code
+                              last_lbl = f"כתוביות בעברית ({total_cues_n} שורות)"
+                          else:
+                              he_cues = translate_cues_to_hebrew(clean_cues)
+                              if he_cues:
+                                  final_he = subs_dir / f"{clean_stem}.he.srt"
+                                  final_he.write_text(build_srt_string(_scale_cues_for_speed(he_cues)), encoding="utf-8")
+                                  out_srts.append(final_he)
+                                  total_cues_n += len(he_cues)
+                                  telemetry["sub_source"] = f"{lang_code}->he"
+                                  last_lbl = f"מתורגם לעברית מ-{lang_code} ({total_cues_n} שורות)"
+                              else:
+                                  final_orig = subs_dir / f"{clean_stem}.orig.srt"
+                                  final_orig.write_text(build_srt_string(_scale_cues_for_speed(clean_cues)), encoding="utf-8")
+                                  out_srts.append(final_orig)
+                                  total_cues_n += len(clean_cues)
+                                  telemetry["sub_source"] = lang_code
+                                  last_lbl = f"כתוביות מקור {lang_code} ({total_cues_n} שורות)"
                       for p in cand_files:
-                          p.unlink(missing_ok=True)
-                      if not clean_cues:
-                          continue
-                      if expect_he or has_hebrew(" ".join(c[2] for c in clean_cues[:12])):
-                          final_he = subs_dir / f"{clean_stem}.he.srt"
-                          final_he.write_text(build_srt_string(clean_cues), encoding="utf-8")
-                          telemetry["sub_cues"] = len(clean_cues)
-                          telemetry["sub_source"] = lang_code
-                          return [final_he], f"כתוביות בעברית ({len(clean_cues)} שורות)"
-                      he_cues = translate_cues_to_hebrew(clean_cues)
-                      if he_cues:
-                          final_he = subs_dir / f"{clean_stem}.he.srt"
-                          final_he.write_text(build_srt_string(he_cues), encoding="utf-8")
-                          telemetry["sub_cues"] = len(he_cues)
-                          telemetry["sub_source"] = f"{lang_code}->he"
-                          return [final_he], f"מתורגם לעברית מ-{lang_code} ({len(he_cues)} שורות)"
-                      final_orig = subs_dir / f"{clean_stem}.orig.srt"
-                      final_orig.write_text(build_srt_string(clean_cues), encoding="utf-8")
-                      telemetry["sub_cues"] = len(clean_cues)
-                      telemetry["sub_source"] = lang_code
-                      return [final_orig], f"כתוביות מקור {lang_code} ({len(clean_cues)} שורות)"
+                          if p not in out_srts:
+                              p.unlink(missing_ok=True)
+                      if out_srts:
+                          telemetry["sub_cues"] = total_cues_n
+                          return out_srts, (f"{len(out_srts)} קובצי כתוביות ({total_cues_n} שורות)" if len(out_srts) > 1 else last_lbl)
                   return None
 
               probe_ok, detected_plan = detect_best_sub_candidates()
@@ -909,6 +946,7 @@ jobs:
                       telemetry["direct_probe"] = f"{p_st}: {p_rsn}"
 
                   downloaded_media_for_url = None
+                  downloaded_media_list = []
                   il_geo_blocked = False
                   api_403_fails = 0
                   has_custom_px = bool(os.environ.get("CUSTOM_PROXY", "").strip() or os.environ.get("IL_PROXY", "").strip())
@@ -954,6 +992,7 @@ jobs:
                               shutil.move(str(f), str(dest_f))
                               if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
                                   downloaded_media_for_url = dest_f
+                                  downloaded_media_list.append(dest_f)
                           _att_sec = round(time.time() - _t_att, 1)
                           telemetry["winner"] = label
                           telemetry["dl_sec"] = round(telemetry["dl_sec"] + _att_sec, 1)
@@ -1023,40 +1062,49 @@ jobs:
                               telemetry["attempts"].append({"n": 100 + px_idx, "label": telemetry["winner"], "ok": True, "sec": _px_sec})
                               print(f"=== Success via Verified Proxy #{px_idx} ({_px_sec}s)! ===", flush=True)
                               break
-                  if downloaded_media_for_url and (not is_audio) and subtitles in ("embed", "files"):
-                      time.sleep(0.5)
-                      _t_sub = time.time()
-                      srt_list, sub_label = fetch_subtitles_for_url(cur_url, downloaded_media_for_url.stem)
-                      telemetry["sub_sec"] = round(telemetry["sub_sec"] + (time.time() - _t_sub), 1)
-                      if srt_list:
-                          best_srt = srt_list[0]
-                          embedded_srt_saved = Path("/tmp/mail_embedded_subs.he.srt")
-                          shutil.copy2(str(best_srt), str(embedded_srt_saved))
-                          if subtitles == "embed" and downloaded_media_for_url.suffix.lower() in (".mp4", ".mkv") and downloaded_media_for_url.stat().st_size < 8000 * 1024 * 1024:
-                              emb_tmp = downloaded_media_for_url.with_name("sub_" + downloaded_media_for_url.name)
-                              sub_c = "mov_text" if downloaded_media_for_url.suffix.lower() == ".mp4" else "srt"
-                              ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(downloaded_media_for_url), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c:v", "copy", "-c:a", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew", "-movflags", "+faststart", str(emb_tmp)]
-                              if subprocess.run(ff_sub, check=False).returncode == 0 and emb_tmp.exists():
-                                  emb_tmp.replace(downloaded_media_for_url)
+                  if downloaded_media_list and (not is_audio) and subtitles in ("embed", "files"):
+                      _sub_targets = downloaded_media_list if len(downloaded_media_list) > 1 else [downloaded_media_list[0]]
+                      for mf_item in _sub_targets:
+                          mf_vid = extract_vid_id(mf_item.name) if len(_sub_targets) > 1 else ""
+                          sub_req_url = f"https://www.youtube.com/watch?v={mf_vid}" if mf_vid else cur_url
+                          time.sleep(0.4)
+                          _t_sub = time.time()
+                          srt_list, sub_label = fetch_subtitles_for_url(sub_req_url, mf_item.stem, force_single=True)
+                          telemetry["sub_sec"] = round(telemetry["sub_sec"] + (time.time() - _t_sub), 1)
+                          if srt_list:
+                              best_srt = srt_list[0]
+                              embedded_srt_saved = Path("/tmp/mail_embedded_subs.he.srt")
+                              shutil.copy2(str(best_srt), str(embedded_srt_saved))
+                              if subtitles == "embed" and mf_item.suffix.lower() in (".mp4", ".mkv") and mf_item.stat().st_size < 8000 * 1024 * 1024:
+                                  emb_tmp = mf_item.with_name("sub_" + mf_item.name)
+                                  sub_c = "mov_text" if mf_item.suffix.lower() == ".mp4" else "srt"
+                                  ff_sub = ["/usr/bin/ffmpeg", "-y", "-i", str(mf_item), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c:v", "copy", "-c:a", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew"]
+                                  if mf_item.suffix.lower() == ".mp4":
+                                      ff_sub += ["-movflags", "+faststart"]
+                                  ff_sub.append(str(emb_tmp))
+                                  if subprocess.run(ff_sub, check=False).returncode == 0 and emb_tmp.exists():
+                                      emb_tmp.replace(mf_item)
+                                  else:
+                                      shutil.copy2(str(best_srt), str(out_dir / best_srt.name))
+                                      subs_detail_msg = "⚠️ הטמעה נכשלה — צורף קובץ SRT נפרד"
                               else:
-                                  shutil.copy2(str(best_srt), str(out_dir / best_srt.name))
-                                  subs_detail_msg = "⚠️ הטמעה נכשלה — צורף קובץ SRT נפרד"
-                          else:
-                              for s_f in srt_list:
-                                  shutil.copy2(str(s_f), str(out_dir / s_f.name))
-                              subs_verified_flag = True
-                              subs_detail_msg = f"📄 צורף קובץ כתוביות ({sub_label})"
-                      else:
-                          subs_verified_flag = False
-                          subs_detail_msg = "⚠️ אין כתוביות לסרטון זה ביוטיוב" 
+                                  for s_f in srt_list:
+                                      shutil.copy2(str(s_f), str(out_dir / s_f.name))
+                                  subs_verified_flag = True
+                                  subs_detail_msg = f"📄 צורף קובץ כתוביות ({sub_label})"
+                          elif len(_sub_targets) == 1:
+                              subs_verified_flag = False
+                              subs_detail_msg = "⚠️ אין כתוביות לסרטון זה ביוטיוב"
 
               files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
               if not files:
                   raise SystemExit("::error::הורדת המדיה נכשלה בכל הקליינטים")
 
               if (speed_val not in ("1", "1.0", "")) or norm_audio:
+                  _t_ff = time.time()
                   for fpath in list(files):
-                      if fpath.suffix.lower() not in (".mp4", ".mkv", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
+                      suf = fpath.suffix.lower()
+                      if suf not in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
                           continue
                       try:
                           spd = float(speed_val) if speed_val else 1.0
@@ -1070,18 +1118,27 @@ jobs:
                           af.append(f"atempo={spd}")
                       if norm_audio:
                           af.append("loudnorm=I=-16:TP=-1.5:LRA=11")
-                      ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-dn", "-map_chapters", "-1"]
-                      if fpath.suffix.lower() in (".mp4", ".mkv", ".webm"):
+                      if suf in (".mp4", ".mkv", ".webm"):
+                          ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-dn", "-map_chapters", "-1"]
                           if abs(spd - 1.0) >= 0.01:
                               ff_cmd += ["-filter:v", f"setpts=PTS/{spd}"]
                           else:
                               ff_cmd += ["-c:v", "copy"]
                           ff_cmd += ["-c:s", "copy"]
-                      if af:
-                          ff_cmd += ["-filter:a", ",".join(af)]
-                      ff_cmd += ["-movflags", "+faststart", str(tmp_p)]
+                          if af:
+                              ff_cmd += ["-filter:a", ",".join(af)]
+                          if suf == ".mp4":
+                              ff_cmd += ["-movflags", "+faststart"]
+                      else:
+                          ff_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(fpath), "-map", "0:a:0", "-dn", "-map_chapters", "-1"]
+                          if af:
+                              ff_cmd += ["-filter:a", ",".join(af)]
+                          if suf == ".m4a":
+                              ff_cmd += ["-movflags", "+faststart"]
+                      ff_cmd.append(str(tmp_p))
                       if subprocess.run(ff_cmd, check=False).returncode == 0 and tmp_p.exists():
                           tmp_p.replace(fpath)
+                  telemetry["ff_sec"] = round(time.time() - _t_ff, 1)
 
               media_out = [p for p in files if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus")]
               primary_file = media_out[0] if media_out else files[0]
@@ -1111,9 +1168,11 @@ jobs:
           zip_paths = []
           split_join_meta = None
 
+          oversize_target = next((f for f in files if f.stat().st_size > MAX_SINGLE_ZIP_BYTES), None)
           if cloud_only_flag:
               zip_paths = [primary_file]
-          elif primary_file.stat().st_size > MAX_SINGLE_ZIP_BYTES:
+          elif oversize_target is not None:
+              primary_file = oversize_target
               total_sz = primary_file.stat().st_size
               num_parts = max(2, math.ceil(total_sz / MAX_SINGLE_ZIP_BYTES))
               part_target = math.ceil(total_sz / num_parts)
@@ -1202,7 +1261,7 @@ jobs:
           gd_sec = re.sub(r"\s+", "", os.environ.get("GDRIVE_CLIENT_SECRET", "")).strip("\"'")
           gd_ref = re.sub(r"\s+", "", os.environ.get("GDRIVE_REFRESH_TOKEN", "")).strip("\"'")
           gd_fld = re.sub(r"\s+", "", os.environ.get("GDRIVE_FOLDER_ID", "")).strip("\"'")
-          _share_target = email_opt if (email_opt and "@" in email_opt) else (os.environ.get("EMAIL_TO", "").strip() or os.environ.get("SMTP_TO", "").strip())
+          _share_target = email_opt if (email_opt and "@" in email_opt) else (os.environ.get("EMAIL_TO", "").strip() or os.environ.get("SMTP_TO", "").strip() or os.environ.get("SMTP_USER", "").strip() or os.environ.get("EMAIL_USER", "").strip() or os.environ.get("GMAIL_USER", "").strip())
           if _share_target and "@" in _share_target: print(f"::add-mask::{_share_target}", flush=True)
           has_gd_secrets = bool(gd_cid and gd_sec and gd_ref)
           auto_drive_for_mail = bool(send_email_flag and has_gd_secrets and primary_file.exists() and primary_file.stat().st_size > int(17.5 * 1024 * 1024))
@@ -1225,43 +1284,69 @@ jobs:
                           else:
                               fc = requests.post("https://www.googleapis.com/drive/v3/files", headers={**gd_h, "Content-Type": "application/json"}, json={"name": "YouTube Cloud Ultra", "mimeType": "application/vnd.google-apps.folder"}, timeout=15)
                               if fc.ok: gd_fld = fc.json().get("id", "")
-                      up_target = primary_file if (len(files) == 1 or split_join_meta or cloud_only_flag) else zip_path
-                      f_total = up_target.stat().st_size
-                      meta = {"name": up_target.name}
-                      if gd_fld: meta["parents"] = [gd_fld]
-                      init_r = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink", headers={**gd_h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": str(f_total)}, json=meta, timeout=25)
-                      init_r.raise_for_status()
-                      up_url = init_r.headers["Location"]
-                      chunk_sz = 16 * 1024 * 1024
-                      fin_json = {}
-                      with open(up_target, "rb") as fp:
-                          pos = 0
-                          while pos < f_total:
-                              buf = fp.read(chunk_sz)
-                              if not buf: break
-                              end_b = pos + len(buf) - 1
-                              cr = requests.put(up_url, headers={**gd_h, "Content-Length": str(len(buf)), "Content-Range": f"bytes {pos}-{end_b}/{f_total}"}, data=buf, timeout=180)
-                              if cr.status_code not in (200, 201, 308):
-                                  raise RuntimeError(f"Drive chunk HTTP {cr.status_code}")
-                              pos += len(buf)
-                              if cr.status_code in (200, 201):
-                                  fin_json = cr.json()
-                                  break
-                      fid = fin_json.get("id", "")
-                      if fid:
-                          drive_web_link = fin_json.get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
-                          print(f"::add-mask::{fid}", flush=True)
+                      _t_drv = time.time()
+                      if len(files) == 1 or split_join_meta:
+                          drive_targets = [primary_file]
+                      elif cloud_only_flag:
+                          drive_targets = list(files)
+                      else:
+                          drive_targets = [zip_path]
+
+                      uploaded_fids = []
+                      first_link = ""
+                      for up_target in drive_targets:
+                          f_total = up_target.stat().st_size
+                          meta = {"name": up_target.name}
+                          if gd_fld: meta["parents"] = [gd_fld]
+                          init_r = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink", headers={**gd_h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": str(f_total)}, json=meta, timeout=25)
+                          init_r.raise_for_status()
+                          up_url = init_r.headers["Location"]
+                          chunk_sz = 16 * 1024 * 1024
+                          fin_json = {}
+                          with open(up_target, "rb") as fp:
+                              pos = 0
+                              while pos < f_total:
+                                  buf = fp.read(chunk_sz)
+                                  if not buf: break
+                                  end_b = pos + len(buf) - 1
+                                  cr = None
+                                  for _ctry in range(3):
+                                      try:
+                                          cr = requests.put(up_url, headers={**gd_h, "Content-Length": str(len(buf)), "Content-Range": f"bytes {pos}-{end_b}/{f_total}"}, data=buf, timeout=180)
+                                          if cr.status_code in (200, 201, 308):
+                                              break
+                                      except Exception:
+                                          cr = None
+                                      time.sleep(2.0 * (_ctry + 1))
+                                  if cr is None or cr.status_code not in (200, 201, 308):
+                                      raise RuntimeError(f"Drive chunk HTTP {getattr(cr, 'status_code', 'NET_ERR')}")
+                                  pos += len(buf)
+                                  if cr.status_code in (200, 201):
+                                      fin_json = cr.json()
+                                      break
+                          fid = fin_json.get("id", "")
+                          if fid:
+                              uploaded_fids.append(fid)
+                              print(f"::add-mask::{fid}", flush=True)
+                              if not first_link:
+                                  first_link = fin_json.get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
+                              if _share_target and "@" in _share_target:
+                                  try:
+                                      requests.post(f"https://www.googleapis.com/drive/v3/files/{fid}/permissions", headers={**gd_h, "Content-Type": "application/json"}, params={"sendNotificationEmail": "false"}, json={"type": "user", "role": "reader", "emailAddress": _share_target}, timeout=20)
+                                  except Exception: pass
+
+                      telemetry["drive_sec"] = round(time.time() - _t_drv, 1)
+                      if uploaded_fids:
+                          drive_web_link = (f"https://drive.google.com/drive/folders/{gd_fld}" if (len(uploaded_fids) > 1 and gd_fld) else first_link)
                           print(f"::add-mask::{drive_web_link}", flush=True)
-                          if _share_target and "@" in _share_target:
-                              try:
-                                  requests.post(f"https://www.googleapis.com/drive/v3/files/{fid}/permissions", headers={**gd_h, "Content-Type": "application/json"}, params={"sendNotificationEmail": "false"}, json={"type": "user", "role": "reader", "emailAddress": _share_target}, timeout=20)
-                              except Exception: pass
                           if len(secret_key_env) == 64:
                               _iv = os.urandom(12)
                               _ct = AESGCM(bytes.fromhex(secret_key_env)).encrypt(_iv, drive_web_link.encode("utf-8"), None)
                               drive_url_enc = base64.b64encode(_iv + _ct).decode("ascii")
-                          drive_status = "☁️ הועלה ל-Google Drive בהצלחה"
-                          print("Google Drive upload succeeded (link encrypted & masked).", flush=True)
+                              drive_status = f"☁️ הועלו {len(uploaded_fids)} קבצים ל-Google Drive בהצלחה" if len(uploaded_fids) > 1 else "☁️ הועלה ל-Google Drive בהצלחה"
+                          else:
+                              drive_status = f"☁️ הועלה ל-Drive ({len(uploaded_fids)} קבצים) — הגדר COOKIE_KEY להצגת קישור בתוסף"
+                          print(f"Google Drive upload succeeded ({len(uploaded_fids)} file(s)).", flush=True)
                   except Exception as gd_err:
                       _code = getattr(getattr(gd_err, "response", None), "status_code", "")
                       _rtxt = str(getattr(getattr(gd_err, "response", None), "text", ""))[:180].replace("\n", " ")
@@ -1364,7 +1449,10 @@ jobs:
               return sorted([p for p in dst_dir.glob(f"{prefix}_*{ext}") if p.is_file() and p.stat().st_size > 0])
 
           email_sent_status = ""
-          if send_email_flag and smtp_user and smtp_pass and recipient and "@" in recipient:
+          if send_email_flag and not (smtp_user and smtp_pass and recipient and "@" in recipient):
+              email_sent_status = "⚠️ חסרים Secrets של מייל (SMTP_USER/SMTP_PASS)"
+          elif send_email_flag:
+              _t_em = time.time()
               try:
                   clean_stem = _mail_safe_stem(primary_file.stem)
                   ext_low = primary_file.suffix.lower()
@@ -1389,7 +1477,10 @@ jobs:
                           f"• גודל: {file_mb} MB\n"
                           f"• קישור ישיר לצפייה והורדה ב-Google Drive:\n{drive_web_link}\n"
                       )
-                      for srt_f in out_dir.glob("*.srt"):
+                      _side_srts = list(out_dir.glob("*.srt"))
+                      if not _side_srts and embedded_srt_saved and embedded_srt_saved.exists():
+                          _side_srts = [embedded_srt_saved]
+                      for srt_f in _side_srts:
                           if srt_f.stat().st_size <= 2 * 1024 * 1024:
                               msg.add_attachment(srt_f.read_bytes(), maintype="text", subtype="plain", filename=f"{clean_stem}.he.srt")
                       with _open_smtp() as srv:
@@ -1499,6 +1590,8 @@ jobs:
                                   shutil.copy2(str(ch_fp), str(part_dst))
                               if part_dst.exists() and part_dst.stat().st_size <= int(18.5 * 1024 * 1024):
                                   parts_to_send.append((part_dst, int(round(c_dur_sec)), part_ext_srt))
+                              else:
+                                  print(f"WARNING: Email part #{idx_p} exceeded 18.5MB limit and was skipped.", flush=True)
 
                           pl_lines = ["#EXTM3U"]
                           for pf, pdur, _ in parts_to_send:
@@ -1569,7 +1662,7 @@ jobs:
                               f"שלום,\n\n"
                               f"🛡️ הגנת חסימת Gmail הופעלה: הקובץ המקורי גדול מאוד ({file_mb} MB — כ-{est_parts_count} חלקים) "
                               f"ושליחה של מעל {MAX_SAFE_SMTP_PARTS} מיילים כבדים גורמת לגוגל לנעול את חשבון ה-Gmail זמנית.\n\n"
-                              f"• הקובץ המלא באיכות המקורית ({quality_report}) נשמר אצלך במחשב!\n"
+                              (f"• מצב ענן בלבד פעיל — הקובץ המלא לא הורד למחשב (0MB).\n" if cloud_only_flag else f"• הקובץ המלא באיכות המקורית ({quality_report}) נשמר אצלך במחשב!\n")
                               + (f"• למייל זה צורף עותק צפייה מותאם במייל אחד בטוח ({round(attach_fp.stat().st_size / (1024*1024), 1)} MB).\n" if attach_fp else "")
                               + "• טיפ: חבר Google Drive (דרך הגדרת ה-Secrets של Drive במאגר) — ואז כל קובץ גדול יועלה אוטומטית ל-Drive באיכות 100% וישלח אליך במייל אחד קליל עם קישור ישיר!\n"
                           )
@@ -1585,6 +1678,8 @@ jobs:
               except Exception as e:
                   print(f"Email delivery error: {type(e).__name__}: {e}", flush=True)
                   email_sent_status = f"שגיאת מייל ({type(e).__name__})"
+              finally:
+                  telemetry["email_sec"] = round(time.time() - _t_em, 1)
 
           _email_ok = bool(email_sent_status and not email_sent_status.startswith("שגיאת"))
           is_cloud_only_done = bool(cloud_only_flag and (drive_web_link or _email_ok))
@@ -1603,7 +1698,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.7,
+              "v": 23.8,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
