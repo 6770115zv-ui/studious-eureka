@@ -955,12 +955,16 @@ jobs:
                   proxies = {"http": px, "https": px} if px else None
                   clients_to_probe = [
                       (
-                          {"clientName": "WEB", "clientVersion": "2.20261121.00.00", "hl": "en", "gl": gl_code},
-                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                      ),
-                      (
                           {"clientName": "ANDROID_VR", "clientVersion": "1.61.48", "deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L", "hl": "en", "gl": gl_code},
                           "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; Quest 3)"
+                      ),
+                      (
+                          {"clientName": "IOS", "clientVersion": "20.10.4", "deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82", "hl": "en", "gl": gl_code},
+                          "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+                      ),
+                      (
+                          {"clientName": "WEB", "clientVersion": "2.20261121.00.00", "hl": "en", "gl": gl_code},
+                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
                       ),
                   ]
                   last_st, last_rsn = "", ""
@@ -976,11 +980,18 @@ jobs:
                           if r.status_code != 200:
                               last_st, last_rsn = f"HTTP_{r.status_code}", ""
                               continue
-                          ps = (r.json().get("playabilityStatus") or {})
+                          j_res = r.json()
+                          ps = (j_res.get("playabilityStatus") or {})
                           st = str(ps.get("status") or "")
                           rsn = str(ps.get("reason") or "")
                           if st == "OK":
-                              return "OK", rsn
+                              sd = j_res.get("streamingData") or {}
+                              if sd.get("formats") or sd.get("adaptiveFormats") or sd.get("hlsManifestUrl"):
+                                  return "OK", rsn
+                              last_st, last_rsn = "OK_NO_STREAM", rsn
+                              continue
+                          if st == "UNPLAYABLE" and "country" in rsn.lower():
+                              return st, rsn
                           last_st, last_rsn = st, rsn
                       except Exception as ex:
                           last_st, last_rsn = f"ERR_{type(ex).__name__}", str(ex)[:60]
@@ -1000,11 +1011,16 @@ jobs:
                   cand_proxies = []
                   c_param = f"&country={cc}" if cc != "ALL" else ""
                   sources = [
+                      f"https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=all&timeout=4500&proxy_format=protocolipport&format=text{c_param}",
                       f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=4500{c_param}&ssl=all&anonymity=all",
                       f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=4500{c_param}",
                   ]
                   if cc != "ALL":
-                      sources.append(f"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/countries/{cc}/data.txt")
+                      sources += [
+                          f"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/countries/{cc}/data.txt",
+                          f"https://www.proxy-list.download/api/v1/get?type=http&country={cc}",
+                          f"https://www.proxy-list.download/api/v1/get?type=socks5&country={cc}",
+                      ]
                   else:
                       sources += [
                           "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt",
@@ -1022,7 +1038,7 @@ jobs:
                               proto = "socks5://" if "socks5" in src else "http://"
                               for ln in r.text.splitlines():
                                   ln = ln.strip()
-                                  m_full = re.match(r"^(https?|socks5)://(\d+\.\d+\.\d+\.\d+:\d+)$", ln, re.I)
+                                  m_full = re.match(r"^(https?|socks[45])://(\d+\.\d+\.\d+\.\d+:\d+)$", ln, re.I)
                                   if m_full:
                                       full_px = f"{m_full.group(1).lower()}://{m_full.group(2)}"
                                   elif re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", ln):
@@ -1036,7 +1052,7 @@ jobs:
                           pass
 
                   try:
-                      gn_url = "https://proxylist.geonode.com/api/proxy-list?limit=80&page=1&sort_by=lastChecked&sort_type=desc"
+                      gn_url = "https://proxylist.geonode.com/api/proxy-list?limit=120&page=1&sort_by=lastChecked&sort_type=desc"
                       if cc != "ALL":
                           gn_url += f"&country={cc}"
                       gr = requests.get(gn_url, timeout=6)
@@ -1045,7 +1061,7 @@ jobs:
                               ip_s, port_s = str(row.get("ip") or ""), str(row.get("port") or "")
                               protos = row.get("protocols") or []
                               if ip_s and port_s:
-                                  pr = "socks5://" if "socks5" in protos else ("http://" if "http" in protos else "")
+                                  pr = "socks5://" if "socks5" in protos else ("http://" if "http" in protos else ("socks4://" if "socks4" in protos else ""))
                                   if pr:
                                       full_px = f"{pr}{ip_s}:{port_s}"
                                       if full_px not in seen_px:
@@ -1061,7 +1077,7 @@ jobs:
                   gl_for_probe = cc if len(cc) == 2 else "US"
                   def test_px(px):
                       with px_lock:
-                          if len(verified_ok) >= 4 or (len(verified_ok) + len(verified_login) >= 8):
+                          if len(verified_ok) >= 4:
                               return
                       st, rsn = probe_playability(check_vid, px=px, timeout_s=4.5, gl_code=gl_for_probe)
                       if st == "OK":
@@ -1069,12 +1085,32 @@ jobs:
                               verified_ok.append((px, False))
                       elif has_ck and st == "LOGIN_REQUIRED" and ("country" not in str(rsn or "").lower()):
                           with px_lock:
-                              verified_login.append((px, True))
+                              if len(verified_login) < 4:
+                                  verified_login.append((px, True))
 
                   if cand_proxies:
                       with ThreadPoolExecutor(max_workers=40) as ex:
-                          list(ex.map(test_px, cand_proxies[:140]))
-                  return priority_px + verified_ok + verified_login[:6]
+                          list(ex.map(test_px, cand_proxies[:160]))
+                  return priority_px + verified_ok + verified_login[:4]
+
+              px_extra_args = [
+                  "--force-ipv4",
+                  "--no-mtime",
+                  "--js-runtimes", "deno",
+                  "--sleep-requests", "0.3",
+              ]
+              if mode != "collection":
+                  px_extra_args.append("--no-playlist")
+              else:
+                  px_extra_args += ["--yes-playlist", "--playlist-end", "35"]
+              if clip_start or clip_end:
+                  _ps = clip_start or "00:00:00"
+                  _pe = clip_end or "inf"
+                  px_extra_args += ["--download-sections", f"*{_ps}-{_pe}", "--force-keyframes-at-cuts"]
+              if sb:
+                  px_extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
+              if chapters and not is_audio:
+                  px_extra_args += ["--split-chapters"]
 
               for u_idx, cur_url in enumerate(target_urls, 1):
                   cur_vid = extract_vid_id(cur_url)
@@ -1090,12 +1126,16 @@ jobs:
                   downloaded_media_for_url = None
                   downloaded_media_list = []
                   winning_proxy = ""
-                  il_geo_blocked = (p_st == "UNPLAYABLE" and "country" in p_rsn.lower())
+                  us_geo_blocked = (p_st == "UNPLAYABLE" and "country" in p_rsn.lower())
+                  il_geo_blocked = us_geo_blocked
                   perm_unavail_reason = ""
                   api_403_fails = 0
                   has_custom_px = bool(os.environ.get("CUSTOM_PROXY", "").strip() or os.environ.get("IL_PROXY", "").strip())
 
                   for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
+                      if us_geo_blocked and att_idx in (1, 2, 3):
+                          print(f">>> Direct probe confirmed US geo-block — skipping Attempt {att_idx} ({label})...", flush=True)
+                          continue
                       if p_st in ("HTTP_403", "LOGIN_REQUIRED") and att_idx == 1 and has_ck:
                           print(f">>> Anonymous probe returned {p_st} — skipping Attempt 1 and testing Cookies directly...", flush=True)
                           continue
@@ -1168,67 +1208,113 @@ jobs:
                           raise SystemExit(f"::error::AZURE_IP_403_BANNED|{_short_err}")
 
                       if il_geo_blocked and att_idx >= 4:
-                          print(">>> Detected Israel-Only Geo-Restriction! Engaging Israel Proxy Tunnel...", flush=True)
+                          print(">>> Detected Geo-Restriction! Engaging Smart Multi-Country Proxy Tunnel (HLS + PO-Token, No-XFF)...", flush=True)
                           break
 
                   if (not downloaded_media_for_url) and (not perm_unavail_reason):
-                      base_order = [geo] + (["IL", "US", "GB", "DE", "ES", "NL", "ALL"] if il_geo_blocked else ["US", "IL", "GB", "DE", "ALL"])
+                      if us_geo_blocked:
+                          base_order = ([geo] if geo != "US" else []) + ["IL", "DE", "NL", "GB", "FR", "CA", "ALL"]
+                      elif il_geo_blocked:
+                          base_order = [geo, "IL", "DE", "NL", "GB", "FR", "ALL"]
+                      else:
+                          base_order = [geo, "US", "IL", "DE", "NL", "GB", "ALL"]
                       px_order = []
                       for _c in base_order:
                           if _c and _c not in px_order:
                               px_order.append(_c)
-                      proxies_list, used_country = [], px_order[0]
+
+                      px_tunnel_deadline = time.time() + 260
+                      px_global_idx = 0
+                      tried_px_urls = set()
+
                       for cand_c in px_order:
+                          if downloaded_media_for_url or time.time() >= px_tunnel_deadline:
+                              break
                           proxies_list = discover_working_proxies(cur_vid, cand_c)
-                          if proxies_list:
-                              used_country = cand_c
-                              break
-                      print(f">>> [Proxy Tunnel ({used_country})] Found {len(proxies_list)} verified proxies (OK/Login+Cookies) for {cur_vid or 'target'}.", flush=True)
-                      for px_idx, (px_url, px_use_ck) in enumerate(proxies_list[:8], 1):
-                          _t_px = time.time()
-                          if stage_dir.exists():
-                              shutil.rmtree(stage_dir, ignore_errors=True)
-                          stage_dir.mkdir(parents=True, exist_ok=True)
-                          px_cmd = [
-                              "python3", "-m", "yt_dlp",
-                              "--ignore-config", "--rm-cache-dir", "--write-info-json",
-                              "--proxy", px_url,
-                              "--impersonate", "chrome",
-                              "--ffmpeg-location", "/usr/bin/ffmpeg",
-                              "--concurrent-fragments", "2",
-                              "--socket-timeout", "15",
-                              "--retries", "3",
-                              "--fragment-retries", "3",
-                              "--extractor-args", "youtube:player_client=web,android_vr,ios,default,web_safari",
-                              "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
-                          ] + (["--cookies", str(cookie_file)] if (px_use_ck and has_ck) else []) + (["--xff", used_country] if len(used_country) == 2 else []) + get_fmt_args(True, False) + extra_args + [cur_url]
-                          print(f"=== Trying Verified Proxy #{px_idx} ({used_country}, cookies={px_use_ck and has_ck}) ===", flush=True)
-                          try:
-                              px_proc = subprocess.run(px_cmd, capture_output=True, text=True, timeout=160, check=False)
-                              if px_proc.stderr:
-                                  print(px_proc.stderr[-1200:], flush=True)
-                          except subprocess.TimeoutExpired:
-                              print(f"=== Proxy #{px_idx} timed out after 160s — switching to next proxy ===", flush=True)
+                          proxies_list = [(u, ck) for (u, ck) in proxies_list if u not in tried_px_urls]
+                          ok_cnt = sum(1 for _, ck in proxies_list if not ck)
+                          print(f">>> [Proxy Tunnel ({cand_c})] Found {len(proxies_list)} candidates (clean_OK={ok_cnt}, login_ck={len(proxies_list) - ok_cnt}) for {cur_vid or 'target'}.", flush=True)
+                          if not proxies_list:
                               continue
-                          s_files = get_stage_files()
-                          media_files = [p for p in s_files if p.suffix.lower() in ((".mp3", ".m4a", ".flac", ".wav", ".opus") if is_audio else (".mp4", ".mkv", ".webm")) and not re.search(r"\.f\d+(?:-\d+)?$", p.stem)]
-                          if media_files:
-                              winning_proxy = px_url
-                              for f in s_files:
-                                  if f.name.endswith(".info.json"):
-                                      shutil.move(str(f), str(info_cache_dir / f.name))
-                                      continue
-                                  dest_f = out_dir / f.name
-                                  shutil.move(str(f), str(dest_f))
-                                  if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
-                                      downloaded_media_for_url = dest_f
-                                      downloaded_media_list.append(dest_f)
-                              _px_sec = round(time.time() - _t_px, 1)
-                              telemetry["winner"] = f"Verified Proxy ({used_country} #{px_idx})"
-                              telemetry["dl_sec"] = round(telemetry["dl_sec"] + _px_sec, 1)
-                              telemetry["attempts"].append({"n": 100 + px_idx, "label": telemetry["winner"], "ok": True, "sec": _px_sec})
-                              print(f"=== Success via Verified Proxy #{px_idx} ({_px_sec}s)! ===", flush=True)
-                              break
+
+                          # אם אין אף פרוקסי נקי (OK) במדינה זו, מנסים עד 3 פרוקסיים עם עוגיות ועוברים מהר למדינה הבאה!
+                          max_for_country = 4 if ok_cnt > 0 else 3
+                          for px_url, px_use_ck in proxies_list[:max_for_country]:
+                              if downloaded_media_for_url or time.time() >= px_tunnel_deadline:
+                                  break
+                              tried_px_urls.add(px_url)
+                              px_global_idx += 1
+
+                              if px_use_ck and has_ck:
+                                  px_profiles = [
+                                      ("ck+tv/safari-HLS", True, "youtube:player_client=tv,web_safari,mweb;fetch_pot=always", True, True, 65),
+                                      ("nock+vr/ios-HLS", False, "youtube:player_client=android_vr,ios,tv_simply", False, True, 45),
+                                  ]
+                              else:
+                                  px_profiles = [
+                                      ("clean+vr/ios-HD", False, "youtube:player_client=android_vr,ios,tv_simply,web_safari", True, False, 75),
+                                      ("clean+safari-HLS", False, "youtube:player_client=web_safari,ios,android_vr", False, True, 55),
+                                  ]
+
+                              for prof_name, use_ck_now, client_arg, px_strict_hd, px_hls, px_timeout in px_profiles:
+                                  if time.time() >= px_tunnel_deadline:
+                                      break
+                                  _t_px = time.time()
+                                  if stage_dir.exists():
+                                      shutil.rmtree(stage_dir, ignore_errors=True)
+                                  stage_dir.mkdir(parents=True, exist_ok=True)
+                                  # ללא --xff (מונע 403 של IP-mismatch על googlevideo) ועם pot_ep!
+                                  px_cmd = [
+                                      "python3", "-m", "yt_dlp",
+                                      "--ignore-config", "--rm-cache-dir", "--write-info-json",
+                                      "--proxy", px_url,
+                                      "--impersonate", "chrome",
+                                      "--ffmpeg-location", "/usr/bin/ffmpeg",
+                                      "--concurrent-fragments", "3",
+                                      "--socket-timeout", "12",
+                                      "--retries", "2",
+                                      "--fragment-retries", "2",
+                                      "--extractor-args", client_arg,
+                                      "--extractor-args", pot_ep,
+                                      "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
+                                  ] + (["--cookies", str(cookie_file)] if (use_ck_now and has_ck) else []) + get_fmt_args(px_strict_hd, px_hls) + px_extra_args + [cur_url]
+                                  print(f"=== Trying Proxy #{px_global_idx} ({cand_c}, {prof_name}) ===", flush=True)
+                                  px_err_short = ""
+                                  try:
+                                      px_proc = subprocess.run(px_cmd, capture_output=True, text=True, timeout=px_timeout, check=False)
+                                      if px_proc.stderr:
+                                          print(px_proc.stderr[-1000:], flush=True)
+                                      _pe_lines = [ln.strip() for ln in (px_proc.stderr or "").splitlines() if "ERROR:" in ln or "HTTP Error" in ln]
+                                      px_err_short = (_pe_lines[-1][:120] if _pe_lines else f"exit={px_proc.returncode}")
+                                  except subprocess.TimeoutExpired:
+                                      px_err_short = f"timeout>{px_timeout}s"
+                                      print(f"=== Proxy #{px_global_idx} ({prof_name}) timed out after {px_timeout}s ===", flush=True)
+                                      telemetry["attempts"].append({"n": 100 + px_global_idx, "label": f"Proxy {cand_c} {prof_name}", "ok": False, "sec": round(time.time() - _t_px, 1), "err": px_err_short})
+                                      break
+
+                                  s_files = get_stage_files()
+                                  media_files = [p for p in s_files if p.suffix.lower() in ((".mp3", ".m4a", ".flac", ".wav", ".opus") if is_audio else (".mp4", ".mkv", ".webm")) and not re.search(r"\.f\d+(?:-\d+)?$", p.stem)]
+                                  if media_files:
+                                      winning_proxy = px_url
+                                      for f in s_files:
+                                          if f.name.endswith(".info.json"):
+                                              shutil.move(str(f), str(info_cache_dir / f.name))
+                                              continue
+                                          dest_f = out_dir / f.name
+                                          shutil.move(str(f), str(dest_f))
+                                          if dest_f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".opus"):
+                                              downloaded_media_for_url = dest_f
+                                              downloaded_media_list.append(dest_f)
+                                      _px_sec = round(time.time() - _t_px, 1)
+                                      telemetry["winner"] = f"Verified Proxy ({cand_c} #{px_global_idx} {prof_name})"
+                                      telemetry["dl_sec"] = round(telemetry["dl_sec"] + _px_sec, 1)
+                                      telemetry["attempts"].append({"n": 100 + px_global_idx, "label": telemetry["winner"], "ok": True, "sec": _px_sec})
+                                      print(f"=== Success via Verified Proxy #{px_global_idx} ({cand_c}, {prof_name}, {_px_sec}s)! ===", flush=True)
+                                      break
+
+                                  telemetry["attempts"].append({"n": 100 + px_global_idx, "label": f"Proxy {cand_c} {prof_name}", "ok": False, "sec": round(time.time() - _t_px, 1), "err": px_err_short})
+                                  if "not made this video available in your country" in px_err_short.lower() or "unable to connect" in px_err_short.lower():
+                                      break
                   speed_applied_files = set()
                   if downloaded_media_list and ((speed_val not in ("1", "1.0", "")) or norm_audio):
                       _t_ff = time.time()
