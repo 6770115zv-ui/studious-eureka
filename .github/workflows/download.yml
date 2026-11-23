@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
-      - name: Pre-Flight Azure IP Check (2s Fast-Abort on 403/429/Soft-Ban)
+      - name: Pre-Flight Azure IP Check (2s Fast-Abort on Hard HTTP 403 Only)
         env:
           TARGET_URL: ${{ inputs.url }}
           REQ_ID: ${{ inputs.request_id }}
@@ -54,22 +54,11 @@ jobs:
           )
           try:
               with urllib.request.urlopen(req, timeout=7) as r:
-                  body = r.read().decode('utf-8', errors='replace')
-                  data = json.loads(body) if body.strip().startswith('{') else {}
-                  ps = data.get('playabilityStatus') or {}
-                  st = str(ps.get('status') or '')
-                  rsn = str(ps.get('reason') or '')
-                  mf = (data.get('microformat') or {}).get('playerMicroformatRenderer') or {}
-                  avail = {str(c).upper() for c in (mf.get('availableCountries') or [])}
-                  print(f'Pre-flight IP check HTTP {r.status}: status={st} reason={rsn!r} US_avail={"US" in avail}', flush=True)
-                  if st == 'UNPLAYABLE' and ('country' not in rsn.lower()) and ('US' in avail):
-                      raise SystemExit(f'::error::AZURE_IP_403_BANNED|Pre-flight Azure soft-ban ({st}: {rsn}) on US-available video')
+                  print(f'Pre-flight IP check OK (HTTP {r.status}).', flush=True)
           except urllib.error.HTTPError as e:
               print(f'Pre-flight HTTP error: {e.code}', flush=True)
-              if e.code in (403, 429):
-                  raise SystemExit(f'::error::AZURE_IP_403_BANNED|Pre-flight YouTube API returned HTTP {e.code} on this Azure VM')
-          except SystemExit:
-              raise
+              if e.code == 403:
+                  raise SystemExit('::error::AZURE_IP_403_BANNED|Pre-flight YouTube API returned HTTP 403 on this Azure VM')
           except Exception as ex:
               print(f'Pre-flight warning (continuing): {type(ex).__name__}: {ex}', flush=True)
           PREFLIGHT_EOF
@@ -1338,7 +1327,7 @@ jobs:
                                       cur_u,
                                       headers={**base_hdrs, "Range": f"bytes={s_b}-{e_b}"},
                                       proxies=proxies,
-                                      timeout=(7, 16),
+                                      timeout=(10, 18),
                                       stream=True,
                                   )
                                   if r.status_code in (403, 410):
@@ -1402,7 +1391,7 @@ jobs:
                               state["failed"] = True
                           return False
 
-                      workers = min(3, len(pending))
+                      workers = min(2, len(pending))
                       with ThreadPoolExecutor(max_workers=workers) as ex:
                           list(ex.map(_dl_chunk, pending))
 
@@ -1773,7 +1762,7 @@ jobs:
                       if us_geo_blocked and att_idx in (1, 2, 3):
                           print(f">>> Direct probe confirmed US geo-block — skipping Attempt {att_idx} ({label})...", flush=True)
                           continue
-                      if p_st in ("HTTP_403", "LOGIN_REQUIRED") and att_idx == 1 and has_ck:
+                      if p_st in ("HTTP_403", "LOGIN_REQUIRED", "UNPLAYABLE") and (not us_geo_blocked) and att_idx == 1 and has_ck:
                           print(f">>> Anonymous probe returned {p_st} — skipping Attempt 1 and testing Cookies directly...", flush=True)
                           continue
                       if att_idx > 1:
@@ -1808,6 +1797,33 @@ jobs:
 
                       s_files = get_stage_files()
                       media_files = [p for p in s_files if p.suffix.lower() in ((".mp3", ".m4a", ".flac", ".wav", ".opus") if is_audio else (".mp4", ".mkv", ".webm")) and not re.search(r"\.f\d+(?:-\d+)?$", p.stem)]
+                      if (not media_files) and strict_hd and ("requested format is not available" in low_comb) and (not il_geo_blocked) and ((att_idx == 2 and has_ck) or (att_idx == 1 and not has_ck)):
+                          print(f">>> Video has no 720p+ stream (SD/classic video) — retrying {label} immediately with StrictHD=False on the same server!", flush=True)
+                          if stage_dir.exists():
+                              shutil.rmtree(stage_dir, ignore_errors=True)
+                          stage_dir.mkdir(parents=True, exist_ok=True)
+                          cmd_sd = [
+                              "python3", "-m", "yt_dlp",
+                              "--ignore-config", "--rm-cache-dir", "--write-info-json",
+                              "--ffmpeg-location", "/usr/bin/ffmpeg",
+                              "--retries", "8",
+                              "--fragment-retries", "8",
+                              "--file-access-retries", "5",
+                              "-o", "/tmp/stage/%(title).150B [%(id)s].%(ext)s",
+                          ] + args + get_fmt_args(False, prefer_hls) + extra_args + [cur_url]
+                          proc_sd = subprocess.run(cmd_sd, capture_output=True, text=True, check=False)
+                          if proc_sd.stdout:
+                              print(proc_sd.stdout[-1500:], flush=True)
+                          if proc_sd.stderr:
+                              print(proc_sd.stderr[-1500:], flush=True)
+                          s_files = get_stage_files()
+                          media_files = [p for p in s_files if p.suffix.lower() in ((".mp3", ".m4a", ".flac", ".wav", ".opus") if is_audio else (".mp4", ".mkv", ".webm")) and not re.search(r"\.f\d+(?:-\d+)?$", p.stem)]
+                          if media_files:
+                              label = f"{label} [SD Fallback]"
+                          else:
+                              proc = proc_sd
+                              combined_out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                              low_comb = combined_out.lower()
                       if media_files:
                           for f in s_files:
                               if f.name.endswith(".info.json"):
@@ -1836,7 +1852,8 @@ jobs:
                               break
 
                       is_final_retry = bool(re.search(r"-r[4-9]\d*$", req_id))
-                      is_api_403 = (
+                      is_fmt_only_err = ("requested format is not available" in low_comb)
+                      is_api_403 = (not is_fmt_only_err) and (
                           ("Unable to download API page: HTTP Error 403" in combined_out)
                           or ("Failed to extract any player response" in combined_out)
                           or ("HTTP Error 429" in combined_out)
@@ -1846,11 +1863,11 @@ jobs:
                       if is_api_403:
                           api_403_fails += 1
 
-                      azure_soft_ban = (p_st == "UNPLAYABLE" and ("US" in avail_cc_set) and not il_geo_blocked)
-                      # עצירה מהירה כשהשרת הזמני ב-Azure חסום ב-403/429/Soft-Ban -> התוסף קופץ מיד ל-VM נקי (ובניסיון אחרון -r4 עובר ל-Proxy)!
-                      if (not has_custom_px) and (not il_geo_blocked) and (not is_final_retry):
-                          if (att_idx >= 2 and is_api_403) or (p_st == "HTTP_403" and is_api_403) or (azure_soft_ban and is_api_403) or (api_403_fails >= 2):
-                              print(f">>> FAST-ABORT: Azure runner IP is banned/rate-limited (403/429/Soft-Ban, att={att_idx}). Exiting immediately for Fresh-VM retry!", flush=True)
+                      cookies_tested = (not has_ck) or (att_idx >= 2)
+                      # עצירה מהירה רק אחרי שניסיון 2 (עם עוגיות!) אכן נחסם ב-403/429/Soft-Ban (ובניסיון -r4 עובר ל-Proxy)
+                      if (not has_custom_px) and (not il_geo_blocked) and (not is_final_retry) and cookies_tested:
+                          if (att_idx >= 2 and is_api_403) or (api_403_fails >= 2):
+                              print(f">>> FAST-ABORT: Azure runner IP is banned even with cookies (att={att_idx}). Switching to Fresh VM!", flush=True)
                               raise SystemExit(f"::error::AZURE_IP_403_BANNED|{_short_err}")
 
                       if il_geo_blocked and att_idx >= 4:
@@ -1885,7 +1902,7 @@ jobs:
                       else:
                           waves.append(["ALL"])
 
-                      px_tunnel_deadline = time.time() + 450
+                      px_tunnel_deadline = time.time() + 280
                       px_global_idx = 0
                       tried_px_urls = set()
                       can_use_direct = bool(cur_vid and mode != "collection" and not clip_start and not clip_end and not sb and not chapters)
@@ -2672,7 +2689,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.18,
+              "v": 23.19,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
