@@ -799,7 +799,7 @@ else:
                 "--cookies", str(cookie_file),
                 "--impersonate", "chrome",
                 "--concurrent-fragments", "8",
-                "--extractor-args", "youtube:player_client=tv,web_safari,mweb",
+                "--extractor-args", "youtube:player_client=tv_simply,tv,web_safari,mweb",
                 "--extractor-args", pot_ep
             ], True, True
         ))
@@ -1375,28 +1375,30 @@ else:
 
     def _refresh_stream_url_on_proxy(cur_vid: str, px_url: str, target_itag: int, want_client: str = "IOS", gl_code: str = "IL"):
         proxies = {"http": px_url, "https": px_url}
-        if want_client == "ANDROID_VR":
-            cl_obj = {"clientName": "ANDROID_VR", "clientVersion": "1.61.48", "deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L", "hl": "en", "gl": gl_code}
-            ua_str = "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; Quest 3)"
-        else:
-            cl_obj = {"clientName": "IOS", "clientVersion": "20.10.4", "deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82", "hl": "en", "gl": gl_code}
-            ua_str = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
-        try:
-            r = requests.post(
-                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                json={"context": {"client": cl_obj}, "videoId": cur_vid},
-                headers={"Content-Type": "application/json", "User-Agent": ua_str},
-                proxies=proxies,
-                timeout=7.0,
-            )
-            if r.status_code != 200:
-                return ""
-            sd = (r.json().get("streamingData") or {})
-            for f in (sd.get("adaptiveFormats") or []) + (sd.get("formats") or []):
-                if isinstance(f, dict) and int(f.get("itag") or -1) == int(target_itag) and f.get("url"):
-                    return str(f["url"])
-        except Exception:
-            pass
+        alt_client = "ANDROID_VR" if want_client == "IOS" else "IOS"
+        for cl_try in (want_client, alt_client):
+            if cl_try == "ANDROID_VR":
+                cl_obj = {"clientName": "ANDROID_VR", "clientVersion": "1.61.48", "deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L", "hl": "en", "gl": gl_code}
+                ua_str = "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; Quest 3)"
+            else:
+                cl_obj = {"clientName": "IOS", "clientVersion": "20.10.4", "deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82", "hl": "en", "gl": gl_code}
+                ua_str = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+            try:
+                r = requests.post(
+                    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                    json={"context": {"client": cl_obj}, "videoId": cur_vid},
+                    headers={"Content-Type": "application/json", "User-Agent": ua_str},
+                    proxies=proxies,
+                    timeout=7.0,
+                )
+                if r.status_code != 200:
+                    continue
+                sd = (r.json().get("streamingData") or {})
+                for f in (sd.get("adaptiveFormats") or []) + (sd.get("formats") or []):
+                    if isinstance(f, dict) and int(f.get("itag") or -1) == int(target_itag) and f.get("url"):
+                        return str(f["url"])
+            except Exception:
+                pass
         return ""
 
     def direct_download_via_proxy(cur_vid: str, px_url: str, probe_meta: dict, info_cache_dir: Path, resume_store: dict = None, resume_dir: Path = None):
@@ -1541,7 +1543,7 @@ else:
                                 _write_proxy_info_json(info_cache_dir, stem, cur_vid, j_res)
                                 return out_mp4, "ok_hls"
             except Exception as hls_ex:
-                print(f"  [DirectProxy HLS] error: {type(hls_ex).__name__}: {hls_ex}", flush=True)
+                print(f"  [DirectProxy HLS] error: {type(hls_ex).__name__}", flush=True)
         return None, last_direct_err
 
     def run_proxy_ytdlp(cmd_list, stall_sec: int = 28, max_total_sec: int = 360):
@@ -1670,7 +1672,13 @@ else:
 
             s_files = get_stage_files()
             media_files = [p for p in s_files if p.suffix.lower() in ((".mp3", ".m4a", ".flac", ".wav", ".opus") if is_audio else (".mp4", ".mkv", ".webm")) and not re.search(r"\.f\d+(?:-\d+)?$", p.stem)]
-            if (not media_files) and strict_hd and ("requested format is not available" in low_comb) and (not il_geo_blocked) and (att_idx in (1, 2)):
+            is_true_sd_only = (
+                ("requested format is not available" in low_comb)
+                and ("only images are available" not in low_comb)
+                and ("unable to download api page" not in low_comb)
+                and ("the page needs to be reloaded" not in low_comb)
+            )
+            if (not media_files) and strict_hd and is_true_sd_only and (not il_geo_blocked) and (att_idx in (1, 2)):
                 print(f">>> Video has no 720p+ stream (SD/classic video) — retrying {label} immediately with StrictHD=False on the same server!", flush=True)
                 if stage_dir.exists():
                     shutil.rmtree(stage_dir, ignore_errors=True)
@@ -1726,10 +1734,11 @@ else:
                     break
 
             is_final_retry = bool(re.search(r"-r[5-9]\d*$", req_id))
-            is_fmt_only_err = ("requested format is not available" in low_comb)
-            is_api_403 = (not is_fmt_only_err) and (
+            is_api_403 = (not is_true_sd_only) and (
                 ("Unable to download API page: HTTP Error 403" in combined_out)
                 or ("Failed to extract any player response" in combined_out)
+                or ("Only images are available for download" in combined_out)
+                or ("The page needs to be reloaded" in combined_out)
                 or ("HTTP Error 429" in combined_out)
                 or ("this content isn't available" in low_comb)
                 or ("this content isn\u2019t available" in low_comb)
@@ -2568,7 +2577,7 @@ if cloud_only_flag:
 telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
 telemetry["file_mb"] = file_mb
 notes = json.dumps({
-    "v": 23.23,
+    "v": 23.25,
     "size": zip_size,
     "video_title": primary_file.stem,
     "quality_info": f"{quality_report} ({file_mb} MB)",
