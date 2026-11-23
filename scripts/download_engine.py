@@ -598,7 +598,7 @@ else:
     attempts = []
     if has_ck:
         attempts.append(("2026 Native Default + Cookies (default,web_safari + Auto PO-Token)", ["--cookies", str(cookie_file), "--concurrent-fragments", "8", "--extractor-args", "youtube:player_client=default,web_safari", "--extractor-args", pot_ep], True, False))
-        attempts.append(("2026 TV+Safari HLS + Cookies + Impersonate Chrome (No XFF)", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--concurrent-fragments", "8", "--extractor-args", "youtube:player_client=tv_simply,tv,web_safari,mweb", "--extractor-args", pot_ep], True, True))
+        attempts.append(("2026 TV+Safari HLS + Cookies + Impersonate Chrome (No XFF)", ["--cookies", str(cookie_file), "--impersonate", "chrome", "--concurrent-fragments", "8", "--extractor-args", "youtube:player_client=tv,web_safari,mweb", "--extractor-args", pot_ep], True, True))
     attempts.append(("2026 Native Clean (No Cookies, No XFF + Auto PO-Token)", ["--concurrent-fragments", "8", "--extractor-args", "youtube:player_client=default,web_safari,android_vr", "--extractor-args", pot_ep], True, False))
     attempts.append(("2026 Geo-XFF HD + TV/Safari + Cookies (StrictHD)", (["--cookies", str(cookie_file)] if has_ck else []) + ["--xff", geo, "--impersonate", "chrome", "--concurrent-fragments", "6", "--extractor-args", "youtube:player_client=tv,web_safari,default", "--extractor-args", pot_ep], True, False))
     attempts.append(("2026 Universal Resilient Fallback (No-POT + HLS)", (["--cookies", str(cookie_file)] if has_ck else []) + ["--xff", geo, "--impersonate", "chrome", "--concurrent-fragments", "4", "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android_vr,ios"], False, True))
@@ -1158,6 +1158,7 @@ else:
         t_rd.join(timeout=2)
         return proc.returncode, "".join(out_buf[-40:]), killed
 
+    any_perm_unavail_reason, any_il_geo_blocked = "", False
     for u_idx, cur_url in enumerate(target_urls, 1):
         cur_vid = extract_vid_id(cur_url)
         print(f"\n>>> Processing target {u_idx}/{len(target_urls)}: yt:{cur_vid or 'item'} (Quality: {quality})", flush=True)
@@ -1192,7 +1193,7 @@ else:
             combined_out = (proc.stdout or "") + "\n" + (proc.stderr or "")
             low_comb = combined_out.lower()
             if any(k in low_comb for k in ("available in israel", "not made this video available in your country", "blocked it in your country")):
-                il_geo_blocked = True
+                il_geo_blocked = any_il_geo_blocked = True
 
             s_files, media_files = _stage_media()
             is_true_sd_only = ("requested format is not available" in low_comb) and not any(k in low_comb for k in ("only images are available", "unable to download api page", "the page needs to be reloaded"))
@@ -1227,6 +1228,8 @@ else:
             if (not il_geo_blocked) and ("sign in to confirm" not in low_comb) and ("available in your country" not in low_comb):
                 if any(k in low_comb for k in ("private video", "this video has been removed", "members-only", "join this channel to get access", "drm protected", "this live event will begin")):
                     perm_unavail_reason = short_err
+                    if not any_perm_unavail_reason:
+                        any_perm_unavail_reason = short_err
                     break
 
             is_final_retry = bool(re.search(r"-r[5-9]\d*$", req_id))
@@ -1234,8 +1237,12 @@ else:
             if is_api_403:
                 api_403_fails += 1
             if (not has_custom_px) and (not il_geo_blocked) and (not is_final_retry) and api_403_fails >= 2:
-                print(f">>> FAST-ABORT: Both authenticated yt-dlp profiles hit IP ban on this Azure VM (att={att_idx}). Switching to Fresh VM!", flush=True)
-                raise SystemExit(f"::error::AZURE_IP_403_BANNED|{short_err}")
+                has_saved_prev = any(p.is_file() and p.suffix.lower() in MEDIA_EXTS and p.stat().st_size > 0 for p in out_dir.rglob("*"))
+                if not has_saved_prev:
+                    print(f">>> FAST-ABORT: Both authenticated yt-dlp profiles hit IP ban on this Azure VM (att={att_idx}). Switching to Fresh VM!", flush=True)
+                    raise SystemExit(f"::error::AZURE_IP_403_BANNED|{short_err}")
+                print(f">>> IP ban on item {u_idx}/{len(target_urls)} after previous items succeeded — preserving files & engaging Proxy Tunnel.", flush=True)
+                break
             if il_geo_blocked and att_idx >= 4:
                 print(">>> Confirmed Geo-Restriction after direct & XFF attempts! Engaging Direct-Stream Proxy Tunnel...", flush=True)
                 break
@@ -1245,7 +1252,7 @@ else:
                 _pst, _prsn, _, _pmeta = probe_playability(cur_vid, px=None, timeout_s=5.0, gl_code="US", test_stream=False)
                 avail_cc_set = set((_pmeta or {}).get("available_countries") or [])
                 if _pst == "UNPLAYABLE" and "country" in _prsn.lower():
-                    us_geo_blocked = il_geo_blocked = True
+                    us_geo_blocked = il_geo_blocked = any_il_geo_blocked = True
                 print(f">>> Lazy Geo-Probe before Proxy Tunnel: status={_pst} availableCountries={len(avail_cc_set)} (IL={'IL' in avail_cc_set}, US={'US' in avail_cc_set})", flush=True)
             preferred_pool = [geo, "IL", "NL", "DE", "PL", "FR", "GB", "IT", "CA", "SG", "BR", "ES", "US"]
             valid_cc = ([c for c in preferred_pool if c in avail_cc_set] or sorted(avail_cc_set)[:6]) if avail_cc_set else [c for c in preferred_pool if not (us_geo_blocked and c == "US")]
@@ -1370,9 +1377,9 @@ else:
     files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
     if not files:
         last_errs = " ; ".join(f"#{a.get('n')}:{a.get('err','')}" for a in telemetry.get("attempts", [])[-3:] if not a.get("ok"))
-        if locals().get("perm_unavail_reason"):
-            raise SystemExit(f"::error::PERMANENT_UNAVAILABLE|{perm_unavail_reason}")
-        if locals().get("il_geo_blocked"):
+        if any_perm_unavail_reason:
+            raise SystemExit(f"::error::PERMANENT_UNAVAILABLE|{any_perm_unavail_reason}")
+        if any_il_geo_blocked:
             raise SystemExit(f"::error::GEO_BLOCKED|הסרטון חסום גיאוגרפית ולא נמצא Proxy פעיל | {last_errs[:160]}")
         raise SystemExit(f"::error::ALL_CLIENTS_FAILED|{last_errs[:200] or 'הורדת המדיה נכשלה בכל הקליינטים'}")
     media_out = [p for p in files if p.suffix.lower() in MEDIA_EXTS]
@@ -1381,14 +1388,22 @@ else:
 
 file_mb = round(primary_file.stat().st_size / 1048576, 2)
 if (not is_audio) and (not is_subs_only) and subtitles == "embed":
-    try:
-        sub_streams = json.loads(_ffprobe(["-select_streams", "s", "-show_entries", "stream=codec_name:stream_tags=language", "-of", "json", str(primary_file)]) or "{}").get("streams") or []
-    except Exception:
-        sub_streams = []
-    if sub_streams:
+    vid_outs = [p for p in media_out if p.suffix.lower() in (".mp4", ".mkv", ".webm")] or [primary_file]
+    verified_vids = 0
+    for vp in vid_outs:
+        try:
+            if json.loads(_ffprobe(["-select_streams", "s", "-show_entries", "stream=codec_name:stream_tags=language", "-of", "json", str(vp)]) or "{}").get("streams"):
+                verified_vids += 1
+        except Exception:
+            pass
+    if verified_vids > 0:
         subs_verified_flag = True
         cn = telemetry.get("sub_cues") or 0
-        subs_detail_msg = f"✅ כתוביות בעברית מוטמעות ומאומתות{f' ({cn} שורות)' if cn else ''}"
+        subs_detail_msg = (
+            f"✅ כתוביות בעברית מוטמעות ומאומתות ({verified_vids}/{len(vid_outs)} קבצים)"
+            if len(vid_outs) > 1
+            else f"✅ כתוביות בעברית מוטמעות ומאומתות{f' ({cn} שורות)' if cn else ''}"
+        )
     elif not subs_detail_msg:
         subs_verified_flag, subs_detail_msg = False, "⚠️ לא אומת ערוץ כתוביות מוטמע בקובץ"
 elif is_subs_only:
@@ -1429,7 +1444,7 @@ elif oversize_target is not None:
     extra_small = [f for f in files if f != primary_file]
     if extra_small:
         zp_extra = pkg_dir / f"{tag}-extras.zip"
-        with zipfile.ZipFile(zp_extra, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+        with zipfile.ZipFile(zp_extra, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
             for bf in extra_small: zf.write(bf, bf.relative_to(out_dir))
         zip_paths.append(zp_extra)
 else:
@@ -1737,7 +1752,7 @@ if cloud_only_flag:
 telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
 telemetry["file_mb"] = file_mb
 notes = json.dumps({
-    "v": 23.27, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
+    "v": 23.28, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
     "subs_verified": subs_verified_flag, "subs_detail": subs_detail_msg, "split_join": split_join_meta,
     "email_status": email_sent_status, "drive_status": drive_status, "drive_url_enc": drive_url_enc,
     "drive_only": is_cloud_only_done, "cloud_only": is_cloud_only_done,
