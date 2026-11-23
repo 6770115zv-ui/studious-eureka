@@ -24,9 +24,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
-      - name: Pre-Flight Azure IP Check (2s Fast-Abort on 403)
+      - name: Pre-Flight Azure IP Check (2s Fast-Abort on 403/429/Soft-Ban)
         env:
           TARGET_URL: ${{ inputs.url }}
+          REQ_ID: ${{ inputs.request_id }}
+          QUALITY: ${{ inputs.quality }}
           IL_PROXY: ${{ secrets.IL_PROXY }}
           CUSTOM_PROXY: ${{ secrets.CUSTOM_PROXY }}
         run: |
@@ -34,6 +36,11 @@ jobs:
           import json, os, re, urllib.error, urllib.request
           if os.environ.get('CUSTOM_PROXY', '').strip() or os.environ.get('IL_PROXY', '').strip():
               print('Custom proxy configured; skipping pre-flight IP abort.', flush=True)
+              raise SystemExit(0)
+          req_id = os.environ.get('REQ_ID', '').strip()
+          qual = os.environ.get('QUALITY', '').strip().lower()
+          if qual == 'subs_only' or re.search(r'-r[4-9]\d*$', req_id):
+              print(f'Skipping pre-flight abort (quality={qual}, req_id={req_id}).', flush=True)
               raise SystemExit(0)
           u = os.environ.get('TARGET_URL', '').strip()
           m = re.search(r'(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})', u)
@@ -47,11 +54,22 @@ jobs:
           )
           try:
               with urllib.request.urlopen(req, timeout=7) as r:
-                  print(f'Pre-flight IP check OK (HTTP {r.status}).', flush=True)
+                  body = r.read().decode('utf-8', errors='replace')
+                  data = json.loads(body) if body.strip().startswith('{') else {}
+                  ps = data.get('playabilityStatus') or {}
+                  st = str(ps.get('status') or '')
+                  rsn = str(ps.get('reason') or '')
+                  mf = (data.get('microformat') or {}).get('playerMicroformatRenderer') or {}
+                  avail = {str(c).upper() for c in (mf.get('availableCountries') or [])}
+                  print(f'Pre-flight IP check HTTP {r.status}: status={st} reason={rsn!r} US_avail={"US" in avail}', flush=True)
+                  if st == 'UNPLAYABLE' and ('country' not in rsn.lower()) and ('US' in avail):
+                      raise SystemExit(f'::error::AZURE_IP_403_BANNED|Pre-flight Azure soft-ban ({st}: {rsn}) on US-available video')
           except urllib.error.HTTPError as e:
               print(f'Pre-flight HTTP error: {e.code}', flush=True)
-              if e.code == 403:
-                  raise SystemExit('::error::AZURE_IP_403_BANNED|Pre-flight YouTube API returned HTTP 403 on this Azure VM')
+              if e.code in (403, 429):
+                  raise SystemExit(f'::error::AZURE_IP_403_BANNED|Pre-flight YouTube API returned HTTP {e.code} on this Azure VM')
+          except SystemExit:
+              raise
           except Exception as ex:
               print(f'Pre-flight warning (continuing): {type(ex).__name__}: {ex}', flush=True)
           PREFLIGHT_EOF
@@ -671,18 +689,22 @@ jobs:
 
               def try_download_single_sub(flag_args, lang_code, expect_he):
                   if len(flag_args) == 1 and (flag_args[0], lang_code) in direct_tracks and base_stem and not is_pl_sub:
-                      try:
-                          px_d = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-                          dr = requests.get(direct_tracks[(flag_args[0], lang_code)], headers=HTTP_HEADERS, proxies=px_d, timeout=18)
-                          if dr.status_code == 200 and len(dr.text) > 30 and ("-->" in dr.text):
-                              res_direct = _process_raw_sub_text(dr.text, base_stem, lang_code, expect_he)
-                              if res_direct:
-                                  print(f"Direct VTT subtitle fetch succeeded ({lang_code}) — 0 extra yt-dlp runs!", flush=True)
-                                  return res_direct
-                      except Exception:
-                          pass
+                      px_tries = ([{"http": proxy_url, "https": proxy_url}, None] if proxy_url else [None])
+                      for px_d in px_tries:
+                          try:
+                              dr = requests.get(direct_tracks[(flag_args[0], lang_code)], headers=HTTP_HEADERS, proxies=px_d, timeout=15)
+                              if dr.status_code == 200 and len(dr.text) > 30 and ("-->" in dr.text):
+                                  res_direct = _process_raw_sub_text(dr.text, base_stem, lang_code, expect_he)
+                                  if res_direct:
+                                      print(f"Direct VTT subtitle fetch succeeded ({lang_code}, via={'proxy' if px_d else 'direct'}) — 0 extra yt-dlp runs!", flush=True)
+                                      return res_direct
+                          except Exception:
+                              pass
                   for extra_cl in sub_clients:
-                      subprocess.run(base_sub_cmd + extra_cl + flag_args + ["--sub-langs", lang_code, video_url], check=False)
+                      sub_p = subprocess.run(base_sub_cmd + extra_cl + flag_args + ["--sub-langs", lang_code, video_url], capture_output=True, text=True, check=False)
+                      if sub_p.stderr and "HTTP Error 429" in sub_p.stderr:
+                          print(f"Subtitle fetch hit HTTP 429 for {lang_code} — stopping redundant yt-dlp retries.", flush=True)
+                          break
                       cand_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15 and not p.name.endswith("live_chat.json")]
                       if not cand_files:
                           continue
@@ -1813,14 +1835,23 @@ jobs:
                               perm_unavail_reason = _short_err
                               break
 
-                      is_api_403 = ("Unable to download API page: HTTP Error 403" in combined_out) or ("Failed to extract any player response" in combined_out)
+                      is_final_retry = bool(re.search(r"-r[4-9]\d*$", req_id))
+                      is_api_403 = (
+                          ("Unable to download API page: HTTP Error 403" in combined_out)
+                          or ("Failed to extract any player response" in combined_out)
+                          or ("HTTP Error 429" in combined_out)
+                          or ("this content isn't available" in low_comb)
+                          or ("this content isn\u2019t available" in low_comb)
+                      )
                       if is_api_403:
                           api_403_fails += 1
 
-                      # עצירה מהירה כשהשרת הזמני ב-Azure חסום גורף ב-HTTP 403 -> התוסף קופץ מיד ל-VM נקי!
-                      if (not has_custom_px) and (not il_geo_blocked) and ((p_st == "HTTP_403" and is_api_403) or api_403_fails >= 2):
-                          print(">>> FAST-ABORT: Azure runner IP is banned by YouTube API (HTTP 403). Exiting immediately for instant Fresh-VM retry!", flush=True)
-                          raise SystemExit(f"::error::AZURE_IP_403_BANNED|{_short_err}")
+                      azure_soft_ban = (p_st == "UNPLAYABLE" and ("US" in avail_cc_set) and not il_geo_blocked)
+                      # עצירה מהירה כשהשרת הזמני ב-Azure חסום ב-403/429/Soft-Ban -> התוסף קופץ מיד ל-VM נקי (ובניסיון אחרון -r4 עובר ל-Proxy)!
+                      if (not has_custom_px) and (not il_geo_blocked) and (not is_final_retry):
+                          if (att_idx >= 2 and is_api_403) or (p_st == "HTTP_403" and is_api_403) or (azure_soft_ban and is_api_403) or (api_403_fails >= 2):
+                              print(f">>> FAST-ABORT: Azure runner IP is banned/rate-limited (403/429/Soft-Ban, att={att_idx}). Exiting immediately for Fresh-VM retry!", flush=True)
+                              raise SystemExit(f"::error::AZURE_IP_403_BANNED|{_short_err}")
 
                       if il_geo_blocked and att_idx >= 4:
                           print(">>> Detected Geo-Restriction! Engaging Direct-Stream Proxy Tunnel v23.15...", flush=True)
@@ -2641,7 +2672,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.16,
+              "v": 23.18,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
