@@ -131,20 +131,26 @@ jobs:
               try:
                   return json.loads(s)
               except Exception:
-                  m_obj = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", s)
-                  if not m_obj:
-                      raise
-                  cleaned = re.sub(r",\s*([}\]])", r"\1", m_obj.group(1))
-                  return json.loads(cleaned)
+                  s_clean = re.sub(r",\s*([}\]])", r"\1", s)
+                  dec = json.JSONDecoder()
+                  for cand_s in (s, s_clean):
+                      for m_st in re.finditer(r"[\{\[]", cand_s):
+                          try:
+                              obj, _ = dec.raw_decode(cand_s, m_st.start())
+                              if isinstance(obj, (dict, list)):
+                                  return obj
+                          except Exception:
+                              pass
+                  raise
 
           class AIRouter:
               PREFERRED_GEMINI = [
                   "gemini-3.1-flash-lite",
                   "gemini-3.5-flash-lite",
-                  "gemini-3.8-flash",
-                  "gemini-3.7-flash",
                   "gemini-3.6-flash",
                   "gemini-3.5-flash",
+                  "gemini-3.7-flash",
+                  "gemini-3.8-flash",
               ]
               PREFERRED_GROQ_PREFIXES = [
                   "qwen/qwen3.8",
@@ -272,8 +278,8 @@ jobs:
                   for extra in found:
                       if ("flash" in extra.lower()) and extra not in ranked:
                           ranked.append(extra)
-                  print(f"AIRouter live Gemini ladder: {ranked[:5]}", flush=True)
-                  return ranked[:5] or list(self.PREFERRED_GEMINI[:4])
+                  print(f"AIRouter live Gemini ladder: {ranked[:6]}", flush=True)
+                  return ranked[:6] or list(self.PREFERRED_GEMINI[:5])
 
               def _discover_groq_models(self):
                   if not self.groq_key:
@@ -482,7 +488,7 @@ jobs:
                       or (self.cerebras_key and "Cerebras#1" not in self.dead_keys)
                   )
                   backups_tried = False
-                  stage_gem_fails = 0
+                  stage_t0 = time.time()
 
                   if self.gemini_keys and self.gemini_models:
                       with self.lock:
@@ -493,10 +499,14 @@ jobs:
                       for pass_i in range(2):
                           now = time.time()
                           tried_any = False
+                          tried_models_pass = set()
                           models_to_try = self.gemini_models if pass_i == 0 else self.gemini_models[:2]
                           for m_name in models_to_try:
                               if m_name in self.dead_models:
                                   continue
+                              if pass_i == 0 and self.cooldowns.get(("*", m_name), 0) > now:
+                                  continue
+                              model_hit_global_503 = False
                               for k_idx in key_indices:
                                   alias = f"Gemini#{k_idx + 1}"
                                   if alias in self.dead_keys:
@@ -505,8 +515,8 @@ jobs:
                                   if pass_i == 0 and cd_until > now:
                                       continue
                                   tried_any = True
+                                  tried_models_pass.add(m_name)
                                   t0 = time.time()
-                                  # דגמי Lite מקבלים 15-16s; דגמי Flash כבדים מקבלים 12s כדי לא לבזבז 24s על 504
                                   m_timeout = min(timeout_sec, 20) if "lite" in m_name else min(timeout_sec, 16)
                                   try:
                                       res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
@@ -517,7 +527,8 @@ jobs:
                                       es = f"{type(e).__name__}: {str(e)}"
                                       low_e = es.lower()
                                       if ("400" in low_e or "invalid_argument" in low_e) and ("thinking" in low_e or "budget" in low_e or "level" in low_e) and m_name not in self.no_thinking_models:
-                                          with self.lock: self.no_thinking_models.add(m_name)
+                                          with self.lock:
+                                              self.no_thinking_models.add(m_name)
                                           t_r = time.time()
                                           try:
                                               res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
@@ -526,7 +537,6 @@ jobs:
                                           except Exception as e2:
                                               es = f"{type(e2).__name__}: {str(e2)}"
                                               low_e = es.lower()
-                                      stage_gem_fails += 1
                                       self._record(stage, "gemini", m_name, alias, "fail", ms, es)
                                       print(f"AIRouter [{stage}] {alias}/{m_name} failed ({int(ms)}ms): {es[:130]}", flush=True)
                                       _bad_k_alert = False
@@ -544,17 +554,22 @@ jobs:
                                               self.cooldowns[(alias, m_name)] = time.time() + 14
                                               self.key_stats[alias]["status"] = "busy_503"
                                           elif "503" in low_e or "unavailable" in low_e or "high demand" in low_e:
-                                              self.cooldowns[(alias, m_name)] = time.time() + 10
+                                              self.cooldowns[(alias, m_name)] = time.time() + 12
+                                              self.cooldowns[("*", m_name)] = time.time() + 12
                                               self.key_stats[alias]["status"] = "busy_503"
+                                              model_hit_global_503 = True
                                       if _bad_k_alert:
                                           self._add_alert(f"⚠️ {alias} לא תקין או חסום (401/403) — בדוק את ה-Secret ב-GitHub.")
+                                      # 503 high demand הוא עומס גלובלי על הדגם — קופצים מיד לדגם Gemini הבא במקום לבזבז קריאה על מפתח 2
+                                      if model_hit_global_503:
+                                          break
 
-                                      # Fast-Failover ל-Groq אחרי 2 כשלים ב-Gemini (תשובה תוך ~1s במקום להיתקע!)
-                                      if has_fast_backup and not backups_tried and stage_gem_fails >= 2:
-                                          backups_tried = True
-                                          b_res, b_mod = self._try_fast_backups(prompt_text, stage)
-                                          if b_res is not None:
-                                              return b_res, b_mod
+                              # עוברים ל-Groq רק אחרי שניסינו לפחות 4 דגמי Gemini שונים או עברו 18 שנ' (מונע הזיות Qwen בעברית!)
+                              if has_fast_backup and not backups_tried and (len(tried_models_pass) >= 4 or (time.time() - stage_t0) >= 18):
+                                  backups_tried = True
+                                  b_res, b_mod = self._try_fast_backups(prompt_text, stage)
+                                  if b_res is not None:
+                                      return b_res, b_mod
                           if pass_i == 0:
                               if not backups_tried and (self.groq_key or self.cerebras_key or self.openrouter_key):
                                   backups_tried = True
@@ -843,6 +858,7 @@ jobs:
                       "You are an elite YouTube Research & Discovery Strategist. Turn the user's exact intent into razor-sharp, high-signal YouTube search queries across ANY domain (sports, tech, history, lectures, documentaries, etc.).\n"
                       "STRICT ANCHORING RULE: Identify ALL core entities/concepts in the user's input and keep EVERY query tightly anchored to their intersection! NEVER generate generic broad queries that drop the user's specific focus.\n"
                       "NATIVE TERMINOLOGY & DISAMBIGUATION RULE: Always include official local/native terms in the target languages AND strictly disambiguate similar names (e.g. reserve/youth teams vs rival clubs with similar names, homonyms, or distinct public figures).\n"
+                      "ANTI-HALLUCINATION RULE (CRITICAL FOR HEBREW QUERIES): NEVER invent, guess, or substitute an unrelated athlete/person name based on phonetic similarity (for example, Hebrew sports phrases/events like 'נס זלגיריס' refer to the historic Maccabi Tel Aviv vs Zalgiris game, NOT a player name!). When the user input is in Hebrew, keep at least 4 queries in natural Hebrew preserving the exact Hebrew phrase, and translate to English/Spanish ONLY entities you are 100% certain of.\n"
                       "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you combined ALL parts of the user's request, which specific entities/angles you chose, and why.\n"
                       "Task 2 - Search Queries: Generate 13 realistic YouTube search queries (2 to 6 words each — real creator title phrasing!) across the target languages, split into 4 buckets:\n"
                       "  - angle='direct' (4 queries): direct analytical breakdowns, interviews, reports, and stories combining the user's exact concepts (include native-language phrasing where relevant).\n"
@@ -1352,7 +1368,7 @@ jobs:
               (r"\bFlick\b|ס[\u0591-\u05C7]*ט[\u0591-\u05C7]*י[\u0591-\u05C7]*ר[\u0591-\u05C7]*ה\s+ק[\u0591-\u05C7]*ל[\u0591-\u05C7]*ה", "פליק"),
               (r"\bDeco\b", "דקו"), (r"\bDeni\s+Avdija\b|דני\s+אבדיג[\'’]ה", "דני אבדיה"), (r"\bAvdija\b|אבדיג[\'’]ה", "אבדיה"), (r"קאן\s*11", "כאן 11"),
               (r"פ[\u0591-\u05C7]*נ[\u0591-\u05C7]*י[\u0591-\u05C7]*נ[\u0591-\u05C7]*ה", "פנינה"),
-              (r"\bדגשים\b|\bהבהרה\b|\bהבהרות\b", "תקציר")
+              (r"\bדגשים\b|\bהבהרה\b|\bהבהרות\b|הבולטים של|נקודות השיא", "תקציר"), (r"עיר האדם|עיר גבר", "מנצ'סטר סיטי")
           ]
           def polish_he(t: str) -> str:
               s = strip_noise(t)
@@ -1388,12 +1404,14 @@ jobs:
               s = re.sub(r"\bhansi\s+flick\b", "XHFLICKX", s, flags=re.I)
               s = re.sub(r"\bflick\b", "XFLICKX", s, flags=re.I)
               s = re.sub(r"\bbar[cç]a\s+atl[eèé]tic\b", "XBATLETICX", s, flags=re.I)
+              s = re.sub(r"\bman(?:chester)?\s+city\b", "XMANCITYX", s, flags=re.I)
               return s
 
           def _restore_terms_he(s: str) -> str:
               s = re.sub(r"XHFLICKX", "האנזי פליק", s, flags=re.I)
               s = re.sub(r"XFLICKX", "פליק", s, flags=re.I)
               s = re.sub(r"XBATLETICX", "ברצלונה אתלטיק", s, flags=re.I)
+              s = re.sub(r"XMANCITYX", "מנצ'סטר סיטי", s, flags=re.I)
               return polish_he(s)
 
           def translate_one_pure_he(orig_s: str) -> str:
