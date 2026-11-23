@@ -145,8 +145,8 @@ jobs:
 
           class AIRouter:
               PREFERRED_GEMINI = [
-                  "gemini-3.1-flash-lite",
                   "gemini-3.5-flash-lite",
+                  "gemini-3.1-flash-lite",
                   "gemini-3.6-flash",
                   "gemini-3.5-flash",
                   "gemini-3.7-flash",
@@ -475,6 +475,8 @@ jobs:
                                   skip_aliases.add(alias)
                               elif "404" in es:
                                   self.dead_models.add(m_name)
+                              elif "request too large" in es.lower():
+                                  skip_aliases.add(alias)
                               elif "429" in es or "rate_limit" in es.lower():
                                   self.cooldowns[(alias, m_name)] = time.time() + 30
                                   self.cooldowns[(alias, "*")] = time.time() + 15
@@ -488,7 +490,7 @@ jobs:
                       or (self.cerebras_key and "Cerebras#1" not in self.dead_keys)
                   )
                   backups_tried = False
-                  stage_t0 = time.time()
+                  is_planner = stage.startswith("planner")
 
                   if self.gemini_keys and self.gemini_models:
                       with self.lock:
@@ -517,7 +519,11 @@ jobs:
                                   tried_any = True
                                   tried_models_pass.add(m_name)
                                   t0 = time.time()
-                                  m_timeout = min(timeout_sec, 20) if "lite" in m_name else min(timeout_sec, 16)
+                                  # Timeout קצר וחד (11-12 שנ' ב-planner) כדי לא לבזבז 15 שנ' על 504 ולספיק את כל סולם Gemini
+                                  if is_planner:
+                                      m_timeout = min(timeout_sec, 12) if "lite" in m_name else min(timeout_sec, 11)
+                                  else:
+                                      m_timeout = min(timeout_sec, 15) if "lite" in m_name else min(timeout_sec, 13)
                                   try:
                                       res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_timeout)
                                       self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
@@ -554,29 +560,29 @@ jobs:
                                               self.cooldowns[(alias, m_name)] = time.time() + 14
                                               self.key_stats[alias]["status"] = "busy_503"
                                           elif "503" in low_e or "unavailable" in low_e or "high demand" in low_e:
-                                              self.cooldowns[(alias, m_name)] = time.time() + 12
-                                              self.cooldowns[("*", m_name)] = time.time() + 12
+                                              self.cooldowns[(alias, m_name)] = time.time() + 10
+                                              self.cooldowns[("*", m_name)] = time.time() + 10
                                               self.key_stats[alias]["status"] = "busy_503"
                                               model_hit_global_503 = True
                                       if _bad_k_alert:
                                           self._add_alert(f"⚠️ {alias} לא תקין או חסום (401/403) — בדוק את ה-Secret ב-GitHub.")
-                                      # 503 high demand הוא עומס גלובלי על הדגם — קופצים מיד לדגם Gemini הבא במקום לבזבז קריאה על מפתח 2
                                       if model_hit_global_503:
                                           break
 
-                              # עוברים ל-Groq רק אחרי שניסינו לפחות 4 דגמי Gemini שונים או עברו 18 שנ' (מונע הזיות Qwen בעברית!)
-                              if has_fast_backup and not backups_tried and (len(tried_models_pass) >= 4 or (time.time() - stage_t0) >= 18):
+                              # ב-scorer אפשר לקפוץ ל-Groq אחרי 3 דגמי Gemini; ב-planner ממצים את כל סולם Gemini קודם!
+                              if (not is_planner) and has_fast_backup and not backups_tried and len(tried_models_pass) >= 3:
                                   backups_tried = True
                                   b_res, b_mod = self._try_fast_backups(prompt_text, stage)
                                   if b_res is not None:
                                       return b_res, b_mod
+
                           if pass_i == 0:
                               if not backups_tried and (self.groq_key or self.cerebras_key or self.openrouter_key):
                                   backups_tried = True
                                   b_res, b_mod = self._try_fast_backups(prompt_text, stage)
                                   if b_res is not None:
                                       return b_res, b_mod
-                              time.sleep(1.8 if tried_any else 2.2)
+                              time.sleep(1.5 if tried_any else 2.0)
 
                   if not backups_tried:
                       return self._try_fast_backups(prompt_text, stage)
@@ -851,12 +857,15 @@ jobs:
               if ai_router.has_any_provider() and not is_similar:
                   lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
                   _today_str = datetime.date.today().strftime("%B %Y")
+                  _en_hint = gtrans_simple(clean_q, "en") if any("\u0590" <= ch <= "\u05FF" for ch in clean_q) else ""
+                  _en_hint_line = f"Literal English translation hint: \"{_en_hint}\" (interpret sports/domain terms properly — e.g. 'הצלות' in football = goalkeeper saves / penalty saves, 'בישולים' = assists, 'שערים' = goals, 'נס זלגיריס' = Maccabi Tel Aviv vs Zalgiris 2004 miracle).\n" if _en_hint else ""
                   exp_prompt = (
                       f"Current date: {_today_str}.\n"
                       f"User input (short keyword OR free-form natural-language request): \"{clean_q}\"\n"
-                      f"Target Languages: {lang_desc} | Content preference: {content_type}.\n"
+                      + _en_hint_line
+                      + f"Target Languages: {lang_desc} | Content preference: {content_type}.\n"
                       "You are an elite YouTube Research & Discovery Strategist. Turn the user's exact intent into razor-sharp, high-signal YouTube search queries across ANY domain (sports, tech, history, lectures, documentaries, etc.).\n"
-                      "STRICT ANCHORING RULE: Identify ALL core entities/concepts in the user's input and keep EVERY query tightly anchored to their intersection! NEVER generate generic broad queries that drop the user's specific focus.\n"
+                      "STRICT ANCHORING RULE: Identify ALL core entities AND action/aspect words in the user's input (e.g. 'הצלות'=saves/goalkeeper, 'שערים'=goals, 'פנדלים'=penalties, 'ראיון'=interview) and keep EVERY query tightly anchored to their intersection! NEVER assume a Hebrew word is a typo, NEVER invent an unrelated role (like 'coach/מאמן' for a goalkeeper), and ensure at least 8 of the 13 queries explicitly target the specific action/aspect requested (in Hebrew, English, and Spanish).\n"
                       "NATIVE TERMINOLOGY & DISAMBIGUATION RULE: Always include official local/native terms in the target languages AND strictly disambiguate similar names (e.g. reserve/youth teams vs rival clubs with similar names, homonyms, or distinct public figures).\n"
                       "ANTI-HALLUCINATION RULE (CRITICAL FOR HEBREW QUERIES): NEVER invent, guess, or substitute an unrelated athlete/person name based on phonetic similarity (for example, Hebrew sports phrases/events like 'נס זלגיריס' refer to the historic Maccabi Tel Aviv vs Zalgiris game, NOT a player name!). When the user input is in Hebrew, keep at least 4 queries in natural Hebrew preserving the exact Hebrew phrase, and translate to English/Spanish ONLY entities you are 100% certain of.\n"
                       "Task 1 - Strategy Explanation (Hebrew): Write 'strategy_he' (2-3 crisp sentences in Hebrew) explaining how you combined ALL parts of the user's request, which specific entities/angles you chose, and why.\n"
@@ -1188,19 +1197,19 @@ jobs:
               if not ai_router.has_any_provider():
                   ai_status = "⚠️ סינון AI כבוי (חסר מפתח AI ב-Secrets)"
               elif selected_pool:
-                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 180))]
+                  ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 165))]
                   for it_s in ai_slice:
                       sq_s = it_s.get("source_q") or ""
                       if sq_s:
                           ai_sent_by_q[sq_s] = ai_sent_by_q.get(sq_s, 0) + 1
-                  chunk_sz = 90
+                  chunk_sz = 55
                   chunks_ai = [(off, ai_slice[off:off + chunk_sz]) for off in range(0, len(ai_slice), chunk_sz)]
 
                   def _score_ai_chunk(pair, attempt_tag=""):
                       offset, sub_items = pair
                       compact = [[
                           offset + idx,
-                          str(it.get("title") or "")[:115],
+                          str(it.get("title") or "")[:95],
                           str(it.get("channel") or "")[:36],
                           int(it.get("views") or 0)
                       ] for idx, it in enumerate(sub_items)]
@@ -1214,7 +1223,7 @@ jobs:
                           + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this theme (specific key figure, interview, podcast, or deep breakdown).\n"
                           + "  * DROP (<5): Confused/similar-named wrong entity, gaming/FIFA/EA FC (unless asked), unrelated topics/celebrities, clickbait spam, or filter-rule violations.\n"
                           + "Note: 'ללא דמויות אחרות' means no unrelated people/topics — directly relevant figures within the requested subject are WELCOME!\n"
-                          + "CRITICAL RECALL TARGET: Aim to keep ~22 to 40 valid items from this 90-item batch! If fewer than 20 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related interviews, podcasts, breakdowns, or deep-dive videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
+                          + "CRITICAL RECALL TARGET: Aim to keep ~14 to 28 valid items from this 55-item batch! If fewer than 12 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related interviews, podcasts, breakdowns, or deep-dive videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
                           + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
                           + f"Items: {json.dumps(compact, ensure_ascii=False)}"
                       )
