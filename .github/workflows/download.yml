@@ -731,6 +731,970 @@ jobs:
               detected_dur = 0.0
               ok_sub_labels = []
               for u_idx, cur_url in enumerate(target_urls, 1):
+                  srt_list, q_label = fetch_subtitles_for_url(cur_url)
+                  if srt_list:
+                      ok_sub_labels.append(q_label)
+                      for s_file in srt_list:
+                          shutil.copy2(str(s_file), str(out_dir / s_file.name))
+              if ok_sub_labels:
+                  quality_report = ok_sub_labels[0] if len(ok_sub_labels) == 1 else f"{len(ok_sub_labels)}/{len(target_urls)} קובצי כתוביות בעברית"
+
+              files = [p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0]
+              if not files:
+                  raise SystemExit("::error::לא נמצאו כתוביות עבור קישור זה")
+              primary_file = files[0]
+          else:
+              def get_fmt_args(strict_hd: bool, prefer_hls: bool = False):
+                  if quality == "audio":
+                      return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "320K", "--embed-thumbnail", "--embed-metadata"]
+                  if quality == "audio_m4a":
+                      return ["-f", "ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+                  if quality == "audio_opus":
+                      return ["-f", "ba[acodec=opus]/ba/b", "-x", "--audio-format", "opus", "--audio-quality", "0", "--embed-metadata"]
+                  if quality == "audio_flac":
+                      return ["-f", "ba/b", "-x", "--audio-format", "flac", "--audio-quality", "0", "--embed-thumbnail", "--embed-metadata"]
+                  if quality == "audio_wav":
+                      return ["-f", "ba/b", "-x", "--audio-format", "wav", "--audio-quality", "0"]
+
+                  if strict_hd and req_h >= 720:
+                      if quality in ("2160", "1440", "1080", "720"):
+                          min_target = 720
+                          fmt = (
+                              f"bv*[height<={req_h}][height>={min_target}]+ba/"
+                              f"b[height<={req_h}][height>={min_target}]"
+                          )
+                          sort_res = f"res:{req_h}"
+                      else:
+                          fmt = (
+                              "bv*[height<=2160][height>=1080]+ba/"
+                              "bv*[height>=720]+ba/"
+                              "b[height>=720]"
+                          )
+                          sort_res = "res:2160"
+                  else:
+                      fmt = f"bv*[height<={req_h}]+ba/b[height<={req_h}]/bv*+ba/b"
+                      sort_res = f"res:{req_h}"
+
+                  if prefer_hls:
+                      fmt = (
+                          f"bv*[protocol*=m3u8][height<={req_h}]+ba[protocol*=m3u8]/"
+                          f"b[protocol*=m3u8][height<={req_h}]/"
+                          f"bv*[protocol*=m3u8]+ba/"
+                          f"b[protocol*=m3u8]/{fmt}"
+                      )
+                      sort_str = f"proto:m3u8_native,{sort_res},fps,vcodec:vp9:av01:h264,ext:mp4"
+                  elif quality in ("best", "2160", "1440"):
+                      sort_str = f"{sort_res},fps,vcodec:vp9:av01:h264,acodec:m4a:aac:opus,ext:mp4:m4a"
+                  else:
+                      sort_str = f"{sort_res},fps,vcodec:h264:vp9:av01,acodec:m4a:aac:opus,ext:mp4:m4a"
+
+                  return [
+                      "-f", fmt,
+                      "-S", sort_str,
+                      "--merge-output-format", "mp4",
+                      "--no-embed-chapters",
+                      "--postprocessor-args", "Merger+ffmpeg:-dn -map_chapters -1 -movflags +faststart",
+                  ]
+
+              def inspect_media_quality(fpath: Path):
+                  try:
+                      cmd = [
+                          "ffprobe", "-v", "error",
+                          "-show_entries", "stream=codec_type,codec_name,width,height,bit_rate:format=bit_rate,duration",
+                          "-of", "json", str(fpath)
+                      ]
+                      r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                      data = json.loads(r.stdout)
+                      streams = data.get("streams") or []
+                      v_s = next((s for s in streams if s.get("codec_type") == "video" and int(s.get("height") or 0) > 0), None)
+                      a_s = next((s for s in streams if s.get("codec_type") == "audio"), None)
+                      dur = float((data.get("format") or {}).get("duration") or 0)
+                      if v_s:
+                          w = int(v_s.get("width") or 0)
+                          h = int(v_s.get("height") or 0)
+                          max_dim = max(w, h)
+                          min_dim = min(w, h)
+                          vc = (v_s.get("codec_name") or "mp4").upper()
+                          if min_dim >= 2160 or max_dim >= 3840: tag = f"4K UHD ({min_dim}p)"
+                          elif min_dim >= 1440 or max_dim >= 2560: tag = f"2K QHD ({min_dim}p)"
+                          elif min_dim >= 1080 or max_dim >= 1920: tag = f"Full HD ({min_dim}p)"
+                          elif min_dim >= 720 or max_dim >= 1280: tag = f"HD ({min_dim}p)"
+                          else: tag = f"{min_dim}p"
+                          return max(h, min_dim), dur, f"{tag} [{w}x{h} • {vc}]"
+                      if a_s:
+                          ac = (a_s.get("codec_name") or fpath.suffix.lstrip(".")).upper()
+                          br = int(a_s.get("bit_rate") or (data.get("format") or {}).get("bit_rate") or 0)
+                          kbps = f" {round(br / 1000)}kbps" if br > 0 else ""
+                          return 0, dur, f"אודיו ({ac}{kbps})"
+                  except Exception:
+                      pass
+                  return 0, 0.0, "תקין"
+
+              extra_args = [
+                  "--force-ipv4",
+                  "--no-mtime",
+                  "--js-runtimes", "deno",
+                  "--sleep-requests", "0.5",
+                  "--http-chunk-size", "10M",
+                  "--socket-timeout", "25",
+              ]
+              if mode != "collection":
+                  extra_args.append("--no-playlist")
+              else:
+                  extra_args += ["--yes-playlist", "--playlist-end", "35"]
+
+              if clip_start or clip_end:
+                  s = clip_start or "00:00:00"
+                  e = clip_end or "inf"
+                  extra_args += ["--download-sections", f"*{s}-{e}", "--force-keyframes-at-cuts"]
+
+              if sb:
+                  extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
+              if chapters and not is_audio:
+                  extra_args += ["--split-chapters"]
+
+              pot_ep = "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+              attempts = []
+
+              if has_ck:
+                  # ניסיון 1: המנצח המוכח (yt-dlp 2026 default + web_safari + Cookies + Auto PO-Token + Deno, ללא web כפוי וללא fetch_pot=always!)
+                  attempts.append((
+                      "2026 Native Default + Cookies (default,web_safari + Auto PO-Token)", [
+                          "--cookies", str(cookie_file),
+                          "--concurrent-fragments", "8",
+                          "--extractor-args", "youtube:player_client=default,web_safari",
+                          "--extractor-args", pot_ep
+                      ], True, False
+                  ))
+                  # ניסיון 2: גיבוי על אותו שרת — TV + Safari HLS + Chrome Impersonate (עוקף 429/DASH על web)
+                  attempts.append((
+                      "2026 TV+Safari HLS + Cookies + Impersonate Chrome (No XFF)", [
+                          "--cookies", str(cookie_file),
+                          "--impersonate", "chrome",
+                          "--concurrent-fragments", "8",
+                          "--extractor-args", "youtube:player_client=tv,web_safari,mweb",
+                          "--extractor-args", pot_ep
+                      ], True, True
+                  ))
+
+              # ניסיון 3 (או 1 ללא עוגיות): נקי ללא עוגיות וללא --xff (עוקף חסימות עוגיות ישראליות בערוצי ארה"ב כמו NBC Sports)
+              attempts.append((
+                  "2026 Native Clean (No Cookies, No XFF + Auto PO-Token)", [
+                      "--concurrent-fragments", "8",
+                      "--extractor-args", "youtube:player_client=default,web_safari,android_vr",
+                      "--extractor-args", pot_ep
+                  ], True, False
+              ))
+
+              # ניסיון 4: עקיפת Geo-XFF (ישראל/מדינה נבחרת) + TV/Safari + עוגיות ב-StrictHD=True
+              attempts.append((
+                  "2026 Geo-XFF HD + TV/Safari + Cookies (StrictHD)",
+                  (["--cookies", str(cookie_file)] if has_ck else []) + [
+                      "--xff", geo,
+                      "--impersonate", "chrome",
+                      "--concurrent-fragments", "6",
+                      "--extractor-args", "youtube:player_client=tv,web_safari,default",
+                      "--extractor-args", pot_ep
+                  ], True, False
+              ))
+
+              # ניסיון 5: גיבוי אוניברסלי אחרון (ללא POT + HLS, StrictHD=False)
+              attempts.append((
+                  "2026 Universal Resilient Fallback (No-POT + HLS)",
+                  (["--cookies", str(cookie_file)] if has_ck else []) + [
+                      "--xff", geo,
+                      "--impersonate", "chrome",
+                      "--concurrent-fragments", "4",
+                      "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android_vr,ios"
+                  ], False, True
+              ))
+
+              def get_stage_files():
+                  return [p for p in stage_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")) and p.stat().st_size > 0]
+
+              def extract_vid_id(u: str) -> str:
+                  s_u = str(u or "")
+                  m_br = re.findall(r"\[([a-zA-Z0-9_-]{11})\]", s_u)
+                  if m_br:
+                      return m_br[-1]
+                  m = re.search(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([a-zA-Z0-9_-]{11})", s_u)
+                  return m.group(1) if m else ""
+
+              def _pick_direct_streams_from_player(j_res: dict, target_h: int):
+                  sd = j_res.get("streamingData") or {}
+                  adap = [f for f in (sd.get("adaptiveFormats") or []) if isinstance(f, dict) and f.get("url")]
+                  muxed = [f for f in (sd.get("formats") or []) if isinstance(f, dict) and f.get("url")]
+                  hls_u = str(sd.get("hlsManifestUrl") or "")
+
+                  v_cands = [f for f in adap if str(f.get("mimeType") or "").startswith("video/") and int(f.get("height") or 0) > 0]
+                  a_cands = [f for f in adap if str(f.get("mimeType") or "").startswith("audio/")]
+
+                  best_v = None
+                  if v_cands:
+                      in_cap = [f for f in v_cands if int(f.get("height") or 0) <= target_h]
+                      pool_v = in_cap if in_cap else v_cands
+                      hd_v = [f for f in pool_v if int(f.get("height") or 0) >= 720]
+                      if hd_v and target_h >= 720:
+                          pool_v = hd_v
+                      def _v_key(f):
+                          mt = str(f.get("mimeType") or "").lower()
+                          codec_rank = 3 if "vp9" in mt else (2 if "avc1" in mt else (1 if "av01" in mt else 0))
+                          return (int(f.get("height") or 0), int(f.get("fps") or 0), codec_rank, int(f.get("bitrate") or 0))
+                      best_v = max(pool_v, key=_v_key)
+
+                  best_a = None
+                  if a_cands:
+                      def _a_key(f):
+                          mt = str(f.get("mimeType") or "").lower()
+                          at = f.get("audioTrack") or {}
+                          is_def = 1 if (not at or at.get("audioIsDefault") or str(at.get("id") or "").endswith(".4")) else 0
+                          is_orig = 1 if (not at or "original" in str(at.get("displayName") or "").lower()) else 0
+                          c_rank = 2 if "mp4a" in mt else (1 if "opus" in mt else 0)
+                          return (is_orig, is_def, c_rank, int(f.get("bitrate") or 0))
+                      best_a = max(a_cands, key=_a_key)
+
+                  best_mux = None
+                  if muxed:
+                      best_mux = max(muxed, key=lambda f: (int(f.get("height") or 0), int(f.get("bitrate") or 0)))
+
+                  return best_v, best_a, best_mux, hls_u
+
+              def probe_playability(vid: str, px: str = None, timeout_s: float = 4.5, gl_code: str = "US", test_stream: bool = False):
+                  if not vid:
+                      return "", "", 0.0, None
+                  proxies = {"http": px, "https": px} if px else None
+                  clients_to_probe = [
+                      (
+                          {"clientName": "ANDROID_VR", "clientVersion": "1.61.48", "deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L", "hl": "en", "gl": gl_code},
+                          "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; Quest 3)"
+                      ),
+                      (
+                          {"clientName": "IOS", "clientVersion": "20.10.4", "deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82", "hl": "en", "gl": gl_code},
+                          "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+                      ),
+                      (
+                          {"clientName": "WEB", "clientVersion": "2.20261121.00.00", "hl": "en", "gl": gl_code},
+                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                      ),
+                  ]
+                  last_st, last_rsn, last_meta = "", "", None
+                  for cl_idx, (cl_obj, ua_str) in enumerate(clients_to_probe):
+                      # בבדיקת פרוקסי לא מבזבזים זמן על WEB אם ANDROID_VR ו-IOS לא החזירו מדיה
+                      if test_stream and px and cl_idx == 2 and last_st.startswith(("STREAM_", "OK_NO_STREAM")):
+                          break
+                      try:
+                          r = requests.post(
+                              "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                              json={"context": {"client": cl_obj}, "videoId": vid},
+                              headers={"Content-Type": "application/json", "User-Agent": ua_str},
+                              proxies=proxies,
+                              timeout=timeout_s
+                          )
+                          if r.status_code != 200:
+                              last_st, last_rsn = f"HTTP_{r.status_code}", ""
+                              if px and r.status_code in (400, 407, 502, 503, 504):
+                                  break
+                              continue
+                          j_res = r.json()
+                          mf = (j_res.get("microformat") or {}).get("playerMicroformatRenderer") or {}
+                          avail_cc = [str(c).upper() for c in (mf.get("availableCountries") or []) if len(str(c)) == 2]
+                          if avail_cc and not last_meta:
+                              last_meta = {"available_countries": avail_cc}
+                          ps = (j_res.get("playabilityStatus") or {})
+                          st = str(ps.get("status") or "")
+                          rsn = str(ps.get("reason") or "")
+                          if st == "OK":
+                              best_v, best_a, best_mux, hls_u = _pick_direct_streams_from_player(j_res, req_h)
+                              has_pair = bool((best_v and best_a) or (is_audio and best_a) or hls_u or best_mux)
+                              if not has_pair:
+                                  last_st, last_rsn = "OK_NO_STREAM", rsn
+                                  continue
+                              if test_stream and px:
+                                  probe_target = None
+                                  probe_mode = ""
+                                  if is_audio and best_a:
+                                      probe_target, probe_mode = best_a["url"], "adap"
+                                  elif best_v and best_a:
+                                      probe_target, probe_mode = best_v["url"], "adap"
+                                  elif hls_u:
+                                      probe_target, probe_mode = hls_u, "hls"
+                                  elif best_mux:
+                                      probe_target, probe_mode = best_mux["url"], "mux"
+
+                                  if probe_target:
+                                      try:
+                                          _ts = time.time()
+                                          hdr_s = {"User-Agent": ua_str}
+                                          if probe_mode != "hls":
+                                              hdr_s["Range"] = "bytes=0-131071"
+                                          sr = requests.get(probe_target, headers=hdr_s, proxies=proxies, timeout=5.5, stream=True)
+                                          if sr.status_code in (200, 206):
+                                              got = 0
+                                              for ch in sr.iter_content(chunk_size=16384):
+                                                  got += len(ch)
+                                                  if got >= 65536 or (time.time() - _ts) > 4.0:
+                                                      break
+                                              sr.close()
+                                              min_ok = 600 if probe_mode == "hls" else 8192
+                                              if got >= min_ok:
+                                                  elapsed = max(0.05, time.time() - _ts)
+                                                  kbps = round((got / 1024.0) / elapsed, 1)
+                                                  meta_ok = {
+                                                      "player_json": j_res,
+                                                      "ua": ua_str,
+                                                      "client": cl_obj["clientName"],
+                                                      "mode": probe_mode,
+                                                      "available_countries": avail_cc,
+                                                  }
+                                                  return "OK", f"{cl_obj['clientName']}:{probe_mode}:{kbps}KB/s", kbps, meta_ok
+                                          else:
+                                              sr.close()
+                                              last_st, last_rsn = f"STREAM_HTTP_{sr.status_code}", cl_obj["clientName"]
+                                      except Exception as sex:
+                                          last_st, last_rsn = f"STREAM_ERR_{type(sex).__name__}", str(sex)[:40]
+                                  continue
+                              meta_ok = {"player_json": j_res, "ua": ua_str, "client": cl_obj["clientName"], "available_countries": avail_cc}
+                              return "OK", rsn, 1.0, meta_ok
+                          if st == "UNPLAYABLE" and "country" in rsn.lower():
+                              return st, rsn, 0.0, {"available_countries": avail_cc}
+                          last_st, last_rsn = st, rsn
+                      except Exception as ex:
+                          last_st, last_rsn = f"ERR_{type(ex).__name__}", str(ex)[:60]
+                          # שגיאת רשת/פרוקסי מת -> עוצרים מיד בלי לבזבז עוד 9 שנ' על יתר הקליינטים!
+                          if px:
+                              break
+                  return last_st, last_rsn, 0.0, last_meta
+
+              def _collect_proxy_candidates(countries_batch):
+                  cand_proxies = []
+                  seen_px = set()
+                  sources = []
+                  for cc in countries_batch:
+                      c_up = cc.upper()
+                      c_param = f"&country={c_up}" if c_up != "ALL" else ""
+                      sources.append(f"https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=all&timeout=4500&proxy_format=protocolipport&format=text{c_param}")
+                      sources.append(f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=4500{c_param}&ssl=all&anonymity=all")
+                      sources.append(f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=4500{c_param}")
+                      if c_up != "ALL":
+                          sources.append(f"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/countries/{c_up}/data.txt")
+                          sources.append(f"https://www.proxy-list.download/api/v1/get?type=http&country={c_up}")
+                          sources.append(f"https://www.proxy-list.download/api/v1/get?type=socks5&country={c_up}")
+                      else:
+                          sources += [
+                              "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt",
+                              "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+                              "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+                              "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt",
+                              "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+                              "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+                          ]
+
+                  def _fetch_src(src):
+                      out_u = []
+                      try:
+                          r = requests.get(src, timeout=6)
+                          if r.status_code == 200:
+                              proto = "socks5://" if "socks5" in src else "http://"
+                              for ln in r.text.splitlines():
+                                  ln = ln.strip()
+                                  m_full = re.match(r"^(https?|socks[45])://(\d+\.\d+\.\d+\.\d+:\d+)$", ln, re.I)
+                                  if m_full:
+                                      out_u.append(f"{m_full.group(1).lower()}://{m_full.group(2)}")
+                                  elif re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", ln):
+                                      out_u.append(proto + ln)
+                      except Exception:
+                          pass
+                      return out_u
+
+                  with ThreadPoolExecutor(max_workers=12) as ex:
+                      for res_list in ex.map(_fetch_src, sources):
+                          for u in res_list:
+                              if u not in seen_px:
+                                  seen_px.add(u)
+                                  cand_proxies.append(u)
+
+                  for cc in countries_batch[:2]:
+                      try:
+                          gn_url = "https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc"
+                          if cc.upper() != "ALL":
+                              gn_url += f"&country={cc.upper()}"
+                          gr = requests.get(gn_url, timeout=5)
+                          if gr.ok:
+                              for row in (gr.json().get("data") or []):
+                                  ip_s, port_s = str(row.get("ip") or ""), str(row.get("port") or "")
+                                  protos = row.get("protocols") or []
+                                  if ip_s and port_s:
+                                      pr = "socks5://" if "socks5" in protos else ("http://" if "http" in protos else ("socks4://" if "socks4" in protos else ""))
+                                      if pr:
+                                          full_px = f"{pr}{ip_s}:{port_s}"
+                                          if full_px not in seen_px:
+                                              seen_px.add(full_px)
+                                              cand_proxies.append(full_px)
+                      except Exception:
+                          pass
+                  return cand_proxies
+
+              def discover_working_proxies_batch(target_vid: str, countries_batch, tried_urls: set):
+                  import threading
+                  priority_px = []
+                  for env_name in ("CUSTOM_PROXY", "IL_PROXY"):
+                      val = os.environ.get(env_name, "").strip().strip("\"'")
+                      if val and val not in tried_urls:
+                          print(f"::add-mask::{val}", flush=True)
+                          if env_name == "CUSTOM_PROXY" or "IL" in countries_batch:
+                              st, _, kbps, meta = probe_playability(target_vid, px=val, timeout_s=6.0, gl_code="IL", test_stream=True)
+                              priority_px.append((val, st != "OK" and has_ck, kbps if st == "OK" else 9999.0, meta))
+
+                  cand_proxies = [p for p in _collect_proxy_candidates(countries_batch) if p not in tried_urls]
+                  verified_ok = []
+                  verified_login = []
+                  px_lock = threading.Lock()
+                  check_vid = target_vid or "dQw4w9WgXcQ"
+                  gl_for_probe = countries_batch[0] if (countries_batch and len(countries_batch[0]) == 2) else "IL"
+
+                  def test_px(px):
+                      with px_lock:
+                          fast_cnt = sum(1 for x in verified_ok if x[2] >= 120.0)
+                          if fast_cnt >= 4 or len(verified_ok) >= 8:
+                              return
+                      st, rsn, kbps, meta = probe_playability(check_vid, px=px, timeout_s=3.8, gl_code=gl_for_probe, test_stream=True)
+                      if st == "OK" and meta:
+                          with px_lock:
+                              verified_ok.append((px, False, kbps, meta))
+                      elif has_ck and st == "LOGIN_REQUIRED" and ("country" not in str(rsn or "").lower()):
+                          with px_lock:
+                              if len(verified_login) < 2:
+                                  verified_login.append((px, True, 0.0, None))
+
+                  if cand_proxies:
+                      with ThreadPoolExecutor(max_workers=50) as ex:
+                          list(ex.map(test_px, cand_proxies[:200]))
+                  verified_ok.sort(key=lambda x: x[2], reverse=True)
+                  return priority_px + verified_ok[:6] + verified_login[:2]
+
+              def _write_proxy_info_json(info_cache_dir: Path, stem: str, vid: str, player_json: dict):
+                  try:
+                      cap_tracks = (((player_json.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}).get("captionTracks") or [])
+                      subs_map, auto_map = {}, {}
+                      for tr in cap_tracks:
+                          lc = str(tr.get("languageCode") or "").strip()
+                          bu = str(tr.get("baseUrl") or "").strip()
+                          if not lc or not bu:
+                              continue
+                          vtt_u = bu + ("&fmt=vtt" if "fmt=" not in bu else "")
+                          entry = [{"ext": "vtt", "url": vtt_u}]
+                          if str(tr.get("kind") or "").lower() == "asr":
+                              auto_map[lc] = entry
+                              auto_map[f"{lc}-orig"] = entry
+                          else:
+                              subs_map[lc] = entry
+                      vd = player_json.get("videoDetails") or {}
+                      info_obj = {
+                          "id": vid,
+                          "title": vd.get("title") or stem,
+                          "language": (cap_tracks[0].get("languageCode") if cap_tracks else ""),
+                          "subtitles": subs_map,
+                          "automatic_captions": auto_map,
+                      }
+                      (info_cache_dir / f"{stem}.info.json").write_text(json.dumps(info_obj, ensure_ascii=False), encoding="utf-8")
+                  except Exception:
+                      pass
+
+              def _download_url_chunked_proxy(url: str, dst_path: Path, proxies: dict, ua_str: str, content_len: int, label: str, max_sec: int = 260, resume_entry: dict = None, refresh_url_fn=None):
+                  import threading
+                  t0 = time.time()
+                  base_hdrs = {"User-Agent": ua_str, "Accept": "*/*", "Connection": "keep-alive"}
+
+                  if content_len and content_len > 0:
+                      chunk_sz = 2 * 1024 * 1024
+                      ranges = [(s, min(content_len - 1, s + chunk_sz - 1)) for s in range(0, content_len, chunk_sz)]
+                      total_chunks = len(ranges)
+
+                      if resume_entry is not None:
+                          done_chunks = resume_entry["done_chunks"]
+                          if (not dst_path.exists()) or dst_path.stat().st_size != content_len:
+                              done_chunks.clear()
+                              with open(dst_path, "wb") as fp_init:
+                                  fp_init.truncate(content_len)
+                      else:
+                          done_chunks = set()
+                          with open(dst_path, "wb") as fp_init:
+                              fp_init.truncate(content_len)
+
+                      pending = [(idx, s, e) for idx, (s, e) in enumerate(ranges) if idx not in done_chunks]
+                      if not pending:
+                          print(f"  [DirectProxy] {label}: already 100% on disk ({round(content_len/1048576, 1)} MB) — skipping!", flush=True)
+                          return True, "cached"
+
+                      already_bytes = sum((ranges[i][1] - ranges[i][0] + 1) for i in done_chunks)
+                      if already_bytes > 0:
+                          print(f"  [DirectProxy] Resuming {label} from {round(already_bytes/1048576, 1)}/{round(content_len/1048576, 1)} MB ({len(done_chunks)}/{total_chunks} chunks on disk)...", flush=True)
+
+                      write_lock = threading.Lock()
+                      refresh_lock = threading.Lock()
+                      state = {
+                          "url": url,
+                          "refreshes": 0,
+                          "last_refresh_t": 0.0,
+                          "chunks_since_refresh": 0,
+                          "done_bytes": already_bytes,
+                          "session_bytes": 0,
+                          "failed": False,
+                          "err": "",
+                          "last_log": t0,
+                      }
+
+                      def _try_refresh(failed_url: str, status_code: int) -> bool:
+                          if not refresh_url_fn:
+                              return False
+                          with refresh_lock:
+                              if state["failed"]:
+                                  return False
+                              # אם תהליכון אחר כבר רענן את הכתובת — משתמשים בכתובת החדשה
+                              if state["url"] != failed_url:
+                                  return True
+                              if state["refreshes"] >= 6:
+                                  state["err"] = f"HTTP_{status_code}_max_refreshes"
+                                  state["failed"] = True
+                                  return False
+                              if state["refreshes"] > 0 and state["chunks_since_refresh"] == 0:
+                                  state["err"] = f"HTTP_{status_code}_after_refresh"
+                                  state["failed"] = True
+                                  return False
+                              new_u = refresh_url_fn()
+                              if not new_u:
+                                  state["err"] = f"HTTP_{status_code}_refresh_empty"
+                                  state["failed"] = True
+                                  return False
+                              state["url"] = new_u
+                              state["refreshes"] += 1
+                              state["last_refresh_t"] = time.time()
+                              state["chunks_since_refresh"] = 0
+                              print(f"  [DirectProxy] Refreshed {label} URL after HTTP {status_code} (refresh #{state['refreshes']}, at {round(state['done_bytes']/1048576, 1)}/{round(content_len/1048576, 1)} MB)...", flush=True)
+                              return True
+
+                      def _dl_chunk(item):
+                          c_idx, s_b, e_b = item
+                          need = e_b - s_b + 1
+                          for tr in range(4):
+                              if state["failed"] or (time.time() - t0) > max_sec:
+                                  if not state["err"] and (time.time() - t0) > max_sec:
+                                      state["err"] = f"timeout>{max_sec}s"
+                                  return False
+                              cur_u = state["url"]
+                              try:
+                                  r = requests.get(
+                                      cur_u,
+                                      headers={**base_hdrs, "Range": f"bytes={s_b}-{e_b}"},
+                                      proxies=proxies,
+                                      timeout=(10, 18),
+                                      stream=True,
+                                  )
+                                  if r.status_code in (403, 410):
+                                      sc = r.status_code
+                                      r.close()
+                                      if _try_refresh(cur_u, sc):
+                                          continue
+                                      with write_lock:
+                                          if not state["err"]:
+                                              state["err"] = f"HTTP_{sc}"
+                                          state["failed"] = True
+                                      return False
+                                  if r.status_code not in (200, 206):
+                                      sc = r.status_code
+                                      r.close()
+                                      with write_lock:
+                                          state["err"] = f"HTTP_{sc}"
+                                      time.sleep(0.5 * (tr + 1))
+                                      continue
+                                  buf = bytearray()
+                                  for blk in r.iter_content(chunk_size=65536):
+                                      if state["failed"]:
+                                          r.close()
+                                          return False
+                                      if blk:
+                                          buf.extend(blk)
+                                  r.close()
+                                  if len(buf) == need or (r.status_code == 200 and s_b == 0 and len(buf) >= need):
+                                      chunk_data = bytes(buf[:need])
+                                      with write_lock:
+                                          if c_idx in done_chunks:
+                                              return True
+                                          with open(dst_path, "r+b") as fp_w:
+                                              fp_w.seek(s_b)
+                                              fp_w.write(chunk_data)
+                                          done_chunks.add(c_idx)
+                                          state["done_bytes"] += need
+                                          state["session_bytes"] += need
+                                          state["chunks_since_refresh"] += 1
+                                          now = time.time()
+                                          if (now - state["last_log"]) >= 5.0 or state["done_bytes"] >= content_len:
+                                              state["last_log"] = now
+                                              el = max(0.2, now - t0)
+                                              sess_kbps = round((state["session_bytes"] / 1024.0) / el, 0)
+                                              pct = round((state["done_bytes"] / content_len) * 100.0, 1)
+                                              print(f"  [DirectProxy] {label}: {round(state['done_bytes']/1048576, 1)}/{round(content_len/1048576, 1)} MB ({pct}%) @ {int(sess_kbps)} KB/s", flush=True)
+                                              if el >= 22.0 and sess_kbps < 28.0 and pct < 85.0:
+                                                  print(f"  [DirectProxy] {label} slow ({int(sess_kbps)} KB/s) — saving progress & switching proxy.", flush=True)
+                                                  state["err"] = f"slow_{int(sess_kbps)}KB/s"
+                                                  state["failed"] = True
+                                                  return False
+                                      return True
+                                  else:
+                                      with write_lock:
+                                          state["err"] = f"short_read_{len(buf)}/{need}"
+                              except Exception as ex:
+                                  with write_lock:
+                                      state["err"] = f"{type(ex).__name__}"
+                                  time.sleep(0.4 * (tr + 1))
+                          with write_lock:
+                              state["failed"] = True
+                          return False
+
+                      workers = min(2, len(pending))
+                      with ThreadPoolExecutor(max_workers=workers) as ex:
+                          list(ex.map(_dl_chunk, pending))
+
+                      ok_done = (len(done_chunks) == total_chunks and dst_path.exists() and dst_path.stat().st_size == content_len)
+                      if not ok_done:
+                          print(f"  [DirectProxy] {label} stopped ({state['err'] or 'incomplete'}): saved {round(state['done_bytes']/1048576, 1)}/{round(content_len/1048576, 1)} MB ({len(done_chunks)}/{total_chunks} chunks).", flush=True)
+                      return ok_done, (state["err"] or ("ok" if ok_done else "incomplete"))
+
+                  # גיבוי ללא contentLength ידוע
+                  try:
+                      r = requests.get(url, headers=base_hdrs, proxies=proxies, timeout=(8, 20), stream=True)
+                      if r.status_code not in (200, 206):
+                          sc = r.status_code
+                          r.close()
+                          return False, f"HTTP_{sc}"
+                      got = 0
+                      with open(dst_path, "wb") as fp:
+                          for blk in r.iter_content(chunk_size=65536):
+                              if (time.time() - t0) > max_sec:
+                                  r.close()
+                                  return False, f"timeout>{max_sec}s"
+                              if blk:
+                                  fp.write(blk)
+                                  got += len(blk)
+                      r.close()
+                      return (got > 32768), ("ok" if got > 32768 else "too_small")
+                  except Exception as ex:
+                      return False, type(ex).__name__
+
+              def _download_hls_playlist_proxy(m3u8_url: str, dst_path: Path, proxies: dict, ua_str: str, label: str, max_sec: int = 220) -> bool:
+                  import threading
+                  t0 = time.time()
+                  hdrs = {"User-Agent": ua_str}
+                  try:
+                      rm = requests.get(m3u8_url, headers=hdrs, proxies=proxies, timeout=12)
+                      if rm.status_code != 200 or "#EXTM3U" not in rm.text or "#EXT-X-KEY" in rm.text:
+                          return False
+                      init_url = ""
+                      segs = []
+                      for ln in rm.text.splitlines():
+                          ln = ln.strip()
+                          if not ln:
+                              continue
+                          if ln.startswith("#EXT-X-MAP:"):
+                              mm = re.search(r'URI="([^"]+)"', ln)
+                              if mm:
+                                  init_url = urllib.parse.urljoin(m3u8_url, mm.group(1))
+                          elif not ln.startswith("#"):
+                              segs.append(urllib.parse.urljoin(m3u8_url, ln))
+                      if not segs:
+                          return False
+                      all_urls = ([init_url] if init_url else []) + segs
+                      seg_dir = dst_path.parent / (dst_path.stem + "_segs")
+                      seg_dir.mkdir(parents=True, exist_ok=True)
+                      state = {"done": 0, "bytes": 0, "failed": False, "last_log": t0}
+                      lk = threading.Lock()
+
+                      def _dl_seg(pair):
+                          idx_s, su = pair
+                          sp = seg_dir / f"{idx_s:05d}.seg"
+                          for tr in range(3):
+                              if state["failed"] or (time.time() - t0) > max_sec:
+                                  return False
+                              try:
+                                  rs = requests.get(su, headers=hdrs, proxies=proxies, timeout=(7, 15))
+                                  if rs.status_code == 200 and rs.content:
+                                      sp.write_bytes(rs.content)
+                                      with lk:
+                                          state["done"] += 1
+                                          state["bytes"] += len(rs.content)
+                                          now = time.time()
+                                          if (now - state["last_log"]) >= 6.0 or state["done"] == len(all_urls):
+                                              state["last_log"] = now
+                                              el = max(0.2, now - t0)
+                                              kbps = round((state["bytes"] / 1024.0) / el, 0)
+                                              print(f"  [DirectProxy HLS] {label}: {state['done']}/{len(all_urls)} segs ({round(state['bytes']/1048576, 1)} MB) @ {int(kbps)} KB/s", flush=True)
+                                      return True
+                              except Exception:
+                                  time.sleep(0.4 * (tr + 1))
+                          state["failed"] = True
+                          return False
+
+                      with ThreadPoolExecutor(max_workers=4) as ex:
+                          ok_all = all(ex.map(_dl_seg, enumerate(all_urls)))
+                      if not ok_all or state["failed"]:
+                          return False
+                      with open(dst_path, "wb") as out_fp:
+                          for idx_s in range(len(all_urls)):
+                              out_fp.write((seg_dir / f"{idx_s:05d}.seg").read_bytes())
+                      shutil.rmtree(seg_dir, ignore_errors=True)
+                      return dst_path.exists() and dst_path.stat().st_size > 16384
+                  except Exception:
+                      return False
+
+              def _refresh_stream_url_on_proxy(cur_vid: str, px_url: str, target_itag: int, want_client: str = "IOS", gl_code: str = "IL"):
+                  proxies = {"http": px_url, "https": px_url}
+                  if want_client == "ANDROID_VR":
+                      cl_obj = {"clientName": "ANDROID_VR", "clientVersion": "1.61.48", "deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L", "hl": "en", "gl": gl_code}
+                      ua_str = "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; Quest 3)"
+                  else:
+                      cl_obj = {"clientName": "IOS", "clientVersion": "20.10.4", "deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82", "hl": "en", "gl": gl_code}
+                      ua_str = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+                  try:
+                      r = requests.post(
+                          "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                          json={"context": {"client": cl_obj}, "videoId": cur_vid},
+                          headers={"Content-Type": "application/json", "User-Agent": ua_str},
+                          proxies=proxies,
+                          timeout=7.0,
+                      )
+                      if r.status_code != 200:
+                          return ""
+                      sd = (r.json().get("streamingData") or {})
+                      for f in (sd.get("adaptiveFormats") or []) + (sd.get("formats") or []):
+                          if isinstance(f, dict) and int(f.get("itag") or -1) == int(target_itag) and f.get("url"):
+                              return str(f["url"])
+                  except Exception:
+                      pass
+                  return ""
+
+              def direct_download_via_proxy(cur_vid: str, px_url: str, probe_meta: dict, info_cache_dir: Path, resume_store: dict = None, resume_dir: Path = None):
+                  if not probe_meta or not probe_meta.get("player_json"):
+                      return None, "no_meta"
+                  j_res = probe_meta["player_json"]
+                  ua_str = probe_meta.get("ua") or HTTP_HEADERS["User-Agent"]
+                  cl_name = str(probe_meta.get("client") or "IOS")
+                  proxies = {"http": px_url, "https": px_url}
+                  vd = j_res.get("videoDetails") or {}
+                  raw_title = str(vd.get("title") or cur_vid).strip()
+                  safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", raw_title)
+                  safe_title = re.sub(r"\s+", " ", safe_title).strip(" .")[:110] or cur_vid
+                  stem = f"{safe_title} [{cur_vid}]"
+
+                  best_v, best_a, best_mux, hls_u = _pick_direct_streams_from_player(j_res, req_h)
+                  work_d = stage_dir / "direct_px"
+                  if work_d.exists():
+                      shutil.rmtree(work_d, ignore_errors=True)
+                  work_d.mkdir(parents=True, exist_ok=True)
+                  if resume_dir is not None:
+                      resume_dir.mkdir(parents=True, exist_ok=True)
+
+                  def _get_resume_slot(kind: str, fmt_obj: dict):
+                      itag = int(fmt_obj.get("itag") or 0)
+                      clen = int(fmt_obj.get("contentLength") or 0)
+                      if resume_store is not None and resume_dir is not None and itag > 0 and clen > 0:
+                          rk = f"{cur_vid}_{kind}_{itag}_{clen}"
+                          if rk not in resume_store:
+                              resume_store[rk] = {"path": resume_dir / f"{rk}.part", "done_chunks": set(), "clen": clen, "itag": itag}
+                          return resume_store[rk]["path"], resume_store[rk], itag, clen
+                      return (work_d / f"{kind}.raw"), None, itag, clen
+
+                  # מסלול 1: אודיו בלבד
+                  if is_audio and best_a:
+                      a_path, a_res, a_itag, a_len = _get_resume_slot("aud", best_a)
+                      a_ok, a_err = _download_url_chunked_proxy(
+                          best_a["url"], a_path, proxies, ua_str, a_len, "Audio", max_sec=180,
+                          resume_entry=a_res,
+                          refresh_url_fn=(lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, a_itag, cl_name)) if a_itag else None
+                      )
+                      if a_ok:
+                          ext_map = {"audio": ".mp3", "audio_m4a": ".m4a", "audio_opus": ".opus", "audio_flac": ".flac", "audio_wav": ".wav"}
+                          dst_ext = ext_map.get(quality, ".mp3")
+                          out_fp = stage_dir / f"{stem}{dst_ext}"
+                          ff_a = ["/usr/bin/ffmpeg", "-y", "-i", str(a_path), "-vn", "-dn", "-map_chapters", "-1"]
+                          if dst_ext == ".mp3":
+                              ff_a += ["-c:a", "libmp3lame", "-b:a", "320k"]
+                          elif dst_ext == ".m4a":
+                              ff_a += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+                          elif dst_ext == ".opus":
+                              ff_a += ["-c:a", "libopus", "-b:a", "160k"]
+                          elif dst_ext == ".flac":
+                              ff_a += ["-c:a", "flac"]
+                          else:
+                              ff_a += ["-c:a", "pcm_s16le"]
+                          ff_a.append(str(out_fp))
+                          if subprocess.run(ff_a, capture_output=True, check=False).returncode == 0 and out_fp.exists() and out_fp.stat().st_size > 8192:
+                              _write_proxy_info_json(info_cache_dir, stem, cur_vid, j_res)
+                              return out_fp, "ok"
+                      return None, f"audio_{a_err}"
+
+                  # מסלול 2: Adaptive Video HD + Audio ישירות (עם אודיו קודם + URL Refresh ב-403 + Resume חוצה-פרוקסי!)
+                  last_direct_err = "no_stream"
+                  if best_v and best_a:
+                      v_h = int(best_v.get("height") or 0)
+                      a_path, a_res, a_itag, a_len = _get_resume_slot("aud", best_a)
+                      v_path, v_res, v_itag, v_len = _get_resume_slot("vid", best_v)
+                      print(f"  [DirectProxy] Downloading {v_h}p video (itag={v_itag}, {round(v_len/1048576, 1)} MB) + audio (itag={a_itag}, {round(a_len/1048576, 1)} MB) via {cl_name}...", flush=True)
+
+                      a_ok, a_err = _download_url_chunked_proxy(
+                          best_a["url"], a_path, proxies, ua_str, a_len, "Audio", max_sec=120,
+                          resume_entry=a_res,
+                          refresh_url_fn=(lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, a_itag, cl_name)) if a_itag else None
+                      )
+                      if not a_ok:
+                          last_direct_err = f"aud:{a_err}"
+                      else:
+                          v_ok, v_err = _download_url_chunked_proxy(
+                              best_v["url"], v_path, proxies, ua_str, v_len, f"Video {v_h}p", max_sec=280,
+                              resume_entry=v_res,
+                              refresh_url_fn=(lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, v_itag, cl_name)) if v_itag else None
+                          )
+                          if v_ok:
+                              out_mp4 = stage_dir / f"{stem}.mp4"
+                              mux_cmd = ["/usr/bin/ffmpeg", "-y", "-i", str(v_path), "-i", str(a_path), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-dn", "-map_chapters", "-1", "-movflags", "+faststart", str(out_mp4)]
+                              if subprocess.run(mux_cmd, capture_output=True, check=False).returncode == 0 and out_mp4.exists() and out_mp4.stat().st_size > 32768:
+                                  _write_proxy_info_json(info_cache_dir, stem, cur_vid, j_res)
+                                  return out_mp4, "ok"
+                              out_mkv = stage_dir / f"{stem}.mkv"
+                              mux_mkv = ["/usr/bin/ffmpeg", "-y", "-i", str(v_path), "-i", str(a_path), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-dn", "-map_chapters", "-1", str(out_mkv)]
+                              if subprocess.run(mux_mkv, capture_output=True, check=False).returncode == 0 and out_mkv.exists() and out_mkv.stat().st_size > 32768:
+                                  _write_proxy_info_json(info_cache_dir, stem, cur_vid, j_res)
+                                  return out_mkv, "ok"
+                              last_direct_err = "ffmpeg_mux_failed"
+                          else:
+                              last_direct_err = f"vid:{v_err}"
+                              # אם כבר צברנו מעל 8MB ב-resume_store, מדלגים על HLS כדי שהפרוקסי הבא ימשיך מהנקודה שנשמרה!
+                              if v_res is not None and len(v_res["done_chunks"]) >= 4:
+                                  return None, last_direct_err
+
+                  # מסלול 3: IOS HLS Master Manifest (.m3u8) ללא תלות ב-yt-dlp
+                  if hls_u:
+                      try:
+                          rm = requests.get(hls_u, headers={"User-Agent": ua_str}, proxies=proxies, timeout=12)
+                          if rm.status_code == 200 and "#EXTM3U" in rm.text:
+                              audio_groups = {}
+                              variants = []
+                              lines = [l.strip() for l in rm.text.splitlines() if l.strip()]
+                              for i_l, ln in enumerate(lines):
+                                  if ln.startswith("#EXT-X-MEDIA:") and "TYPE=AUDIO" in ln:
+                                      mg = re.search(r'GROUP-ID="([^"]+)"', ln)
+                                      mu = re.search(r'URI="([^"]+)"', ln)
+                                      is_def = ("DEFAULT=YES" in ln)
+                                      if mg and mu:
+                                          gid = mg.group(1)
+                                          if gid not in audio_groups or is_def:
+                                              audio_groups[gid] = urllib.parse.urljoin(hls_u, mu.group(1))
+                                  elif ln.startswith("#EXT-X-STREAM-INF:") and i_l + 1 < len(lines) and not lines[i_l + 1].startswith("#"):
+                                      mr = re.search(r"RESOLUTION=\d+x(\d+)", ln)
+                                      mb = re.search(r"BANDWIDTH=(\d+)", ln)
+                                      ma = re.search(r'AUDIO="([^"]+)"', ln)
+                                      h_val = int(mr.group(1)) if mr else 0
+                                      bw_val = int(mb.group(1)) if mb else 0
+                                      variants.append((h_val, bw_val, ma.group(1) if ma else "", urllib.parse.urljoin(hls_u, lines[i_l + 1])))
+                              if variants:
+                                  fit = [v for v in variants if v[0] <= req_h] or variants
+                                  best_var = max(fit, key=lambda x: (x[0], x[1]))
+                                  v_h, _, a_gid, v_m3u8 = best_var
+                                  a_m3u8 = audio_groups.get(a_gid, "")
+                                  print(f"  [DirectProxy HLS] Downloading {v_h}p HLS stream via {cl_name}...", flush=True)
+                                  hv_p = work_d / "hls_vid.ts"
+                                  if _download_hls_playlist_proxy(v_m3u8, hv_p, proxies, ua_str, f"HLS Video {v_h}p", max_sec=240):
+                                      ha_p = work_d / "hls_aud.ts"
+                                      has_sep_a = bool(a_m3u8 and _download_hls_playlist_proxy(a_m3u8, ha_p, proxies, ua_str, "HLS Audio", max_sec=140))
+                                      out_mp4 = stage_dir / f"{stem}.mp4"
+                                      if has_sep_a:
+                                          ff_h = ["/usr/bin/ffmpeg", "-y", "-i", str(hv_p), "-i", str(ha_p), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-dn", "-map_chapters", "-1", "-movflags", "+faststart", str(out_mp4)]
+                                      else:
+                                          ff_h = ["/usr/bin/ffmpeg", "-y", "-i", str(hv_p), "-c", "copy", "-dn", "-map_chapters", "-1", "-movflags", "+faststart", str(out_mp4)]
+                                      if subprocess.run(ff_h, capture_output=True, check=False).returncode == 0 and out_mp4.exists() and out_mp4.stat().st_size > 32768:
+                                          _write_proxy_info_json(info_cache_dir, stem, cur_vid, j_res)
+                                          return out_mp4, "ok_hls"
+                      except Exception as hls_ex:
+                          print(f"  [DirectProxy HLS] error: {type(hls_ex).__name__}: {hls_ex}", flush=True)
+                  return None, last_direct_err
+
+              def run_proxy_ytdlp(cmd_list, stall_sec: int = 28, max_total_sec: int = 360):
+                  import threading
+                  out_buf = []
+                  def _reader(pipe):
+                      try:
+                          for ln in iter(pipe.readline, ""):
+                              out_buf.append(ln)
+                              if len(out_buf) > 120:
+                                  del out_buf[:40]
+                      except Exception:
+                          pass
+                  proc = subprocess.Popen(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                  t_rd = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
+                  t_rd.start()
+
+                  t_start = time.time()
+                  last_growth_t = t_start
+                  last_bytes = 0
+                  saw_data = False
+                  killed_reason = ""
+
+                  while proc.poll() is None:
+                      time.sleep(2.0)
+                      now = time.time()
+                      cur_bytes = 0
+                      try:
+                          for p in stage_dir.rglob("*"):
+                              if p.is_file():
+                                  cur_bytes += p.stat().st_size
+                      except Exception:
+                          pass
+                      if cur_bytes > last_bytes + 4096:
+                          last_bytes = cur_bytes
+                          last_growth_t = now
+                          saw_data = True
+                      eff_stall = 45 if saw_data else stall_sec
+                      if (now - last_growth_t) >= eff_stall:
+                          killed_reason = f"stalled>{eff_stall}s (got={round(last_bytes / (1024 * 1024), 2)}MB)"
+                          try:
+                              proc.kill()
+                          except Exception:
+                              pass
+                          break
+                      if (now - t_start) >= max_total_sec:
+                          killed_reason = f"max_time>{max_total_sec}s (got={round(last_bytes / (1024 * 1024), 2)}MB)"
+                          try:
+                              proc.kill()
+                          except Exception:
+                              pass
+                          break
+
+                  try:
+                      proc.wait(timeout=5)
+                  except Exception:
+                      pass
+                  t_rd.join(timeout=2)
+                  return proc.returncode, "".join(out_buf[-40:]), killed_reason
+
+              px_extra_args = [
+                  "--force-ipv4",
+                  "--no-mtime",
+                  "--js-runtimes", "deno",
+                  "--http-chunk-size", "4M",
+              ]
+              if mode != "collection":
+                  px_extra_args.append("--no-playlist")
+              else:
+                  px_extra_args += ["--yes-playlist", "--playlist-end", "35"]
+              if clip_start or clip_end:
+                  _ps = clip_start or "00:00:00"
+                  _pe = clip_end or "inf"
+                  px_extra_args += ["--download-sections", f"*{_ps}-{_pe}", "--force-keyframes-at-cuts"]
+              if sb:
+                  px_extra_args += ["--sponsorblock-remove", "sponsor,intro,outro,selfpromo,interaction"]
+              if chapters and not is_audio:
+                  px_extra_args += ["--split-chapters"]
+
+              for u_idx, cur_url in enumerate(target_urls, 1):
                   cur_vid = extract_vid_id(cur_url)
                   print(f"\n>>> Processing URL {u_idx}/{len(target_urls)}: {cur_url} (Quality: {quality})", flush=True)
 
@@ -1677,7 +2641,7 @@ jobs:
           telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
           telemetry["file_mb"] = file_mb
           notes = json.dumps({
-              "v": 23.21,
+              "v": 23.22,
               "size": zip_size,
               "video_title": primary_file.stem,
               "quality_info": f"{quality_report} ({file_mb} MB)",
