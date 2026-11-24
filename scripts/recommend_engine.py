@@ -210,8 +210,8 @@ class AIRouter:
         for extra in found:
             if "flash" in extra.lower() and extra not in ranked:
                 ranked.append(extra)
-        print(f"AIRouter live Gemini ladder: {ranked[:6]}", flush=True)
-        return ranked[:6] or list(self.PREFERRED_GEMINI[:5])
+        print(f"AIRouter live Gemini ladder: {ranked[:10]}", flush=True)
+        return ranked[:10] or list(self.PREFERRED_GEMINI[:5])
 
     def _discover_groq_models(self):
         if not self.groq_key:
@@ -461,8 +461,11 @@ class AIRouter:
                         skip_aliases.add(alias)
                     elif "429" in es or "rate_limit" in es.lower():
                         self.cooldowns[(alias, m_name)] = time.time() + 30
-                        self.cooldowns[(alias, "*")] = time.time() + 15
-                        self.key_stats[alias]["status"] = "quota_429"; skip_aliases.add(alias)
+                        low_429 = es.lower()
+                        if any(k in low_429 for k in ("tokens per day", "tpd", "daily", "insufficient_quota", "billing")):
+                            self.cooldowns[(alias, "*")] = time.time() + 30
+                            skip_aliases.add(alias)
+                        self.key_stats[alias]["status"] = "quota_429"
         return None, ""
 
     def call_json(self, prompt_text: str, timeout_sec: int = 16, stage: str = "general"):
@@ -479,19 +482,21 @@ class AIRouter:
                 self.rr_cursor += 1
             key_indices = [(start_k + i) % len(self.gemini_keys) for i in range(len(self.gemini_keys))]
 
+            prev_tried_any = True
             for pass_i in range(2):
                 now, tried_any, tried_models = time.time(), False, set()
-                cd_grace = 0.0 if pass_i == 0 else 10.0
-                for m_name in (self.gemini_models if pass_i == 0 else self.gemini_models[:2]):
+                cd_grace = 0.0 if pass_i == 0 else (95.0 if not prev_tried_any else 10.0)
+                cand_models = self.gemini_models if (pass_i == 0 or not prev_tried_any) else self.gemini_models[:3]
+                for m_name in cand_models:
                     if m_name in self.dead_models or self.cooldowns.get(("*", m_name), 0) > now + cd_grace:
                         continue
                     global_503 = False
                     for k_idx in key_indices:
                         alias = f"Gemini#{k_idx + 1}"
-                        if alias in self.dead_keys or self.cooldowns.get((alias, m_name), 0) > now + cd_grace:
+                        if alias in self.dead_keys or self.cooldowns.get((alias, m_name), 0) > now + (10.0 if pass_i == 1 else 0.0):
                             continue
                         tried_any = True; tried_models.add(m_name); t0 = time.time()
-                        m_to = min(timeout_sec, (18 if "lite" in m_name else 16) if is_planner else (20 if "lite" in m_name else 18))
+                        m_to = min(timeout_sec, 16 if "lite" in m_name else 15)
                         try:
                             res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_to)
                             self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
@@ -528,7 +533,7 @@ class AIRouter:
                                 elif any(k in low_e for k in ("504", "500", "internal", "deadline_exceeded", "timeout")):
                                     self.cooldowns[(alias, m_name)] = time.time() + 14; self.key_stats[alias]["status"] = "busy_503"
                                 elif any(k in low_e for k in ("503", "unavailable", "high demand")):
-                                    self.cooldowns[(alias, m_name)] = time.time() + 30
+                                    self.cooldowns[(alias, m_name)] = time.time() + 14
                                     self.cooldowns[("*", m_name)] = time.time() + 90
                                     self.key_stats[alias]["status"] = "busy_503"; global_503 = True
                             if bad_k: self._add_alert(f"⚠️ {alias} לא תקין או חסום (401/403) — בדוק את ה-Secret ב-GitHub.")
@@ -538,6 +543,7 @@ class AIRouter:
                         b_res, b_mod = self._try_fast_backups(prompt_text, stage)
                         if b_res is not None: return b_res, b_mod
                 if pass_i == 0:
+                    prev_tried_any = tried_any
                     if not backups_tried and (self.groq_key or self.cerebras_key or self.openrouter_key):
                         backups_tried = True
                         b_res, b_mod = self._try_fast_backups(prompt_text, stage)
@@ -552,8 +558,8 @@ class AIRouter:
             "has_github_models_backup": False,
             "has_groq_backup": bool((self.groq_key and self.groq_models) or (self.cerebras_key and self.cerebras_models) or (self.openrouter_key and self.openrouter_models)),
             "active_ladder": (
-                list(self.gemini_models[:4])
-                + [f"groq:{m}" for m in self.groq_models[:2]]
+                list(self.gemini_models[:6])
+                + [f"groq:{m}" for m in self.groq_models[:3]]
                 + [f"cerebras:{m}" for m in self.cerebras_models[:2]]
                 + [f"openrouter:{m}" for m in self.openrouter_models[:1]]
             ),
