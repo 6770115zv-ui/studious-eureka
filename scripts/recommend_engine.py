@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from PIL import Image
 
+t_rec_start = time.time()
 req_id = os.environ.get("REQ_ID", "").strip()
 query = os.environ.get("QUERY", "").strip()
 channel_input = os.environ.get("CHANNEL", "").strip()
@@ -886,7 +887,8 @@ if clean_q:
                         expanded_queries.append(qs)
                         query_meta_map[qs.lower()] = {"angle": ang, "note_he": nh}
             if isinstance(g_exp.get("suggestions_he"), list):
-                suggested_searches = [str(x).strip() for x in g_exp["suggestions_he"] if str(x).strip()][:16]
+                cleaned_s = [re.sub(r"\s+", " ", str(x).replace("?", "").replace("؟", "")).strip() for x in g_exp["suggestions_he"]]
+                suggested_searches = list(dict.fromkeys(s for s in cleaned_s if len(s) >= 2))[:16]
     if len(expanded_queries) < 3:
         def _tr_lg(lg):
             if lg == "he" and any("\u0590" <= ch <= "\u05FF" for ch in clean_q): return ""
@@ -1119,7 +1121,7 @@ def enrich(c):
         except Exception: pass
 
 if selected_pool:
-    enrich_cap = 600 if (channel_input or season_info or min_views > 0) else min(len(selected_pool), 300)
+    enrich_cap = min(len(selected_pool), 600 if (channel_input or season_info or min_views > 0 or sort_by in ("date_desc", "date_asc", "likes", "quality_score")) else max(300, max_results + 120))
     to_enrich = list(selected_pool[:enrich_cap]) + [c for c in selected_pool[enrich_cap:] if c.get("is_il_stub")][:100]
     with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, to_enrich))
     selected_pool = _filter_noise([c for c in selected_pool if not (c.get("is_il_stub") and str(c.get("title") or "").strip() == str(c.get("id") or "").strip())])
@@ -1399,9 +1401,30 @@ if translate_titles and pool:
         it["title_he"] = src
         if count_foreign_alpha(src) >= 3: need_tr.append((idx, src))
     if need_tr:
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            for (i_idx, _), he_res in zip(need_tr, ex.map(lambda p: translate_one_pure_he(p[1]), need_tr)):
-                pool[i_idx]["title_he"] = he_res
+        fallback_items, pure_items = [], []
+        for idx, src in need_tr:
+            if any("\u0590" <= ch <= "\u05FF" for ch in src):
+                fallback_items.append((idx, src))
+            else:
+                pure_items.append((idx, src))
+        for b_i in range(0, len(pure_items), 15):
+            sl = pure_items[b_i:b_i + 15]
+            prepped = [_protect_terms_latin(_decap_latin(s)).replace("\n", " ").strip() for _, s in sl]
+            b_tr = _gtrans_req("\n".join(prepped), tl="iw", sl="auto", clients=("gtx",), timeout=14)
+            lines = [ln.strip() for ln in b_tr.splitlines() if ln.strip()] if b_tr else []
+            if len(lines) == len(sl):
+                for (i_idx, orig_s), tr_ln in zip(sl, lines):
+                    cand = _restore_terms_he(tr_ln)
+                    if count_foreign_alpha(cand) >= 3:
+                        fallback_items.append((i_idx, orig_s))
+                    else:
+                        pool[i_idx]["title_he"] = cand
+            else:
+                fallback_items.extend(sl)
+        if fallback_items:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for (i_idx, _), he_res in zip(fallback_items, ex.map(lambda p: translate_one_pure_he(p[1]), fallback_items)):
+                    pool[i_idx]["title_he"] = he_res
 
 def fetch_sharp_webp_thumb(item):
     vid = item.get("id", "")
@@ -1450,7 +1473,7 @@ ai_trace = {
     "strategy_he": ai_strategy_he,
     "queries": query_stats,
     "refinement_tips_he": ai_refinement_tips,
-    "pipeline": {"raw_total": len(raw), "unique_cands": len(cands), "sent_to_ai": sum(ai_sent_by_q.values()), "ai_kept": len(selected_pool), "final_shown": len(pool)},
+    "pipeline": {"raw_total": len(raw), "unique_cands": len(cands), "sent_to_ai": sum(ai_sent_by_q.values()), "ai_kept": len(selected_pool), "final_shown": len(pool), "elapsed_sec": round(time.time() - t_rec_start, 1)},
     "prompts_summary": {"user_filter_rule": filter_prompt, "langs": search_langs, "content_type": content_type, "ranking_formula": "ai_score * 1.8 + log10(views + 1)" if sort_by == "relevance" else sort_by},
 }
 
