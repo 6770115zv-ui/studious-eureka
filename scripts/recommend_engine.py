@@ -842,18 +842,29 @@ CTYPE_HINTS = {"highlights": {"en": "highlights", "es": "resumen", "he": "תקצ
 LANG_NAMES = {"he": "Hebrew", "en": "English", "es": "Spanish", "fr": "French", "it": "Italian", "de": "German", "pt": "Portuguese", "ar": "Arabic"}
 STOP_W = {"the","and","for","with","from","this","that","are","was","you","your","not","but","all","can","how","who","why","what","עם","של","על","את","אל","כל","הוא","היא","גם","לא","או","מה","איך"}
 
-expanded_queries, suggested_searches, query_meta_map, ai_refinement_tips = [], [], {}, []
+expanded_queries, suggested_searches, query_meta_map, ai_refinement_tips, orig_grounding_hits = [], [], {}, [], []
 ai_strategy_he = planner_model_used = ""
 if clean_q:
     expanded_queries.append(clean_q)
     query_meta_map[clean_q.lower()] = {"angle": "original", "note_he": "השאילתה המקורית שלך"}
     if ai_router.has_any_provider() and not is_similar:
+        date_op_pre = f" {season_info[2]}" if season_info else ""
+        if not channel_input:
+            orig_grounding_hits = fetch_search(f"{clean_q}{date_op_pre}".strip(), "", 80)
+        gt_lines = [f"- {h.get('title', '')[:90]} ({h.get('channel', '')[:30]})" for h in orig_grounding_hits[:6] if h.get("title")]
+        _gt_block = (
+            "REAL YOUTUBE TOP RESULTS FOR THIS EXACT QUERY (GROUND TRUTH — ALWAYS derive the real-world meaning of Hebrew slang, portmanteaus, nicknames or shows from these actual titles/channels; NEVER guess a different meaning!):\n"
+            + "\n".join(gt_lines) + "\n"
+        ) if gt_lines else ""
+        _modesty_line = f"User Focus/Modesty Rule (EVERY generated query MUST strictly comply with this rule): {filter_prompt}\n" if filter_prompt else ""
         lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
         _en_hint = gtrans_simple(clean_q, "en") if any("\u0590" <= ch <= "\u05FF" for ch in clean_q) else ""
         _en_hint_line = f"Literal English translation hint: \"{_en_hint}\" (interpret sports/domain terms properly — e.g. 'הצלות' in football = goalkeeper saves / penalty saves, 'בישולים' = assists, 'שערים' = goals, 'נס זלגיריס' = Maccabi Tel Aviv vs Zalgiris 2004 miracle).\n" if _en_hint else ""
         exp_prompt = (
             f"Current date: {datetime.date.today().strftime('%B %Y')}.\n"
             f"User input (short keyword OR free-form natural-language request): \"{clean_q}\"\n"
+            + _gt_block
+            + _modesty_line
             + _en_hint_line
             + f"Target Languages: {lang_desc} | Content preference: {content_type}.\n"
             "You are an elite YouTube Research & Discovery Strategist. Turn the user's exact intent into razor-sharp, high-signal YouTube search queries across ANY domain (sports, tech, history, lectures, documentaries, etc.).\n"
@@ -988,11 +999,13 @@ if channel_input:
     ch_all = fetch_channel_vids(ch_base, uc_id, resolved_ch, sort_by, max(max_results + 120, 500))
     raw.extend([v for v in ch_all if not q_words or any(w in str(v.get("title") or "").lower() for w in q_words)])
 else:
-    jobs = [(eq, f"{eq}{date_op}".strip(), sp) for idx_q, eq in enumerate(expanded_queries) for sp in (("", sp_code) if idx_q < 5 else ("",))]
+    jobs = [(eq, f"{eq}{date_op}".strip(), sp) for idx_q, eq in enumerate(expanded_queries) for sp in (("", sp_code) if idx_q < 5 else ("",)) if not (idx_q == 0 and sp == "" and orig_grounding_hits)]
     per_q_cap = max(55, min(120, (max_results * 2) // max(1, len(expanded_queries)) + 30))
     buckets_by_q = {}
     with ThreadPoolExecutor(max_workers=10) as ex:
         results_per_job = list(ex.map(lambda j: (j[0], fetch_search(j[1], j[2], per_q_cap)), jobs))
+    if orig_grounding_hits and expanded_queries:
+        results_per_job.insert(0, (expanded_queries[0], orig_grounding_hits))
     for base_eq, b in results_per_job:
         s_set = query_hits_map.setdefault(base_eq, set())
         q_list = buckets_by_q.setdefault(base_eq, [])
@@ -1001,10 +1014,18 @@ else:
             if vid_b and vid_b not in s_set:
                 s_set.add(vid_b); it_b["source_q"] = base_eq; q_list.append(it_b)
     q_order = [eq for eq in expanded_queries if eq in buckets_by_q]
-    for r_i in range(max((len(buckets_by_q[eq]) for eq in q_order), default=0)):
-        for eq in q_order:
-            if r_i < len(buckets_by_q[eq]):
-                raw.append(buckets_by_q[eq][r_i])
+    cursors = {eq: 0 for eq in q_order}
+    while True:
+        progressed = False
+        for idx_o, eq in enumerate(q_order):
+            arr = buckets_by_q[eq]
+            for _ in range(3 if idx_o == 0 else 1):
+                if cursors[eq] < len(arr):
+                    raw.append(arr[cursors[eq]])
+                    cursors[eq] += 1
+                    progressed = True
+        if not progressed:
+            break
 
 for il_vid in il_seed_ids:
     raw.append({"id": il_vid, "title": il_vid, "channel": "", "channel_id": "", "view_count": 0, "duration": 0, "matched_date_op": True, "is_il_stub": True})
