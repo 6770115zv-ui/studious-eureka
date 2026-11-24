@@ -39,6 +39,7 @@ expand_queries = "[expand]" in fp_low
 m_ctype = re.search(r"\[ctype:([a-z0-9_]+)\]", fp_low)
 content_type = m_ctype.group(1) if m_ctype else "all"
 no_gaming = "[no_gaming]" in fp_low
+no_thumbs = "[no_thumbs]" in fp_low
 m_excl = re.search(r"\[excl:([^\]]+)\]", filter_prompt, flags=re.I)
 exclude_terms = [urllib.parse.unquote(x).strip().lower() for x in (m_excl.group(1).split(",") if m_excl else []) if x.strip()]
 
@@ -55,7 +56,7 @@ SEASON_RANGES = {
 }
 season_info = SEASON_RANGES.get(season_filter)
 sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "relevance"
-filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
+filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|NO_THUMBS|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
 
 try:
     from google import genai as _genai
@@ -802,9 +803,12 @@ def fetch_channel_vids(base_url: str, uc_id: str, ch_title: str, sort_mode: str,
             vid = v.get("id")
             if vid and len(vid) == 11 and vid not in seen_vids:
                 seen_vids.add(vid); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
-    if playlist_mode == "streams" and base_url: add_items(fetch_yt_json(f"{base_url}/streams", str(target_count), uc_id, ch_title))
-    if uc_id and sort_mode in ("views", "likes", "quality_score", "relevance") and playlist_mode != "uu_all":
+    if playlist_mode == "streams" and base_url:
+        add_items(fetch_yt_json(f"{base_url}/streams", str(target_count), uc_id, ch_title))
+        if collected: return collected
+    if uc_id and (playlist_mode == "uulp" or (sort_mode in ("views", "likes", "quality_score", "relevance") and playlist_mode != "uu_all")):
         add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, uc_id, 30, target_count))
+        if playlist_mode == "uulp" and collected: return collected
     if uc_id and len(collected) < target_count:
         add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, uc_id, max(35, min(85, (target_count // 25) + 15)), max(target_count, 800)))
     return collected
@@ -1128,8 +1132,9 @@ if selected_pool:
 
 if allowed_uc_ids:
     selected_pool = [c for c in selected_pool if c.get("channel_id") in allowed_uc_ids or str(c.get("channel") or "").strip().lower() in allowed_ch_names]
-elif channel_input and resolved_ch:
-    selected_pool = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
+elif channel_input and resolved_ch and not resolved_ch.startswith("@"):
+    matched_ch = [c for c in selected_pool if str(c.get("channel") or "").strip().lower() == resolved_ch.strip().lower()]
+    if matched_ch: selected_pool = matched_ch
 if season_info:
     s_min, s_max, _ = season_info
     selected_pool = [c for c in selected_pool if (s_min <= str(c.get("upload_date") or "") <= s_max) or (not c.get("upload_date") and c.get("matched_date_op"))]
@@ -1208,7 +1213,7 @@ if filter_prompt:
             return True
 
         if len(chunks_ai) > 1 and (len(ai_router.gemini_keys) >= 2 or ai_router.groq_key or ai_router.cerebras_key or ai_router.openrouter_key):
-            scorer_workers = min(len(chunks_ai), max(2, len(ai_router.gemini_keys) * 2 + int(bool(ai_router.groq_key)) + int(bool(ai_router.cerebras_key))), 5)
+            scorer_workers = min(len(chunks_ai), max(1, len(ai_router.gemini_keys) + int(bool(ai_router.groq_key)) + int(bool(ai_router.cerebras_key))), 4)
             with ThreadPoolExecutor(max_workers=scorer_workers) as ex:
                 for pair_c, (gd, mu) in zip(chunks_ai, ex.map(_score_ai_chunk, chunks_ai)):
                     if not _ingest_ai_resp(gd, mu): failed_chunks.append(pair_c)
@@ -1338,7 +1343,7 @@ HE_POST = [
     ('\\bדגשים\\b|\\bהבהרה\\b|\\bהבהרות\\b|הבולטים של|נקודות השיא', "תקציר"),
     ('עיר האדם|עיר גבר', "מנצ'סטר סיטי"),
 ]
-KEEP_CAPS = {"FC", "UEFA", "FIFA", "NBA", "NFL", "UFC", "HD", "4K", "U19", "U18", "U17", "U16", "U14", "U12", "PSG", "TV", "VIP"}
+KEEP_CAPS = {"FC", "CF", "SC", "AC", "BC", "UEFA", "UCL", "FIFA", "NBA", "NFL", "UFC", "NHL", "MLS", "ATP", "WTA", "MVP", "VAR", "ACL", "GOAT", "AI", "DNA", "API", "URL", "PDF", "US", "USA", "UK", "EU", "IL", "HD", "FHD", "UHD", "QHD", "4K", "8K", "FPS", "U21", "U20", "U19", "U18", "U17", "U16", "U15", "U14", "U12", "PSG", "TV", "VIP", "HQ", "POV", "OST", "DIY", "F1", "CR7", "ESPN", "DAZN", "CBS", "TNT", "BBC", "CNN", "ONE"}
 
 def polish_he(t: str) -> str:
     s = strip_noise(t)
@@ -1446,7 +1451,7 @@ def fetch_sharp_webp_thumb(item):
         except Exception:
             pass
 
-if pool:
+if pool and not no_thumbs:
     with ThreadPoolExecutor(max_workers=24) as ex:
         list(ex.map(fetch_sharp_webp_thumb, pool[:180]))
 
