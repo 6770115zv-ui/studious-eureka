@@ -1411,7 +1411,7 @@ elif is_subs_only:
 print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) | SUBS: {subs_detail_msg or 'none'} <<<", flush=True)
 
 # Iron Rule: ZIP_STORED (compression 0), allowZip64=False, NO .bin extension (NetFree 418 protection)
-MAX_SINGLE_ZIP_BYTES = 1800 * 1024 * 1024
+MAX_SINGLE_ZIP_BYTES = 550 * 1024 * 1024
 tag = "dl-" + req_id
 zip_paths, split_join_meta = [], None
 oversize_target = next((f for f in files if f.stat().st_size > MAX_SINGLE_ZIP_BYTES), None)
@@ -1424,7 +1424,7 @@ elif oversize_target is not None:
     num_parts = max(2, math.ceil(total_sz / MAX_SINGLE_ZIP_BYTES))
     part_target = math.ceil(total_sz / num_parts)
     part_names = []
-    print(f">>> Large file ({round(total_sz/1048576, 1)} MB > 1800 MB): raw binary splitting into {num_parts} parts for automatic lossless reassembly <<<", flush=True)
+    print(f">>> Large file ({round(total_sz/1048576, 1)} MB > 550 MB): raw binary splitting into {num_parts} parts for automatic lossless reassembly <<<", flush=True)
     with open(primary_file, "rb") as src_fp:
         for p_i in range(1, num_parts + 1):
             tmp_dat = pkg_dir / f"part{p_i:02d}.dat"
