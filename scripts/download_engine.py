@@ -263,8 +263,15 @@ def build_srt_string(cues_list) -> str:
     # UTF-8 BOM + RTL markers
     return "\ufeff" + "\r\n\r\n".join(out) + "\r\n"
 
+gtrans_429_event = threading.Event()
+
 def _gtrans_he(text: str, timeout: int = 18, retries: int = 2) -> str:
+    if gtrans_429_event.is_set():
+        return ""
+    saw_429 = False
     for cid in ("gtx", "dict-chrome-ex"):
+        if gtrans_429_event.is_set():
+            return ""
         for att in range(retries):
             try:
                 r = requests.post(
@@ -275,31 +282,39 @@ def _gtrans_he(text: str, timeout: int = 18, retries: int = 2) -> str:
                     timeout=timeout,
                 )
                 if r.status_code == 200:
+                    if "text/html" in (r.headers.get("content-type") or "").lower() or "/sorry" in (r.url or "").lower():
+                        saw_429 = True
+                        break
                     tr = "".join(s.get("trans", "") for s in (r.json().get("sentences") or []) if "trans" in s).strip()
                     if tr:
                         return tr
                     break
-                if r.status_code in (429, 502, 503):
+                if r.status_code == 429:
+                    saw_429 = True
+                    time.sleep(1.5 * (att + 1))
+                elif r.status_code in (502, 503):
                     time.sleep(1.2 * (att + 1))
                 else:
                     break
             except Exception:
                 time.sleep(0.4)
+    if saw_429:
+        gtrans_429_event.set()
     return ""
 
 def translate_batch_guaranteed(batch_cues, _depth: int = 0):
     if not batch_cues:
         return []
     joined = "\n".join(c[2].replace("\n", " ").strip() for c in batch_cues)
-    full_tr = _gtrans_he(joined, timeout=18, retries=2)
-    if full_tr and has_hebrew(full_tr):
-        tr_lines = [ln.strip() for ln in full_tr.splitlines() if ln.strip()]
-        if len(tr_lines) == len(batch_cues):
-            return [[c[0], c[1], t] for c, t in zip(batch_cues, tr_lines)]
-
-    if len(batch_cues) > 4 and _depth < 3:
-        mid = len(batch_cues) // 2
-        return translate_batch_guaranteed(batch_cues[:mid], _depth + 1) + translate_batch_guaranteed(batch_cues[mid:], _depth + 1)
+    if not gtrans_429_event.is_set():
+        full_tr = _gtrans_he(joined, timeout=18, retries=2)
+        if full_tr and has_hebrew(full_tr):
+            tr_lines = [ln.strip() for ln in full_tr.splitlines() if ln.strip()]
+            if len(tr_lines) == len(batch_cues):
+                return [[c[0], c[1], t] for c, t in zip(batch_cues, tr_lines)]
+        if (not gtrans_429_event.is_set()) and len(batch_cues) > 4 and _depth < 3:
+            mid = len(batch_cues) // 2
+            return translate_batch_guaranteed(batch_cues[:mid], _depth + 1) + translate_batch_guaranteed(batch_cues[mid:], _depth + 1)
 
     try:
         from deep_translator import GoogleTranslator
@@ -311,8 +326,14 @@ def translate_batch_guaranteed(batch_cues, _depth: int = 0):
     except Exception:
         pass
 
+    if gtrans_429_event.is_set():
+        return [[s_ms, e_ms, orig_txt] for s_ms, e_ms, orig_txt in batch_cues]
+
     out_batch = []
     for s_ms, e_ms, orig_txt in batch_cues:
+        if gtrans_429_event.is_set():
+            out_batch.append([s_ms, e_ms, orig_txt])
+            continue
         cand = _gtrans_he(orig_txt, timeout=12, retries=1)
         out_batch.append([s_ms, e_ms, cand if (cand and has_hebrew(cand)) else orig_txt])
     return out_batch
@@ -325,37 +346,41 @@ def translate_cues_to_hebrew(cues_list):
     print(f"Translating {len(cues_list)} reconstructed sentences to Hebrew...", flush=True)
     batches = [cues_list[i:i + 25] for i in range(0, len(cues_list), 25)]
     translated = []
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         for rb in ex.map(translate_batch_guaranteed, batches):
             translated.extend(rb)
+    if gtrans_429_event.is_set():
+        print("Google Translate hit HTTP 429 — circuit breaker stopped redundant retries.", flush=True)
     he_chars = sum(1 for _, _, txt in translated for ch in txt if "\u0590" <= ch <= "\u05FF")
     print(f"Translation finished: {len(translated)} cues, {he_chars} Hebrew chars.", flush=True)
     return translated if he_chars > 0 else None
 
+def _clip_cues_window(cues_in):
+    if is_subs_only or not (clip_start or clip_end):
+        return cues_in
+    ws = ts_to_ms(clip_start) if clip_start else 0
+    we = ts_to_ms(clip_end) if clip_end else 10**12
+    if we <= ws:
+        return cues_in
+    sliced = []
+    for s, e, t in cues_in:
+        if e <= ws or s >= we:
+            continue
+        ns, ne = max(0, s - ws), min(we - ws, e - ws)
+        if ne - ns >= 120:
+            sliced.append([ns, ne, t])
+    return sliced or cues_in
+
 def _scale_cues_for_speed(cues_in, do_scale: bool = False):
-    out = cues_in
-    if (not is_subs_only) and (clip_start or clip_end):
-        ws = ts_to_ms(clip_start) if clip_start else 0
-        we = ts_to_ms(clip_end) if clip_end else 10**12
-        if we > ws:
-            sliced = []
-            for s, e, t in out:
-                if e <= ws or s >= we:
-                    continue
-                ns, ne = max(0, s - ws), min(we - ws, e - ws)
-                if ne - ns >= 120:
-                    sliced.append([ns, ne, t])
-            if sliced:
-                out = sliced
     if is_subs_only or not do_scale:
-        return out
+        return cues_in
     try:
         sp = float(speed_val or 1.0)
     except Exception:
-        return out
+        return cues_in
     if sp <= 0 or abs(sp - 1.0) < 0.01:
-        return out
-    return [[int(s / sp), max(int(s / sp) + 120, int(e / sp)), t] for s, e, t in out]
+        return cues_in
+    return [[int(s / sp), max(int(s / sp) + 120, int(e / sp)), t] for s, e, t in cues_in]
 
 def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single: bool = False, proxy_url: str = "", info_json_path: Path = None, apply_speed_scale: bool = False):
     if subs_dir.exists():
@@ -455,7 +480,7 @@ def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single:
         return True, plan[:4]
 
     def _process_raw_sub_text(raw_txt: str, clean_stem: str, lang_code: str, expect_he: bool):
-        clean_cues = clean_and_reconstruct_sentences(raw_txt)
+        clean_cues = _clip_cues_window(clean_and_reconstruct_sentences(raw_txt))
         if not clean_cues:
             return None
         if expect_he or has_hebrew(" ".join(c[2] for c in clean_cues[:12])):
@@ -1405,6 +1430,8 @@ else:
                 elif len(sub_targets) == 1:
                     subs_verified_flag, subs_detail_msg = False, "⚠️ אין כתוביות לסרטון זה ביוטיוב"
 
+    shutil.rmtree(stage_dir, ignore_errors=True)
+    shutil.rmtree(subs_dir, ignore_errors=True)
     files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
     if not files:
         last_errs = " ; ".join(f"#{a.get('n')}:{a.get('err','')}" for a in telemetry.get("attempts", [])[-3:] if not a.get("ok"))
@@ -1670,7 +1697,12 @@ def _collect_side_srts(clean_stem: str, exclude_primary: bool = False):
     srts = [p for p in out_dir.glob("*.srt") if (not exclude_primary or p != primary_file)]
     if not srts and (not exclude_primary) and embedded_srt_saved and embedded_srt_saved.exists():
         srts = [embedded_srt_saved]
-    return [(p, "text", "plain", f"{clean_stem}.he.srt") for p in srts if p.stat().st_size <= 2 * 1024 * 1024]
+    out_atts = []
+    for p in srts:
+        if p.stat().st_size <= 2 * 1024 * 1024:
+            fname = f"{clean_stem}.he.srt" if (p == embedded_srt_saved or len(srts) == 1) else f"{_mail_safe_stem(p.stem)}.srt"
+            out_atts.append((p, "text", "plain", fname))
+    return out_atts
 
 email_sent_status = ""
 email_delivered_ok = False
@@ -1782,6 +1814,7 @@ elif send_email_flag:
         print(f"Email delivery error: {type(e).__name__}: {e}", flush=True)
         email_sent_status = f"שגיאת מייל ({type(e).__name__})"
     finally:
+        shutil.rmtree("/tmp/mail_parts", ignore_errors=True)
         telemetry["email_sec"] = round(time.time() - t_em, 1)
 
 is_cloud_only_done = bool(cloud_only_flag and (drive_web_link or email_delivered_ok))
@@ -1794,7 +1827,7 @@ if cloud_only_flag:
 telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
 telemetry["file_mb"] = file_mb
 notes = json.dumps({
-    "v": 23.30, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
+    "v": 23.31, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
     "subs_verified": subs_verified_flag, "subs_detail": subs_detail_msg, "split_join": split_join_meta,
     "email_status": email_sent_status, "drive_status": drive_status, "drive_url_enc": drive_url_enc,
     "drive_only": is_cloud_only_done, "cloud_only": is_cloud_only_done,
