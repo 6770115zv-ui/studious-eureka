@@ -457,8 +457,6 @@ class AIRouter:
                         self.dead_keys.add(alias); self.key_stats[alias]["status"] = "invalid_key"; skip_aliases.add(alias)
                     elif "404" in es:
                         self.dead_models.add(m_name)
-                    elif "request too large" in es.lower():
-                        skip_aliases.add(alias)
                     elif "429" in es or "rate_limit" in es.lower():
                         self.cooldowns[(alias, m_name)] = time.time() + 30
                         low_429 = es.lower()
@@ -466,6 +464,8 @@ class AIRouter:
                             self.cooldowns[(alias, "*")] = time.time() + 30
                             skip_aliases.add(alias)
                         self.key_stats[alias]["status"] = "quota_429"
+                    elif "request too large" in es.lower():
+                        skip_aliases.add(alias)
         return None, ""
 
     def call_json(self, prompt_text: str, timeout_sec: int = 16, stage: str = "general"):
@@ -496,7 +496,7 @@ class AIRouter:
                         if alias in self.dead_keys or self.cooldowns.get((alias, m_name), 0) > now + (10.0 if pass_i == 1 else 0.0):
                             continue
                         tried_any = True; tried_models.add(m_name); t0 = time.time()
-                        m_to = min(timeout_sec, 16 if "lite" in m_name else 15)
+                        m_to = min(timeout_sec, (18 if is_planner else 16) if "lite" in m_name else (17 if is_planner else 15))
                         try:
                             res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_to)
                             self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
