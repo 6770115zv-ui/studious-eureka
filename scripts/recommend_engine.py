@@ -84,7 +84,7 @@ class AIRouter:
     PREFERRED_GEMINI = [
         "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
         "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.8-flash",
-        "gemini-4-argon", "gemini-4-carbon",
+        "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon",
     ]
     PREFERRED_GROQ_PREFIXES = [
         "qwen/qwen3.8", "qwen/qwen3", "qwen",
@@ -528,7 +528,8 @@ class AIRouter:
                                 elif any(k in low_e for k in ("504", "500", "internal", "deadline_exceeded", "timeout")):
                                     self.cooldowns[(alias, m_name)] = time.time() + 14; self.key_stats[alias]["status"] = "busy_503"
                                 elif any(k in low_e for k in ("503", "unavailable", "high demand")):
-                                    self.cooldowns[(alias, m_name)] = self.cooldowns[("*", m_name)] = time.time() + 10
+                                    self.cooldowns[(alias, m_name)] = time.time() + 30
+                                    self.cooldowns[("*", m_name)] = time.time() + 90
                                     self.key_stats[alias]["status"] = "busy_503"; global_503 = True
                             if bad_k: self._add_alert(f"⚠️ {alias} לא תקין או חסום (401/403) — בדוק את ה-Secret ב-GitHub.")
                             if global_503: break
