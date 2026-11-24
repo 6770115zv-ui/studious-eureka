@@ -32,11 +32,10 @@ jobs:
         env:
           FILTER_PROMPT: ${{ inputs.filter_prompt }}
         run: |
-          PKGS="requests cryptography pillow google-genai"
+          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q requests cryptography pillow google-genai
           if printf '%s' "$FILTER_PROMPT" | grep -qi '\[PL_STREAMS\]'; then
-            PKGS="$PKGS yt-dlp[default,curl-cffi] yt-dlp-ejs"
+            python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs
           fi
-          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre $PKGS
       - name: Smart Multi-Language + Gemini 3.5 Flash-Lite + Sharp WebP Engine
         env:
           REQ_ID: ${{ inputs.request_id }}
