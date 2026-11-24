@@ -402,7 +402,13 @@ def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single:
         base_sub_cmd += ["--cookies", str(cookie_file)]
 
     direct_tracks = {}
+    sub_ip_ban = False
+    def _is_sub_ban_err(err_txt: str) -> bool:
+        low_s = str(err_txt or "").lower()
+        return any(k in low_s for k in ("http error 403", "http error 429", "page needs to be reloaded", "sign in to confirm", "failed to extract any player response"))
+
     def detect_best_sub_candidates():
+        nonlocal sub_ip_ban
         if is_pl_sub:
             return False, []
         info = None
@@ -421,6 +427,8 @@ def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single:
             try:
                 pr = subprocess.run(probe_cmd + [video_url], capture_output=True, text=True, timeout=45, check=False)
                 if pr.returncode != 0 or not pr.stdout.strip():
+                    if _is_sub_ban_err(pr.stderr):
+                        sub_ip_ban = True
                     return False, []
                 info = json.loads(pr.stdout)
             except Exception:
@@ -497,8 +505,11 @@ def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single:
         return dst, len(clean_cues), lang_code, f"כתוביות מקור {lang_code} ({len(clean_cues)} שורות)"
 
     sub_clients = [[], ["--extractor-args", "youtube:player_client=default,web_safari"]] if has_ck else [[], ["--extractor-args", "youtube:player_client=android_vr,mweb"]]
+    if proxy_url:
+        sub_clients = sub_clients[:1]
 
     def try_download_single_sub(flag_args, lang_code, expect_he):
+        nonlocal sub_ip_ban
         if len(flag_args) == 1 and (flag_args[0], lang_code) in direct_tracks and base_stem and not is_pl_sub:
             for px_d in ([{"http": proxy_url, "https": proxy_url}, None] if proxy_url else [None]):
                 try:
@@ -514,8 +525,9 @@ def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single:
                     pass
         for extra_cl in sub_clients:
             sub_p = subprocess.run(base_sub_cmd + extra_cl + flag_args + ["--sub-langs", lang_code, video_url], capture_output=True, text=True, check=False)
-            if sub_p.stderr and "HTTP Error 429" in sub_p.stderr:
-                print(f"Subtitle fetch hit HTTP 429 for {lang_code} — stopping redundant yt-dlp retries.", flush=True)
+            if sub_p.stderr and _is_sub_ban_err(sub_p.stderr):
+                sub_ip_ban = True
+                print(f"Subtitle fetch hit IP/rate block for {lang_code} — stopping redundant yt-dlp retries.", flush=True)
                 break
             cand_files = [p for p in list(subs_dir.glob("*.vtt")) + list(subs_dir.glob("*.srt")) if p.stat().st_size > 15 and not p.name.endswith("live_chat.json")]
             if not cand_files:
@@ -555,26 +567,35 @@ def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single:
         res_sub = try_download_single_sub([sub_flag], lang_code, is_he)
         if res_sub:
             return res_sub
-    if not probe_ok:
-        for fb_lang, is_he in (("he,iw", True), ("en-orig", False), ("en", False), ("es-orig", False), ("es", False), ("fr-orig", False)):
+        if sub_ip_ban:
+            break
+    if (not probe_ok) and (not sub_ip_ban):
+        fb_langs = (("he,iw", True), ("en-orig", False)) if proxy_url else (("he,iw", True), ("en-orig", False), ("en", False), ("es-orig", False), ("es", False), ("fr-orig", False))
+        for fb_lang, is_he in fb_langs:
             res_sub = try_download_single_sub(["--write-subs", "--write-auto-subs"], fb_lang, is_he)
             if res_sub:
                 return res_sub
-    return [], "לסרטון זה אין כתוביות ביוטיוב"
+            if sub_ip_ban:
+                break
+    return [], ("SUB_IP_BAN" if sub_ip_ban else "לסרטון זה אין כתוביות ביוטיוב")
 
 if is_subs_only:
     quality_report = "כתוביות בלבד (SRT)"
-    ok_sub_labels = []
+    ok_sub_labels, saw_sub_ban = [], False
     for cur_url in target_urls:
         srt_list, q_label = fetch_subtitles_for_url(cur_url)
         if srt_list:
             ok_sub_labels.append(q_label)
             for s_file in srt_list:
                 shutil.copy2(str(s_file), str(out_dir / s_file.name))
+        elif q_label == "SUB_IP_BAN":
+            saw_sub_ban = True
     if ok_sub_labels:
         quality_report = ok_sub_labels[0] if len(ok_sub_labels) == 1 else f"{len(ok_sub_labels)}/{len(target_urls)} קובצי כתוביות בעברית"
     files = [p for p in out_dir.rglob("*") if p.is_file() and p.stat().st_size > 0]
     if not files:
+        if saw_sub_ban:
+            raise SystemExit("::error::AZURE_IP_403_BANNED|חסימת IP זמנית בשליפת כתוביות — קופץ לשרת נקי")
         raise SystemExit("::error::לא נמצאו כתוביות עבור קישור זה")
     primary_file = files[0]
 else:
@@ -1418,7 +1439,8 @@ else:
                     if subtitles == "embed" and mf_item.suffix.lower() in (".mp4", ".mkv") and mf_item.stat().st_size < 8000 * 1024 * 1024:
                         emb_tmp = mf_item.with_name("sub_" + mf_item.name)
                         sub_c = "mov_text" if mf_item.suffix.lower() == ".mp4" else "srt"
-                        ff_sub = ["-i", str(mf_item), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c:v", "copy", "-c:a", "copy", "-c:s", sub_c, "-metadata:s:s:0", "language=heb", "-metadata:s:s:0", "title=Hebrew"] + (["-movflags", "+faststart"] if mf_item.suffix.lower() == ".mp4" else []) + [str(emb_tmp)]
+                        s_lang, s_title = ("heb", "Hebrew") if best_srt.name.endswith(".he.srt") else ("und", "Original")
+                        ff_sub = ["-i", str(mf_item), "-i", str(best_srt), "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-dn", "-map_chapters", "-1", "-c:v", "copy", "-c:a", "copy", "-c:s", sub_c, "-metadata:s:s:0", f"language={s_lang}", "-metadata:s:s:0", f"title={s_title}"] + (["-movflags", "+faststart"] if mf_item.suffix.lower() == ".mp4" else []) + [str(emb_tmp)]
                         if _ffmpeg_ok(ff_sub) and emb_tmp.exists():
                             emb_tmp.replace(mf_item)
                         else:
@@ -1430,6 +1452,8 @@ else:
                 elif len(sub_targets) == 1:
                     subs_verified_flag, subs_detail_msg = False, "⚠️ אין כתוביות לסרטון זה ביוטיוב"
 
+    shutil.rmtree(stage_dir, ignore_errors=True)
+    shutil.rmtree(subs_dir, ignore_errors=True)
     shutil.rmtree(stage_dir, ignore_errors=True)
     shutil.rmtree(subs_dir, ignore_errors=True)
     files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
@@ -1456,13 +1480,18 @@ if (not is_audio) and (not is_subs_only) and subtitles == "embed":
         except Exception:
             pass
     if verified_vids > 0:
-        subs_verified_flag = True
+        sub_src = str(telemetry.get("sub_source") or "")
+        is_he_verified = (not sub_src) or sub_src.startswith(("he", "iw")) or sub_src.endswith("->he")
+        subs_verified_flag = is_he_verified
         cn = telemetry.get("sub_cues") or 0
-        subs_detail_msg = (
-            f"✅ כתוביות בעברית מוטמעות ומאומתות ({verified_vids}/{len(vid_outs)} קבצים)"
-            if len(vid_outs) > 1
-            else f"✅ כתוביות בעברית מוטמעות ומאומתות{f' ({cn} שורות)' if cn else ''}"
-        )
+        if is_he_verified:
+            subs_detail_msg = (
+                f"✅ כתוביות בעברית מוטמעות ומאומתות ({verified_vids}/{len(vid_outs)} קבצים)"
+                if len(vid_outs) > 1
+                else f"✅ כתוביות בעברית מוטמעות ומאומתות{f' ({cn} שורות)' if cn else ''}"
+            )
+        else:
+            subs_detail_msg = f"⚠️ הוטמעו כתוביות מקור ({sub_src}{f', {cn} שורות' if cn else ''}) — התרגום לעברית נחסם זמנית"
     elif not subs_detail_msg:
         subs_verified_flag, subs_detail_msg = False, "⚠️ לא אומת ערוץ כתוביות מוטמע בקובץ"
 elif is_subs_only:
@@ -1827,7 +1856,7 @@ if cloud_only_flag:
 telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
 telemetry["file_mb"] = file_mb
 notes = json.dumps({
-    "v": 23.31, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
+    "v": 23.32, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
     "subs_verified": subs_verified_flag, "subs_detail": subs_detail_msg, "split_join": split_join_meta,
     "email_status": email_sent_status, "drive_status": drive_status, "drive_url_enc": drive_url_enc,
     "drive_only": is_cloud_only_done, "cloud_only": is_cloud_only_done,
