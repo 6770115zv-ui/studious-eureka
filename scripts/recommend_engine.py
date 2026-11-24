@@ -486,6 +486,7 @@ class AIRouter:
             for pass_i in range(2):
                 now, tried_any, tried_models = time.time(), False, set()
                 cd_grace = 0.0 if pass_i == 0 else (95.0 if not prev_tried_any else 10.0)
+                key_grace = 0.0 if pass_i == 0 else (35.0 if not prev_tried_any else 10.0)
                 cand_models = self.gemini_models if (pass_i == 0 or not prev_tried_any) else self.gemini_models[:3]
                 for m_name in cand_models:
                     if m_name in self.dead_models or self.cooldowns.get(("*", m_name), 0) > now + cd_grace:
@@ -493,7 +494,7 @@ class AIRouter:
                     global_503 = False
                     for k_idx in key_indices:
                         alias = f"Gemini#{k_idx + 1}"
-                        if alias in self.dead_keys or self.cooldowns.get((alias, m_name), 0) > now + (10.0 if pass_i == 1 else 0.0):
+                        if alias in self.dead_keys or self.cooldowns.get((alias, m_name), 0) > now + key_grace:
                             continue
                         tried_any = True; tried_models.add(m_name); t0 = time.time()
                         m_to = min(timeout_sec, (18 if is_planner else 16) if "lite" in m_name else (17 if is_planner else 15))
@@ -555,7 +556,6 @@ class AIRouter:
         return {
             "sdk": f"google-genai {_GENAI_SDK_VER}",
             "gemini_keys_count": len(self.gemini_keys),
-            "has_github_models_backup": False,
             "has_groq_backup": bool((self.groq_key and self.groq_models) or (self.cerebras_key and self.cerebras_models) or (self.openrouter_key and self.openrouter_models)),
             "active_ladder": (
                 list(self.gemini_models[:6])
@@ -616,11 +616,15 @@ def parse_views_text(v_str) -> int:
         return int(d) if d else 0
     return int(float(m.group(1)) * {"K": 1_000, "MIL": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get((m.group(2) or "").strip(), 1))
 
-def extract_11char_id(s: str) -> str:
+def extract_11char_id(s: str, allow_bare: bool = True) -> str:
     s = str(s or "").strip()
     if re.match(r"^SIMILAR:([a-zA-Z0-9_-]{11})$", s, re.I): return s.split(":", 1)[1]
-    if re.match(r"^[a-zA-Z0-9_-]{11}$", s): return s
-    m = re.search(r"(?:\[|v=|youtu\.be/|/shorts/|/embed/)([a-zA-Z0-9_-]{11})", s)
+    if allow_bare and re.match(r"^[a-zA-Z0-9_-]{11}$", s):
+        if re.search(r"[0-9_-]", s) or len(re.findall(r"[a-z][A-Z]", s)) >= 2:
+            return s
+    mb = re.search(r"\[([a-zA-Z0-9_-]{11})\]", s)
+    if mb: return mb.group(1)
+    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([a-zA-Z0-9_-]{11})(?![a-zA-Z0-9_-])", s)
     return m.group(1) if m else ""
 
 def find_tokens(sub_obj):
@@ -710,7 +714,7 @@ def fetch_yt_json(target_url, limit_str, forced_uc: str = "", forced_name: str =
 is_similar = query.upper().startswith("SIMILAR:")
 if is_similar:
     season_info = None; season_filter = "all"; channel_input = ""
-direct_vid = extract_11char_id(channel_input) or extract_11char_id(query)
+direct_vid = extract_11char_id(channel_input, allow_bare=False) or extract_11char_id(query, allow_bare=True)
 seed_video, related_videos = None, []
 if direct_vid:
     try:
@@ -1027,9 +1031,11 @@ def _filter_noise(items):
 
 cands = _filter_noise(cands)
 cap_pool = max(max_results + 200, 480)
+il_stubs = [c for c in cands if c.get("is_il_stub")]
+regular_cands = [c for c in cands if not c.get("is_il_stub")]
 if sort_by in ("views", "likes", "quality_score"):
-    cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
-selected_pool = cands[:cap_pool]
+    regular_cands.sort(key=lambda x: (x["views"], -x["orig_pos"]), reverse=True)
+selected_pool = regular_cands[:cap_pool] + il_stubs[:100]
 
 thread_local = threading.local()
 def get_sess():
@@ -1114,7 +1120,7 @@ def enrich(c):
 
 if selected_pool:
     enrich_cap = 600 if (channel_input or season_info or min_views > 0) else min(len(selected_pool), 300)
-    to_enrich = list(selected_pool[:enrich_cap]) + [c for c in selected_pool[enrich_cap:] if c.get("is_il_stub")][:40]
+    to_enrich = list(selected_pool[:enrich_cap]) + [c for c in selected_pool[enrich_cap:] if c.get("is_il_stub")][:100]
     with ThreadPoolExecutor(max_workers=32) as ex: list(ex.map(enrich, to_enrich))
     selected_pool = _filter_noise([c for c in selected_pool if not (c.get("is_il_stub") and str(c.get("title") or "").strip() == str(c.get("id") or "").strip())])
 
@@ -1337,11 +1343,15 @@ def polish_he(t: str) -> str:
     for pat, rep in HE_POST: s = re.sub(pat, rep, s, flags=re.I)
     return re.sub(r"\s+", " ", s).strip()
 
+IGNORE_FOREIGN_RX = re.compile(r"\b(?:NBA|UEFA|FIFA|NFL|UFC|NHL|MLS|ATP|WTA|PSG|VAR|MVP|GOAT|FHD|UHD|QHD|HD|FPS|AI|TV|VIP|MP3|MP4|MKV|M4A|FLAC|OPUS|WAV|SRT|VTT|URL|USA|UK|EU|IL|FC|CF|SC|AC|BC|U\d{2}|HQ|POV|OST|DIY|OK|DJ|F1|CR7)\b", re.I)
+
 def count_foreign_alpha(txt: str) -> int:
-    return sum(1 for ch in str(txt or "") if ch.isalpha() and not ("\u0590" <= ch <= "\u05FF"))
+    cleaned = IGNORE_FOREIGN_RX.sub(" ", str(txt or ""))
+    return sum(1 for ch in cleaned if ch.isalpha() and not ("\u0590" <= ch <= "\u05FF"))
 
 def _decap_latin(s: str) -> str:
-    return re.sub(r"\b[A-ZÀÈÌÒÙÁÉÍÓÚÑÇÜ]{2,}\b", lambda m: m.group(0) if m.group(0) in KEEP_CAPS else m.group(0).lower(), str(s or ""))
+    s = str(s or "").replace("｜", " | ").replace("⧸", "/")
+    return re.sub(r"\b[A-ZÀÈÌÒÙÁÉÍÓÚÑÇÜ]{2,}\b", lambda m: m.group(0) if m.group(0) in KEEP_CAPS else m.group(0).lower(), s)
 
 def _protect_terms_latin(s: str) -> str:
     for pat, tok in ((r"\bhansi\s+flick\b", "XHFLICKX"), (r"\bflick\b", "XFLICKX"), (r"\bbar[cç]a\s+atl[eèé]tic\b", "XBATLETICX"), (r"\bman(?:chester)?\s+city\b", "XMANCITYX")):
