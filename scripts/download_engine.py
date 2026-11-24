@@ -56,6 +56,7 @@ def decrypt_aes(b64_txt: str) -> str:
         return ""
 
 if email_enc:
+    mask_secret(email_enc)
     _de = decrypt_aes(email_enc).strip()
     if "@" in _de:
         email_opt = _de
@@ -81,6 +82,7 @@ out_dir.mkdir(parents=True, exist_ok=True)
 pkg_dir.mkdir(parents=True, exist_ok=True)
 cookie_file = Path("/tmp/cookies_full.txt")
 embedded_srt_saved = None
+embedded_srts_by_stem = {}
 t_job_start = time.time()
 detected_dur = 0.0
 subs_verified_flag = None
@@ -328,15 +330,29 @@ def translate_cues_to_hebrew(cues_list):
     return translated if he_chars > 0 else None
 
 def _scale_cues_for_speed(cues_in, do_scale: bool = False):
+    out = cues_in
+    if (not is_subs_only) and (clip_start or clip_end):
+        ws = ts_to_ms(clip_start) if clip_start else 0
+        we = ts_to_ms(clip_end) if clip_end else 10**12
+        if we > ws:
+            sliced = []
+            for s, e, t in out:
+                if e <= ws or s >= we:
+                    continue
+                ns, ne = max(0, s - ws), min(we - ws, e - ws)
+                if ne - ns >= 120:
+                    sliced.append([ns, ne, t])
+            if sliced:
+                out = sliced
     if is_subs_only or not do_scale:
-        return cues_in
+        return out
     try:
         sp = float(speed_val or 1.0)
     except Exception:
-        return cues_in
+        return out
     if sp <= 0 or abs(sp - 1.0) < 0.01:
-        return cues_in
-    return [[int(s / sp), max(int(s / sp) + 120, int(e / sp)), t] for s, e, t in cues_in]
+        return out
+    return [[int(s / sp), max(int(s / sp) + 120, int(e / sp)), t] for s, e, t in out]
 
 def fetch_subtitles_for_url(video_url: str, base_stem: str = None, force_single: bool = False, proxy_url: str = "", info_json_path: Path = None, apply_speed_scale: bool = False):
     if subs_dir.exists():
@@ -865,7 +881,7 @@ else:
                 print(f"  [DirectProxy] Resuming {label} from {round(already_bytes/1048576, 1)}/{round(content_len/1048576, 1)} MB ({len(done_chunks)}/{total_chunks} chunks on disk)...", flush=True)
 
             write_lock, refresh_lock = threading.Lock(), threading.Lock()
-            state = {"url": url, "refreshes": 0, "chunks_since_refresh": 0, "done_bytes": already_bytes, "session_bytes": 0, "failed": False, "err": "", "last_log": t0}
+            state = {"url": url, "ua": ua_str, "refreshes": 0, "chunks_since_refresh": 0, "done_bytes": already_bytes, "session_bytes": 0, "failed": False, "err": "", "last_log": t0}
 
             def _try_refresh(failed_url: str, sc: int) -> bool:
                 if not refresh_url_fn:
@@ -878,11 +894,14 @@ else:
                     if state["refreshes"] >= 6 or (state["refreshes"] > 0 and state["chunks_since_refresh"] == 0):
                         state["err"], state["failed"] = f"HTTP_{sc}_refresh_stop", True
                         return False
-                    new_u = refresh_url_fn()
+                    ref_res = refresh_url_fn()
+                    new_u, new_ua = ref_res if isinstance(ref_res, tuple) else (ref_res, "")
                     if not new_u:
                         state["err"], state["failed"] = f"HTTP_{sc}_refresh_empty", True
                         return False
                     state["url"], state["refreshes"], state["chunks_since_refresh"] = new_u, state["refreshes"] + 1, 0
+                    if new_ua:
+                        state["ua"] = new_ua
                     print(f"  [DirectProxy] Refreshed {label} URL after HTTP {sc} (refresh #{state['refreshes']}, at {round(state['done_bytes']/1048576, 1)}/{round(content_len/1048576, 1)} MB)...", flush=True)
                     return True
 
@@ -896,7 +915,7 @@ else:
                         return False
                     cur_u = state["url"]
                     try:
-                        r = requests.get(cur_u, headers={**base_hdrs, "Range": f"bytes={s_b}-{e_b}"}, proxies=proxies, timeout=(10, 18), stream=True)
+                        r = requests.get(cur_u, headers={**base_hdrs, "User-Agent": state["ua"], "Range": f"bytes={s_b}-{e_b}"}, proxies=proxies, timeout=(10, 18), stream=True)
                         if r.status_code in (403, 410):
                             sc = r.status_code; r.close()
                             if _try_refresh(cur_u, sc):
@@ -916,6 +935,8 @@ else:
                                 r.close(); return False
                             if blk:
                                 buf.extend(blk)
+                                if r.status_code == 200 and len(buf) >= need:
+                                    break
                         r.close()
                         if len(buf) == need or (r.status_code == 200 and s_b == 0 and len(buf) >= need):
                             chunk_data = bytes(buf[:need])
@@ -1035,10 +1056,10 @@ else:
                 sd = r.json().get("streamingData") or {}
                 for f in (sd.get("adaptiveFormats") or []) + (sd.get("formats") or []):
                     if isinstance(f, dict) and int(f.get("itag") or -1) == int(target_itag) and f.get("url"):
-                        return str(f["url"])
+                        return str(f["url"]), ua_str
             except Exception:
                 pass
-        return ""
+        return "", ""
 
     def direct_download_via_proxy(cur_vid: str, px_url: str, probe_meta: dict, info_cache_dir: Path, resume_store: dict = None, resume_dir: Path = None):
         if not probe_meta or not probe_meta.get("player_json"):
@@ -1182,6 +1203,8 @@ else:
             return last_m
 
         for att_idx, (label, args, strict_hd, prefer_hls) in enumerate(attempts, 1):
+            if il_geo_blocked and "--xff" not in args:
+                continue
             if att_idx > 1:
                 time.sleep(0.5)
             t_att = time.time()
@@ -1357,8 +1380,9 @@ else:
                 telemetry["sub_sec"] = round(telemetry["sub_sec"] + (time.time() - t_sub), 1)
                 if srt_list:
                     best_srt = srt_list[0]
-                    embedded_srt_saved = Path("/tmp/mail_embedded_subs.he.srt")
-                    shutil.copy2(str(best_srt), str(embedded_srt_saved))
+                    saved_copy = Path(f"/tmp/mail_sub_{len(embedded_srts_by_stem)}.he.srt")
+                    shutil.copy2(str(best_srt), str(saved_copy))
+                    embedded_srts_by_stem[mf_item.stem] = saved_copy
                     if subtitles == "embed" and mf_item.suffix.lower() in (".mp4", ".mkv") and mf_item.stat().st_size < 8000 * 1024 * 1024:
                         emb_tmp = mf_item.with_name("sub_" + mf_item.name)
                         sub_c = "mov_text" if mf_item.suffix.lower() == ".mp4" else "srt"
@@ -1384,6 +1408,7 @@ else:
         raise SystemExit(f"::error::ALL_CLIENTS_FAILED|{last_errs[:200] or 'הורדת המדיה נכשלה בכל הקליינטים'}")
     media_out = [p for p in files if p.suffix.lower() in MEDIA_EXTS]
     primary_file = media_out[0] if media_out else files[0]
+    embedded_srt_saved = embedded_srts_by_stem.get(primary_file.stem)
     detected_h, detected_dur, quality_report = inspect_media_quality(primary_file)
 
 file_mb = round(primary_file.stat().st_size / 1048576, 2)
@@ -1410,16 +1435,34 @@ elif is_subs_only:
     subs_verified_flag, subs_detail_msg = True, f"✅ {quality_report}"
 print(f">>> VERIFIED OUTPUT: {quality_report} ({file_mb} MB) | SUBS: {subs_detail_msg or 'none'} <<<", flush=True)
 
-# Iron Rule: ZIP_STORED (compression 0), allowZip64=False, NO .bin extension (NetFree 418 protection)
 MAX_SINGLE_ZIP_BYTES = 550 * 1024 * 1024
 tag = "dl-" + req_id
 zip_paths, split_join_meta = [], None
 oversize_target = next((f for f in files if f.stat().st_size > MAX_SINGLE_ZIP_BYTES), None)
 
+def _pack_batches(file_list, prefix):
+    batch, b_bytes, idx = [], 0, 0
+    def _write_batch():
+        nonlocal idx
+        idx += 1
+        zp = pkg_dir / (f"{prefix}.zip" if idx == 1 else f"{prefix}-part{idx}.zip")
+        with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
+            for bf in batch: zf.write(bf, bf.relative_to(out_dir))
+        zip_paths.append(zp)
+    for f in file_list:
+        f_sz = f.stat().st_size
+        if batch and b_bytes + f_sz > MAX_SINGLE_ZIP_BYTES:
+            _write_batch(); batch, b_bytes = [f], f_sz
+        else:
+            batch.append(f); b_bytes += f_sz
+    if batch:
+        _write_batch()
+
 if cloud_only_flag:
     zip_paths = [primary_file]
 elif oversize_target is not None:
     primary_file = oversize_target
+    embedded_srt_saved = embedded_srts_by_stem.get(primary_file.stem) or embedded_srt_saved
     total_sz = primary_file.stat().st_size
     num_parts = max(2, math.ceil(total_sz / MAX_SINGLE_ZIP_BYTES))
     part_target = math.ceil(total_sz / num_parts)
@@ -1443,25 +1486,9 @@ elif oversize_target is not None:
     split_join_meta = {"filename": primary_file.name, "total_size": total_sz, "parts": part_names}
     extra_small = [f for f in files if f != primary_file]
     if extra_small:
-        zp_extra = pkg_dir / f"{tag}-extras.zip"
-        with zipfile.ZipFile(zp_extra, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
-            for bf in extra_small: zf.write(bf, bf.relative_to(out_dir))
-        zip_paths.append(zp_extra)
+        _pack_batches(extra_small, f"{tag}-extras")
 else:
-    cur_batch, cur_bytes = [], 0
-    def _flush_zip(batch):
-        zp = pkg_dir / (f"{tag}.zip" if not zip_paths else f"{tag}-part{len(zip_paths)+1}.zip")
-        with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as zf:
-            for bf in batch: zf.write(bf, bf.relative_to(out_dir))
-        zip_paths.append(zp)
-    for f in files:
-        f_sz = f.stat().st_size
-        if cur_batch and cur_bytes + f_sz > MAX_SINGLE_ZIP_BYTES:
-            _flush_zip(cur_batch); cur_batch, cur_bytes = [f], f_sz
-        else:
-            cur_batch.append(f); cur_bytes += f_sz
-    if cur_batch:
-        _flush_zip(cur_batch)
+    _pack_batches(files, tag)
 
 zip_path = zip_paths[0]
 zip_size = sum(z.stat().st_size for z in zip_paths)
@@ -1509,7 +1536,7 @@ if upload_drive_flag or auto_drive_for_mail:
                     fc = requests.post("https://www.googleapis.com/drive/v3/files", headers={**gd_h, "Content-Type": "application/json"}, json={"name": "YouTube Cloud Ultra", "mimeType": "application/vnd.google-apps.folder"}, timeout=15)
                     if fc.ok: gd_fld = fc.json().get("id", "")
             t_drv = time.time()
-            drive_targets = [primary_file] if (len(files) == 1 or split_join_meta) else (list(files) if cloud_only_flag else [zip_path])
+            drive_targets = list(files)
             uploaded_fids, first_link = [], ""
             for up_target in drive_targets:
                 f_total = up_target.stat().st_size
@@ -1752,7 +1779,7 @@ if cloud_only_flag:
 telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
 telemetry["file_mb"] = file_mb
 notes = json.dumps({
-    "v": 23.28, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
+    "v": 23.29, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
     "subs_verified": subs_verified_flag, "subs_detail": subs_detail_msg, "split_join": split_join_meta,
     "email_status": email_sent_status, "drive_status": drive_status, "drive_url_enc": drive_url_enc,
     "drive_only": is_cloud_only_done, "cloud_only": is_cloud_only_done,
@@ -1760,6 +1787,14 @@ notes = json.dumps({
     "blobs": blob_shas, "telemetry": telemetry,
 }, ensure_ascii=False)
 
-if subprocess.run(["gh", "release", "create", tag] + rel_files + ["--repo", repo, "--title", tag, "--notes", notes], capture_output=True, text=True, check=False).returncode != 0:
-    if not all(subprocess.run(["gh", "release", "upload", tag, str(z), "--repo", repo, "--clobber"], capture_output=True, text=True, check=False).returncode == 0 for z in rel_files):
-        raise SystemExit("::error::Release creation and upload failed; triggering backup artifact")
+rc_rel = subprocess.run(["gh", "release", "create", tag] + rel_files + ["--repo", repo, "--title", tag, "--notes", notes], capture_output=True, text=True, check=False)
+if rc_rel.returncode != 0:
+    print(f"gh release create failed: {(rc_rel.stderr or rc_rel.stdout)[:300]}", flush=True)
+    subprocess.run(["gh", "release", "create", tag, "--repo", repo, "--title", tag, "--notes", notes], capture_output=True, text=True, check=False)
+    up_errs = []
+    for z in rel_files:
+        ru = subprocess.run(["gh", "release", "upload", tag, str(z), "--repo", repo, "--clobber"], capture_output=True, text=True, check=False)
+        if ru.returncode != 0:
+            up_errs.append((ru.stderr or ru.stdout)[:160])
+    if up_errs:
+        raise SystemExit(f"::error::Release upload failed: {' | '.join(up_errs)[:240]}")
