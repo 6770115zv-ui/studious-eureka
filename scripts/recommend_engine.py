@@ -84,6 +84,7 @@ class AIRouter:
     PREFERRED_GEMINI = [
         "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
         "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+        "gemini-4-argon", "gemini-4-carbon",
     ]
     PREFERRED_GROQ_PREFIXES = [
         "qwen/qwen3.8", "qwen/qwen3", "qwen",
@@ -91,8 +92,15 @@ class AIRouter:
         "llama-3.3-70b", "openai/gpt-oss-120b", "openai/gpt-oss-20b",
         "moonshotai/kimi", "deepseek", "llama-3.1-8b", "gemma",
     ]
-    CEREBRAS_MODELS = ["llama-3.3-70b", "qwen-3-32b"]
-    OPENROUTER_MODELS = ["qwen/qwen3-32b:free", "meta-llama/llama-3.3-70b-instruct:free"]
+    PREFERRED_CEREBRAS_PREFIXES = [
+        "gpt-oss-120b", "qwen-3.8", "qwen-3-235b", "qwen-3",
+        "zai-glm", "deepseek", "llama-4", "llama3.1-8b",
+    ]
+    CEREBRAS_MODELS = ["gpt-oss-120b", "qwen-3.8-27b", "qwen-3-235b-a22b-instruct-2507", "zai-glm-4.7"]
+    PREFERRED_OPENROUTER_PREFIXES = [
+        "nvidia/nemotron", "qwen/", "deepseek/", "meta-llama/", "google/gemma", "openai/gpt-oss",
+    ]
+    OPENROUTER_MODELS = ["openrouter/free", "nvidia/nemotron-3-ultra:free"]
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -110,13 +118,22 @@ class AIRouter:
             if kv:
                 self.key_stats[alias] = {"alias": alias, "provider": prov, "status": "ready", "ok": 0, "fail": 0, "last_error": ""}
 
-        self.dead_keys, self.dead_models, self.no_thinking_models = set(), set(), set()
+        self.dead_keys, self.dead_models = set(), set()
+        self.low_thinking_models, self.no_thinking_models = set(), set()
         self.cooldowns, self._clients = {}, {}
         self.rr_cursor = 0
         self.call_log, self.errors, self.alerts_he = [], [], []
         self.discovered_models, self.discovered_groq_models = [], []
-        self.gemini_models = self._discover_gemini_models()
-        self.groq_models = self._discover_groq_models()
+        self.discovered_cerebras_models, self.discovered_openrouter_models = [], []
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            f_gem = ex.submit(self._discover_gemini_models)
+            f_grq = ex.submit(self._discover_groq_models)
+            f_cer = ex.submit(self._discover_cerebras_models)
+            f_orr = ex.submit(self._discover_openrouter_models)
+            self.gemini_models = f_gem.result()
+            self.groq_models = f_grq.result()
+            self.cerebras_models = f_cer.result()
+            self.openrouter_models = f_orr.result()
 
     def _collect_gemini_keys(self):
         parts = []
@@ -154,8 +171,9 @@ class AIRouter:
         found = []
         bad = ("embedding", "imagen", "veo", "tts", "audio", "image", "robotics", "computer-use", "deep-research", "omni", "preview", "exp", "nano", "live", "1.0", "1.5", "2.0", "2.5")
         for ki, kval in enumerate(self.gemini_keys, 1):
+            alias = f"Gemini#{ki}"
             try:
-                cl = self._get_client(f"Gemini#{ki}", kval, 10)
+                cl = self._get_client(alias, kval, 10)
                 if cl is not None:
                     for m in cl.models.list():
                         name = str(getattr(m, "name", "") or "").replace("models/", "").strip()
@@ -169,10 +187,21 @@ class AIRouter:
                             name = str(m.get("name") or "").replace("models/", "").strip()
                             if name.lower().startswith("gemini-") and "generateContent" in (m.get("supportedGenerationMethods") or []) and not any(b in name.lower() for b in bad):
                                 found.append(name)
+                    elif r.status_code in (401, 403):
+                        raise RuntimeError(f"HTTP {r.status_code}")
                 if found:
                     break
             except Exception as e:
-                self.errors.append(f"gemini_discovery#G{ki}: {type(e).__name__}: {str(e)[:80]}")
+                es = f"{type(e).__name__}: {e}"
+                low_e = es.lower()
+                with self.lock:
+                    self.errors.append(f"gemini_discovery#G{ki}: {es[:80]}")
+                    if any(k in low_e for k in ("401", "403", "api_key_invalid", "permission_denied")):
+                        self.dead_keys.add(alias)
+                        self.key_stats[alias]["status"] = "invalid_key"
+                        self.key_stats[alias]["last_error"] = es[:90]
+                if alias in self.dead_keys:
+                    self._add_alert(f"⚠️ {alias} לא תקין או חסום (401/403) — בדוק את ה-Secret ב-GitHub.")
 
         self.discovered_models = sorted(set(found))
         if not found:
@@ -196,14 +225,17 @@ class AIRouter:
                     if mid and m.get("active") is not False and not any(b in mid.lower() for b in bad):
                         found.append(mid)
             elif r.status_code in (401, 403):
-                self.dead_keys.add("Groq#1")
-                self.key_stats["Groq#1"]["status"] = "invalid_key"
+                with self.lock:
+                    self.dead_keys.add("Groq#1")
+                    self.key_stats["Groq#1"]["status"] = "invalid_key"
                 self._add_alert("⚠️ מפתח GROQ_API_KEY לא תקין (401/403) — בדוק את ה-Secret ב-GitHub.")
                 return []
             else:
-                self.errors.append(f"groq_discovery: HTTP {r.status_code}: {r.text[:80]}")
+                with self.lock:
+                    self.errors.append(f"groq_discovery: HTTP {r.status_code}: {r.text[:80]}")
         except Exception as e:
-            self.errors.append(f"groq_discovery: {type(e).__name__}: {str(e)[:80]}")
+            with self.lock:
+                self.errors.append(f"groq_discovery: {type(e).__name__}: {str(e)[:80]}")
 
         self.discovered_groq_models = sorted(set(found))
         if not found:
@@ -219,19 +251,107 @@ class AIRouter:
         print(f"AIRouter live Groq ladder ({len(found)} found): {ranked[:4]}", flush=True)
         return ranked[:4]
 
+    def _discover_cerebras_models(self):
+        if not self.cerebras_key:
+            return []
+        found, bad = [], ("whisper", "tts", "embed", "guard", "moderation")
+        try:
+            r = requests.get("https://api.cerebras.ai/v1/models", headers={"Authorization": f"Bearer {self.cerebras_key}", "Accept": "application/json"}, timeout=8)
+            if r.status_code == 200:
+                for m in (r.json().get("data") or []):
+                    mid = str(m.get("id") or "").strip()
+                    if mid and not any(b in mid.lower() for b in bad):
+                        found.append(mid)
+            elif r.status_code in (401, 403):
+                with self.lock:
+                    self.dead_keys.add("Cerebras#1")
+                    self.key_stats["Cerebras#1"]["status"] = "invalid_key"
+                self._add_alert("⚠️ מפתח CEREBRAS_API_KEY לא תקין (401/403) — בדוק את ה-Secret ב-GitHub.")
+                return []
+            else:
+                with self.lock:
+                    self.errors.append(f"cerebras_discovery: HTTP {r.status_code}: {r.text[:80]}")
+        except Exception as e:
+            with self.lock:
+                self.errors.append(f"cerebras_discovery: {type(e).__name__}: {str(e)[:80]}")
+
+        self.discovered_cerebras_models = sorted(set(found))
+        if not found:
+            return list(self.CEREBRAS_MODELS[:3])
+        ranked = []
+        for pref in self.PREFERRED_CEREBRAS_PREFIXES:
+            for mid in found:
+                if pref in mid.lower() and mid not in ranked:
+                    ranked.append(mid)
+        for mid in found:
+            if mid not in ranked:
+                ranked.append(mid)
+        print(f"AIRouter live Cerebras ladder ({len(found)} found): {ranked[:4]}", flush=True)
+        return ranked[:4]
+
+    def _discover_openrouter_models(self):
+        if not self.openrouter_key:
+            return []
+        found, bad = [], ("embed", "tts", "whisper", "image", "vl", "vision", "guard", "moderation", "audio")
+        try:
+            r = requests.get("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {self.openrouter_key}", "Accept": "application/json"}, timeout=8)
+            if r.status_code == 200:
+                for m in (r.json().get("data") or []):
+                    mid = str(m.get("id") or "").strip()
+                    pr = m.get("pricing") or {}
+                    is_zero = str(pr.get("prompt", "")) == "0" and str(pr.get("completion", "")) == "0"
+                    if mid and is_zero and mid != "openrouter/free" and not any(b in mid.lower() for b in bad):
+                        found.append(mid)
+            elif r.status_code in (401, 403):
+                with self.lock:
+                    self.dead_keys.add("OpenRouter#1")
+                    self.key_stats["OpenRouter#1"]["status"] = "invalid_key"
+                self._add_alert("⚠️ מפתח OPENROUTER_API_KEY לא תקין (401/403) — בדוק את ה-Secret ב-GitHub.")
+                return []
+            else:
+                with self.lock:
+                    self.errors.append(f"openrouter_discovery: HTTP {r.status_code}: {r.text[:80]}")
+        except Exception as e:
+            with self.lock:
+                self.errors.append(f"openrouter_discovery: {type(e).__name__}: {str(e)[:80]}")
+
+        self.discovered_openrouter_models = sorted(set(found))
+        ranked = ["openrouter/free"]
+        for pref in self.PREFERRED_OPENROUTER_PREFIXES:
+            for mid in found:
+                if pref in mid.lower() and mid not in ranked:
+                    ranked.append(mid)
+        for mid in found:
+            if mid not in ranked:
+                ranked.append(mid)
+        res = ranked[:4] if found else list(self.OPENROUTER_MODELS)
+        print(f"AIRouter live OpenRouter ladder ({len(found)} free found): {res}", flush=True)
+        return res
+
     def _thinking_cfg(self, model_name: str):
         if _gtypes is None or model_name in self.no_thinking_models:
             return None
         low = model_name.lower()
         fields = getattr(_gtypes.ThinkingConfig, "model_fields", {}) or {}
         if "gemini-3" in low or "gemini-4" in low:
-            for kw in ({"thinking_level": "MINIMAL"}, {"thinking_budget": 0}):
-                k = next(iter(kw))
-                if k in fields:
+            no_minimal = (
+                model_name in self.low_thinking_models
+                or "gemini-3.8" in low
+                or "gemini-4" in low
+                or "-pro" in low
+            )
+            levels = ("LOW",) if no_minimal else ("MINIMAL", "LOW")
+            if "thinking_level" in fields:
+                for lvl in levels:
                     try:
-                        return _gtypes.ThinkingConfig(**kw)
+                        return _gtypes.ThinkingConfig(thinking_level=lvl)
                     except Exception:
                         pass
+            if "thinking_budget" in fields and not no_minimal:
+                try:
+                    return _gtypes.ThinkingConfig(thinking_budget=0)
+                except Exception:
+                    pass
         return None
 
     def _call_gemini_once(self, alias: str, api_key: str, model_name: str, prompt_text: str, timeout_sec: int):
@@ -272,13 +392,16 @@ class AIRouter:
             **({"response_format": {"type": "json_object"}} if use_json_mode else {}),
         }
         r = requests.post(url, headers={**headers, "Content-Type": "application/json", "Accept": "application/json"}, json=body, timeout=timeout_sec)
-        if r.status_code == 400 and use_json_mode and any(k in r.text.lower() for k in ("response_format", "json_validate", "json")):
+        if r.status_code == 400 and use_json_mode and any(k in r.text.lower() for k in ("response_format", "json_validate", "json", "structured", "unsupported")):
             return self._call_openai_compat(url, headers, model_name, prompt_text, timeout_sec, False)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:140]}")
         if not (r.text or "").strip():
             raise RuntimeError("HTTP 200 empty body")
-        content = ((((json.loads(r.text).get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
+        msg_obj = (((json.loads(r.text).get("choices") or [{}])[0]).get("message") or {})
+        content = (msg_obj.get("content") or "").strip()
+        if not content:
+            content = (msg_obj.get("reasoning_content") or msg_obj.get("reasoning") or "").strip()
         content = re.sub(r"<think>[\s\S]*?</think>", "", content, flags=re.I).strip()
         if not content:
             raise RuntimeError("empty_choices_content")
@@ -305,8 +428,8 @@ class AIRouter:
         backups = []
         for prov, alias, url, kv, models in (
             ("groq", "Groq#1", "https://api.groq.com/openai/v1/chat/completions", self.groq_key, self.groq_models),
-            ("cerebras", "Cerebras#1", "https://api.cerebras.ai/v1/chat/completions", self.cerebras_key, self.CEREBRAS_MODELS),
-            ("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", self.openrouter_key, self.OPENROUTER_MODELS),
+            ("cerebras", "Cerebras#1", "https://api.cerebras.ai/v1/chat/completions", self.cerebras_key, self.cerebras_models),
+            ("openrouter", "OpenRouter#1", "https://openrouter.ai/api/v1/chat/completions", self.openrouter_key, self.openrouter_models),
         ):
             if kv and alias not in self.dead_keys:
                 for m in models:
@@ -321,7 +444,7 @@ class AIRouter:
                     continue
             t0 = time.time()
             try:
-                res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 18)
+                res = self._call_openai_compat(url, hdrs, m_name, prompt_text, 20)
                 self._record(stage, prov, m_name, alias, "ok", (time.time() - t0) * 1000)
                 self._add_alert(f"⚡ מעבר אוטומטי מהיר ל-{alias} ({m_name}) עקב עומס רגעי ב-Gemini!")
                 return res, f"{prov}:{m_name.split('/')[-1]}"
@@ -343,7 +466,11 @@ class AIRouter:
         return None, ""
 
     def call_json(self, prompt_text: str, timeout_sec: int = 16, stage: str = "general"):
-        has_fast_bk = bool((self.groq_key and self.groq_models and "Groq#1" not in self.dead_keys) or (self.cerebras_key and "Cerebras#1" not in self.dead_keys))
+        has_fast_bk = bool(
+            (self.groq_key and self.groq_models and "Groq#1" not in self.dead_keys)
+            or (self.cerebras_key and self.cerebras_models and "Cerebras#1" not in self.dead_keys)
+            or (self.openrouter_key and self.openrouter_models and "OpenRouter#1" not in self.dead_keys)
+        )
         backups_tried, is_planner = False, stage.startswith("planner")
 
         if self.gemini_keys and self.gemini_models:
@@ -354,16 +481,17 @@ class AIRouter:
 
             for pass_i in range(2):
                 now, tried_any, tried_models = time.time(), False, set()
+                cd_grace = 0.0 if pass_i == 0 else 10.0
                 for m_name in (self.gemini_models if pass_i == 0 else self.gemini_models[:2]):
-                    if m_name in self.dead_models or (pass_i == 0 and self.cooldowns.get(("*", m_name), 0) > now):
+                    if m_name in self.dead_models or self.cooldowns.get(("*", m_name), 0) > now + cd_grace:
                         continue
                     global_503 = False
                     for k_idx in key_indices:
                         alias = f"Gemini#{k_idx + 1}"
-                        if alias in self.dead_keys or (pass_i == 0 and self.cooldowns.get((alias, m_name), 0) > now):
+                        if alias in self.dead_keys or self.cooldowns.get((alias, m_name), 0) > now + cd_grace:
                             continue
                         tried_any = True; tried_models.add(m_name); t0 = time.time()
-                        m_to = min(timeout_sec, (12 if "lite" in m_name else 11) if is_planner else (15 if "lite" in m_name else 13))
+                        m_to = min(timeout_sec, (18 if "lite" in m_name else 16) if is_planner else (20 if "lite" in m_name else 18))
                         try:
                             res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_to)
                             self._record(stage, "gemini", m_name, alias, "ok", (time.time() - t0) * 1000)
@@ -372,7 +500,11 @@ class AIRouter:
                             ms, es = (time.time() - t0) * 1000, f"{type(e).__name__}: {e}"
                             low_e = es.lower()
                             if ("400" in low_e or "invalid_argument" in low_e) and any(k in low_e for k in ("thinking", "budget", "level")) and m_name not in self.no_thinking_models:
-                                with self.lock: self.no_thinking_models.add(m_name)
+                                with self.lock:
+                                    if m_name not in self.low_thinking_models and "gemini-3.8" not in m_name.lower() and "gemini-4" not in m_name.lower():
+                                        self.low_thinking_models.add(m_name)
+                                    else:
+                                        self.no_thinking_models.add(m_name)
                                 tr0 = time.time()
                                 try:
                                     res = self._call_gemini_once(alias, self.gemini_keys[k_idx], m_name, prompt_text, m_to)
@@ -380,6 +512,9 @@ class AIRouter:
                                     return res, m_name
                                 except Exception as e2:
                                     es, low_e = f"{type(e2).__name__}: {e2}", f"{type(e2).__name__}: {e2}".lower()
+                                    if ("400" in low_e or "invalid_argument" in low_e) and any(k in low_e for k in ("thinking", "budget", "level")):
+                                        with self.lock:
+                                            self.no_thinking_models.add(m_name)
                             self._record(stage, "gemini", m_name, alias, "fail", ms, es)
                             print(f"AIRouter [{stage}] {alias}/{m_name} failed ({int(ms)}ms): {es[:130]}", flush=True)
                             bad_k = False
@@ -397,7 +532,6 @@ class AIRouter:
                                     self.key_stats[alias]["status"] = "busy_503"; global_503 = True
                             if bad_k: self._add_alert(f"⚠️ {alias} לא תקין או חסום (401/403) — בדוק את ה-Secret ב-GitHub.")
                             if global_503: break
-                    # Iron Rule: Planner exhausts full Gemini ladder before Groq; Scorer may pivot after 3 models
                     if (not is_planner) and has_fast_bk and not backups_tried and len(tried_models) >= 3:
                         backups_tried = True
                         b_res, b_mod = self._try_fast_backups(prompt_text, stage)
@@ -415,8 +549,13 @@ class AIRouter:
             "sdk": f"google-genai {_GENAI_SDK_VER}",
             "gemini_keys_count": len(self.gemini_keys),
             "has_github_models_backup": False,
-            "has_groq_backup": bool((self.groq_key and self.groq_models) or self.cerebras_key or self.openrouter_key),
-            "active_ladder": list(self.gemini_models[:4]) + [f"groq:{m}" for m in self.groq_models[:2]],
+            "has_groq_backup": bool((self.groq_key and self.groq_models) or (self.cerebras_key and self.cerebras_models) or (self.openrouter_key and self.openrouter_models)),
+            "active_ladder": (
+                list(self.gemini_models[:4])
+                + [f"groq:{m}" for m in self.groq_models[:2]]
+                + [f"cerebras:{m}" for m in self.cerebras_models[:2]]
+                + [f"openrouter:{m}" for m in self.openrouter_models[:1]]
+            ),
             "discovered_models": self.discovered_models[:10],
             "discovered_groq_models": self.discovered_groq_models[:10],
             "key_health": list(self.key_stats.values()),
@@ -1028,16 +1167,24 @@ if filter_prompt:
         score_map, reason_map, failed_chunks = {}, {}, []
         def _ingest_ai_resp(g_data, m_used):
             if m_used and m_used not in used_models: used_models.append(m_used)
-            if not isinstance(g_data, dict): return False
-            rows = g_data.get("k") if isinstance(g_data.get("k"), list) else (g_data.get("keep") if isinstance(g_data.get("keep"), list) else None)
+            rows = g_data if isinstance(g_data, list) else None
+            if rows is None and isinstance(g_data, dict):
+                for rk in ("k", "keep", "items", "results", "scores", "data"):
+                    if isinstance(g_data.get(rk), list):
+                        rows = g_data[rk]
+                        break
             if rows is None: return False
             for r in rows:
                 idx_r, sc_r, rs_r = None, 7, ""
                 try:
                     if isinstance(r, list) and len(r) >= 2 and str(r[0]).strip().isdigit():
                         idx_r, sc_r, rs_r = int(str(r[0]).strip()), int(float(r[1] or 7)), (str(r[2] or "").strip() if len(r) >= 3 else "")
-                    elif isinstance(r, dict) and str(r.get("i", "")).strip().isdigit():
-                        idx_r, sc_r, rs_r = int(str(r["i"]).strip()), int(float(r.get("s") or 7)), str(r.get("r") or "").strip()
+                    elif isinstance(r, dict):
+                        raw_i = next((r[k] for k in ("i", "id", "idx") if r.get(k) is not None), "")
+                        if str(raw_i).strip().isdigit():
+                            raw_s = next((r[k] for k in ("s", "score") if r.get(k) is not None), 7)
+                            raw_r = next((r[k] for k in ("r", "reason", "why") if r.get(k) is not None), "")
+                            idx_r, sc_r, rs_r = int(str(raw_i).strip()), int(float(raw_s)), str(raw_r).strip()
                 except Exception:
                     idx_r = None
                 if idx_r is not None and sc_r >= 4:
@@ -1045,8 +1192,9 @@ if filter_prompt:
                     if rs_r: reason_map[idx_r] = rs_r[:90]
             return True
 
-        if len(ai_router.gemini_keys) >= 2 or ai_router.groq_key or ai_router.cerebras_key:
-            with ThreadPoolExecutor(max_workers=len(chunks_ai)) as ex:
+        if len(chunks_ai) > 1 and (len(ai_router.gemini_keys) >= 2 or ai_router.groq_key or ai_router.cerebras_key or ai_router.openrouter_key):
+            scorer_workers = min(len(chunks_ai), max(2, len(ai_router.gemini_keys) * 2 + int(bool(ai_router.groq_key)) + int(bool(ai_router.cerebras_key))), 5)
+            with ThreadPoolExecutor(max_workers=scorer_workers) as ex:
                 for pair_c, (gd, mu) in zip(chunks_ai, ex.map(_score_ai_chunk, chunks_ai)):
                     if not _ingest_ai_resp(gd, mu): failed_chunks.append(pair_c)
         else:
