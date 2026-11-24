@@ -28,13 +28,19 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - name: Cache Python packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-rec-v23-31
+          restore-keys: pip-rec-
       - name: Install yt-dlp + Pillow
         env:
           FILTER_PROMPT: ${{ inputs.filter_prompt }}
         run: |
-          python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q requests cryptography pillow google-genai
+          python3 -m pip install --upgrade --break-system-packages -q requests cryptography pillow google-genai
           if printf '%s' "$FILTER_PROMPT" | grep -qi '\[PL_STREAMS\]'; then
-            python3 -m pip install --upgrade --no-cache-dir --break-system-packages -q --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs
+            python3 -m pip install --upgrade --break-system-packages -q --pre "yt-dlp[default,curl-cffi]" yt-dlp-ejs
           fi
       - name: Smart Multi-Language + Gemini 3.5 Flash-Lite + Sharp WebP Engine
         env:
