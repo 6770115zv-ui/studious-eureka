@@ -222,6 +222,9 @@ def clean_and_reconstruct_sentences(raw_srt_text: str):
                 break
         merged.append([cur_s, cur_e, cur_txt])
         i += 1
+    for idx_m in range(len(merged) - 1):
+        if merged[idx_m][1] > merged[idx_m + 1][0]:
+            merged[idx_m][1] = max(merged[idx_m][0] + 150, merged[idx_m + 1][0] - 20)
     return merged
 
 def sanitize_subtitle_text(raw_txt: str) -> str:
@@ -1045,7 +1048,7 @@ else:
         except Exception:
             return False
 
-    def _refresh_stream_url_on_proxy(cur_vid: str, px_url: str, target_itag: int, want_client: str = "IOS", gl_code: str = "IL"):
+    def _refresh_stream_url_on_proxy(cur_vid: str, px_url: str, target_itag: int, want_client: str = "IOS", target_clen: int = 0, gl_code: str = "IL"):
         proxies = {"http": px_url, "https": px_url}
         for cl_try in (want_client, "ANDROID_VR" if want_client == "IOS" else "IOS"):
             cl_obj, ua_str = _it_client(cl_try, gl_code)
@@ -1056,6 +1059,9 @@ else:
                 sd = r.json().get("streamingData") or {}
                 for f in (sd.get("adaptiveFormats") or []) + (sd.get("formats") or []):
                     if isinstance(f, dict) and int(f.get("itag") or -1) == int(target_itag) and f.get("url"):
+                        f_clen = int(f.get("contentLength") or 0)
+                        if target_clen > 0 and f_clen > 0 and f_clen != target_clen:
+                            continue
                         return str(f["url"]), ua_str
             except Exception:
                 pass
@@ -1087,7 +1093,7 @@ else:
 
         if is_audio and best_a:
             a_path, a_res, a_itag, a_len = _slot("aud", best_a)
-            a_ok, a_err = _download_url_chunked_proxy(best_a["url"], a_path, proxies, ua_str, a_len, "Audio", 180, a_res, (lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, a_itag, cl_name)) if a_itag else None)
+            a_ok, a_err = _download_url_chunked_proxy(best_a["url"], a_path, proxies, ua_str, a_len, "Audio", 180, a_res, (lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, a_itag, cl_name, a_len)) if a_itag else None)
             if a_ok:
                 enc_map = {"audio": (".mp3", ["-c:a", "libmp3lame", "-b:a", "320k"]), "audio_m4a": (".m4a", ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]), "audio_opus": (".opus", ["-c:a", "libopus", "-b:a", "160k"]), "audio_flac": (".flac", ["-c:a", "flac"]), "audio_wav": (".wav", ["-c:a", "pcm_s16le"])}
                 dst_ext, enc_args = enc_map.get(quality, enc_map["audio"])
@@ -1103,11 +1109,11 @@ else:
             a_path, a_res, a_itag, a_len = _slot("aud", best_a)
             v_path, v_res, v_itag, v_len = _slot("vid", best_v)
             print(f"  [DirectProxy] Downloading {v_h}p video (itag={v_itag}, {round(v_len/1048576, 1)} MB) + audio (itag={a_itag}, {round(a_len/1048576, 1)} MB) via {cl_name}...", flush=True)
-            a_ok, a_err = _download_url_chunked_proxy(best_a["url"], a_path, proxies, ua_str, a_len, "Audio", 120, a_res, (lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, a_itag, cl_name)) if a_itag else None)
+            a_ok, a_err = _download_url_chunked_proxy(best_a["url"], a_path, proxies, ua_str, a_len, "Audio", 120, a_res, (lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, a_itag, cl_name, a_len)) if a_itag else None)
             if not a_ok:
                 last_err = f"aud:{a_err}"
             else:
-                v_ok, v_err = _download_url_chunked_proxy(best_v["url"], v_path, proxies, ua_str, v_len, f"Video {v_h}p", 280, v_res, (lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, v_itag, cl_name)) if v_itag else None)
+                v_ok, v_err = _download_url_chunked_proxy(best_v["url"], v_path, proxies, ua_str, v_len, f"Video {v_h}p", 280, v_res, (lambda: _refresh_stream_url_on_proxy(cur_vid, px_url, v_itag, cl_name, v_len)) if v_itag else None)
                 if v_ok:
                     for ext_m, tail_m in ((".mp4", ["-movflags", "+faststart"]), (".mkv", [])):
                         out_f = stage_dir / f"{stem}{ext_m}"
@@ -1342,6 +1348,7 @@ else:
                         break
                     pe = [ln.strip() for ln in (tail_out or "").splitlines() if "ERROR:" in ln or "HTTP Error" in ln]
                     telemetry["attempts"].append({"n": 100 + px_idx, "label": f"Proxy {wave_lbl} {prof_name}", "ok": False, "sec": round(time.time() - t_px, 1), "err": kill_rsn or (pe[-1][:120] if pe else f"exit={rc}")})
+            shutil.rmtree(px_resume_dir, ignore_errors=True)
 
         speed_applied_files = set()
         if downloaded_media_list and ((speed_val not in ("1", "1.0", "")) or norm_audio):
@@ -1501,8 +1508,14 @@ if not cloud_only_flag and len(zip_paths) == 1 and zip_size <= 95 * 1024 * 1024:
     chunks_list = [raw_bytes[o:o + 16 * 1024 * 1024] for o in range(0, len(raw_bytes), 16 * 1024 * 1024)]
     del raw_bytes
     def _up_blob(ch_b):
-        p = subprocess.run(["gh", "api", f"repos/{repo}/git/blobs", "-q", ".sha", "--input", "-"], input=json.dumps({"content": base64.b64encode(ch_b).decode("ascii"), "encoding": "base64"}), text=True, capture_output=True, check=False)
-        return p.stdout.strip() if (p.returncode == 0 and p.stdout.strip()) else ""
+        body_j = json.dumps({"content": base64.b64encode(ch_b).decode("ascii"), "encoding": "base64"})
+        for att_b in range(2):
+            p = subprocess.run(["gh", "api", f"repos/{repo}/git/blobs", "-q", ".sha", "--input", "-"], input=body_j, text=True, capture_output=True, check=False)
+            if p.returncode == 0 and p.stdout.strip():
+                return p.stdout.strip()
+            if att_b == 0:
+                time.sleep(1.5)
+        return ""
     with ThreadPoolExecutor(max_workers=4) as ex:
         shas_out = list(ex.map(_up_blob, chunks_list))
     if all(shas_out):
@@ -1538,10 +1551,12 @@ if upload_drive_flag or auto_drive_for_mail:
             t_drv = time.time()
             drive_targets = list(files)
             uploaded_fids, first_link = [], ""
+            drive_mime_map = {".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".wav": "audio/wav", ".opus": "audio/opus", ".srt": "text/plain", ".zip": "application/zip"}
             for up_target in drive_targets:
                 f_total = up_target.stat().st_size
-                meta = {"name": up_target.name, **({"parents": [gd_fld]} if gd_fld else {})}
-                init_r = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink", headers={**gd_h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": str(f_total)}, json=meta, timeout=25)
+                f_mime = drive_mime_map.get(up_target.suffix.lower(), "application/octet-stream")
+                meta = {"name": up_target.name, "mimeType": f_mime, **({"parents": [gd_fld]} if gd_fld else {})}
+                init_r = requests.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink", headers={**gd_h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": f_mime, "X-Upload-Content-Length": str(f_total)}, json=meta, timeout=25)
                 init_r.raise_for_status()
                 up_url, fin_json = init_r.headers["Location"], {}
                 with open(up_target, "rb") as fp:
@@ -1779,7 +1794,7 @@ if cloud_only_flag:
 telemetry["total_cloud_sec"] = round(time.time() - t_job_start, 1)
 telemetry["file_mb"] = file_mb
 notes = json.dumps({
-    "v": 23.29, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
+    "v": 23.30, "size": zip_size, "video_title": primary_file.stem, "quality_info": f"{quality_report} ({file_mb} MB)",
     "subs_verified": subs_verified_flag, "subs_detail": subs_detail_msg, "split_join": split_join_meta,
     "email_status": email_sent_status, "drive_status": drive_status, "drive_url_enc": drive_url_enc,
     "drive_only": is_cloud_only_done, "cloud_only": is_cloud_only_done,
