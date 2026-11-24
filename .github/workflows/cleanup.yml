@@ -53,19 +53,21 @@ jobs:
               except Exception:
                   return False
 
-          del_rel = 0
-          rel_page = 1
-          rel_iters = 0
-          while rel_page <= 8 and rel_iters < 16:
+          import time
+
+          del_rel, rel_page, rel_iters, seen_rels = 0, 1, 0, set()
+          while rel_page <= 10 and rel_iters < 20:
               rel_iters += 1
               st, rels = api("GET", f"releases?per_page=100&page={rel_page}")
               if st != 200 or not rels:
                   break
               deleted_page = 0
               for rel in rels:
-                  if not is_old_enough(rel.get("created_at", "")):
+                  rid_r = rel.get("id")
+                  if rid_r in seen_rels or not is_old_enough(rel.get("created_at", "")):
                       continue
-                  api("DELETE", f"releases/{rel['id']}")
+                  seen_rels.add(rid_r)
+                  api("DELETE", f"releases/{rid_r}")
                   tag = rel.get("tag_name")
                   if tag:
                       api("DELETE", f"git/refs/tags/{urllib.parse.quote(tag, safe='')}")
@@ -73,13 +75,11 @@ jobs:
                   deleted_page += 1
               if len(rels) < 100:
                   break
-              if deleted_page < 50:
+              if deleted_page == 0:
                   rel_page += 1
 
-          del_runs = 0
-          run_page = 1
-          run_iters = 0
-          while run_page <= 10 and run_iters < 20:
+          del_runs, run_page, run_iters, seen_runs = 0, 1, 0, set()
+          while run_page <= 12 and run_iters < 24:
               run_iters += 1
               st, data = api("GET", f"actions/runs?per_page=100&page={run_page}")
               runs = (data or {}).get("workflow_runs") or []
@@ -88,19 +88,23 @@ jobs:
               deleted_page = 0
               for run in runs:
                   rid = str(run.get("id", ""))
-                  if rid == cur_run_id:
+                  if rid == cur_run_id or rid in seen_runs:
                       continue
                   if is_schedule and run.get("status") != "completed":
                       continue
                   if not is_old_enough(run.get("created_at", "")):
                       continue
+                  seen_runs.add(rid)
+                  if not is_schedule and run.get("status") != "completed":
+                      api("POST", f"actions/runs/{rid}/cancel")
+                      time.sleep(2.0)
                   ds, _ = api("DELETE", f"actions/runs/{rid}")
                   if ds in (200, 204):
                       del_runs += 1
                       deleted_page += 1
               if len(runs) < 100:
                   break
-              if deleted_page < 50:
+              if deleted_page == 0:
                   run_page += 1
 
           print(f"Cleanup finished (mode={'schedule' if is_schedule else 'manual'}): deleted {del_rel} releases, {del_runs} runs.")
