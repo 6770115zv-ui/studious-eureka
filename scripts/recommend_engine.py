@@ -86,7 +86,6 @@ class AIRouter:
     PREFERRED_GEMINI = [
         "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
         "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.8-flash",
-        "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon",
     ]
     PREFERRED_GROQ_PREFIXES = [
         "qwen/qwen3.8", "qwen/qwen3", "qwen",
@@ -467,7 +466,7 @@ class AIRouter:
                             skip_aliases.add(alias)
                         self.key_stats[alias]["status"] = "quota_429"
                     elif "request too large" in es.lower():
-                        skip_aliases.add(alias)
+                        self.cooldowns[(alias, m_name)] = time.time() + 15
         return None, ""
 
     def call_json(self, prompt_text: str, timeout_sec: int = 16, stage: str = "general"):
@@ -657,6 +656,17 @@ def walk_items(obj, out_vids, out_toks):
                 ch_runs = ((vr.get("ownerText") or vr.get("longBylineText") or vr.get("shortBylineText") or {}).get("runs") or [])
                 ch_id = next(((((ri.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId") or "") for ri in ch_runs if (((ri.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId") or "").startswith("UC")), "")
                 out_vids.append({"id": vid, "title": title.strip(), "channel": "".join(r.get("text", "") for r in ch_runs).strip(), "channel_id": ch_id, "view_count": parse_views_text(vc_txt), "published_rel": ((vr.get("publishedTimeText") or {}).get("simpleText") or "").strip(), "duration": dur_sec})
+        lvm = obj.get("lockupViewModel")
+        if isinstance(lvm, dict) and lvm.get("contentType") == "LOCKUP_CONTENT_TYPE_VIDEO":
+            vid = str(lvm.get("contentId") or "")
+            if len(vid) == 11:
+                md = (lvm.get("metadata") or {}).get("lockupMetadataViewModel") or {}
+                title = str((md.get("title") or {}).get("content") or "").strip()
+                rows = ((md.get("metadata") or {}).get("contentMetadataViewModel") or {}).get("metadataRows") or []
+                parts_txt = [str((p.get("text") or {}).get("content") or "").strip() for row in rows if isinstance(row, dict) for p in (row.get("metadataParts") or []) if isinstance(p, dict)]
+                vc_val = next((parse_views_text(p) for p in parts_txt if re.search(r"(view|צפיות|vues|vistas|\b[KMB]\b)", p, re.I)), 0)
+                if title:
+                    out_vids.append({"id": vid, "title": title, "channel": parts_txt[0] if parts_txt else "", "channel_id": "", "view_count": vc_val, "published_rel": parts_txt[-1] if len(parts_txt) > 1 else "", "duration": 0})
         if "continuationItemRenderer" in obj:
             for t in find_tokens(obj["continuationItemRenderer"]):
                 if t not in out_toks: out_toks.append(t)
@@ -763,7 +773,11 @@ def resolve_channel(ch_raw: str):
             resp = requests.get(f"{base}/videos", headers={"User-Agent": UA_STR}, cookies=cookie_dict, timeout=15)
             if resp.status_code == 200:
                 if not uc_id:
-                    me = re.search(r'"(?:externalId|channelId|browseId)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', resp.text)
+                    me = (
+                        re.search(r'<link rel="canonical" href="https://www\.youtube\.com/channel/(UC[a-zA-Z0-9_-]{22})"', resp.text)
+                        or re.search(r'<meta itemprop="identifier" content="(UC[a-zA-Z0-9_-]{22})"', resp.text)
+                        or re.search(r'"(?:externalId|channelId|browseId|ucid)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', resp.text)
+                    )
                     if me: uc_id = me.group(1)
                 mt = re.search(r'<meta property="og:title" content="([^"]+)"', resp.text)
                 if mt and mt.group(1).strip(): name = mt.group(1).strip()
@@ -796,6 +810,32 @@ def fetch_playlist_browse(browse_id: str, ch_title: str, uc_id: str, max_pages: 
         pass
     return collected
 
+def fetch_channel_tab_browse(uc_id: str, tab_params: str, ch_title: str, max_pages: int = 18, target_count: int = 400):
+    collected, seen_vids, visited = [], set(), set()
+    try:
+        rp = _yt_post("browse", {"browseId": uc_id, "params": tab_params}, hl="he", gl="IL", timeout=20)
+        if rp.status_code != 200: return []
+        pv, pt = [], []
+        walk_items(rp.json(), pv, pt)
+        def _take(arr):
+            for v in arr:
+                if v["id"] not in seen_vids:
+                    seen_vids.add(v["id"]); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
+        _take(pv); pages = 0
+        while pt and len(collected) < target_count and pages < max_pages:
+            nt = pt.pop(0)
+            if nt in visited: continue
+            visited.add(nt); pages += 1
+            rn = _yt_post("browse", {"continuation": nt}, hl="he", gl="IL", timeout=20)
+            if rn.status_code != 200: break
+            mv, mt = [], []
+            walk_items(rn.json(), mv, mt); _take(mv)
+            for t in mt:
+                if t not in visited: pt.append(t)
+    except Exception:
+        pass
+    return collected
+
 def fetch_channel_vids(base_url: str, uc_id: str, ch_title: str, sort_mode: str, target_count: int = 800):
     collected, seen_vids = [], set()
     def add_items(arr):
@@ -805,12 +845,20 @@ def fetch_channel_vids(base_url: str, uc_id: str, ch_title: str, sort_mode: str,
                 seen_vids.add(vid); v["channel"] = ch_title; v["channel_id"] = uc_id; collected.append(v)
     if playlist_mode == "streams" and base_url:
         add_items(fetch_yt_json(f"{base_url}/streams", str(target_count), uc_id, ch_title))
+        if not collected and uc_id:
+            add_items(fetch_channel_tab_browse(uc_id, "EgdzdHJlYW1z8gYECgJ6AA==", ch_title, 18, target_count))
         if collected: return collected
     if uc_id and (playlist_mode == "uulp" or (sort_mode in ("views", "likes", "quality_score", "relevance") and playlist_mode != "uu_all")):
         add_items(fetch_playlist_browse("VLUULP" + uc_id[2:], ch_title, uc_id, 30, target_count))
         if playlist_mode == "uulp" and collected: return collected
     if uc_id and len(collected) < target_count:
         add_items(fetch_playlist_browse("VLUU" + uc_id[2:], ch_title, uc_id, max(35, min(85, (target_count // 25) + 15)), max(target_count, 800)))
+    if uc_id and not collected:
+        add_items(fetch_channel_tab_browse(uc_id, "EgZ2aWRlb3PyBgQKAjoA", ch_title, 18, target_count))
+        if len(collected) < 30:
+            add_items(fetch_channel_tab_browse(uc_id, "EgdzdHJlYW1z8gYECgJ6AA==", ch_title, 12, target_count))
+    if not collected and ch_title:
+        add_items(fetch_search(f'"{ch_title}"', "CAMSAhAB" if sort_mode == "views" else "", 120, uc_id, "" if ch_title.startswith("@") else ch_title))
     return collected
 
 def _gtrans_req(q_txt: str, tl: str = "iw", sl: str = "auto", clients=("gtx", "dict-chrome-ex"), timeout: int = 14) -> str:
@@ -856,7 +904,7 @@ if clean_q:
             "REAL YOUTUBE TOP RESULTS FOR THIS EXACT QUERY (GROUND TRUTH — ALWAYS derive the real-world meaning of Hebrew slang, portmanteaus, nicknames or shows from these actual titles/channels; NEVER guess a different meaning!):\n"
             + "\n".join(gt_lines) + "\n"
         ) if gt_lines else ""
-        _modesty_line = f"User Focus/Modesty Rule (EVERY generated query MUST strictly comply with this rule): {filter_prompt}\n" if filter_prompt else ""
+        _modesty_line = f"User Focus/Modesty Guardrail (negative filter ONLY — NEVER insert words like 'שומר שבת'/'מגזר'/'צנוע' into search queries; simply avoid women's sports or off-topic content): {filter_prompt}\n" if filter_prompt else ""
         lang_desc = ", ".join(LANG_NAMES.get(l, l) for l in search_langs[:5])
         _en_hint = gtrans_simple(clean_q, "en") if any("\u0590" <= ch <= "\u05FF" for ch in clean_q) else ""
         _en_hint_line = f"Literal English translation hint: \"{_en_hint}\" (interpret sports/domain terms properly — e.g. 'הצלות' in football = goalkeeper saves / penalty saves, 'בישולים' = assists, 'שערים' = goals, 'נס זלגיריס' = Maccabi Tel Aviv vs Zalgiris 2004 miracle).\n" if _en_hint else ""
@@ -1182,8 +1230,7 @@ if filter_prompt:
         for it_s in ai_slice:
             sq_s = it_s.get("source_q") or ""
             if sq_s: ai_sent_by_q[sq_s] = ai_sent_by_q.get(sq_s, 0) + 1
-        # Iron Rule: Scorer batches capped at 55 items (prevents Groq Request too large)
-        chunk_sz = 55
+        chunk_sz = 42
         chunks_ai = [(off, ai_slice[off:off + chunk_sz]) for off in range(0, len(ai_slice), chunk_sz)]
 
         def _score_ai_chunk(pair, attempt_tag=""):
@@ -1199,7 +1246,7 @@ if filter_prompt:
                 + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this theme (specific key figure, interview, podcast, or deep breakdown).\n"
                 + "  * DROP (<5): Confused/similar-named wrong entity, gaming/FIFA/EA FC (unless asked), unrelated topics/celebrities, clickbait spam, or filter-rule violations.\n"
                 + "Note: 'ללא דמויות אחרות' means no unrelated people/topics — directly relevant figures within the requested subject are WELCOME!\n"
-                + "CRITICAL RECALL TARGET: Aim to keep ~14 to 28 valid items from this 55-item batch! If fewer than 12 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related interviews, podcasts, breakdowns, or deep-dive videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
+                + "CRITICAL RECALL TARGET: Aim to keep ~12 to 24 valid items from this batch! If fewer than 12 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related interviews, podcasts, breakdowns, or deep-dive videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
                 + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
                 + f"Items: {json.dumps(compact, ensure_ascii=False)}"
             )
@@ -1362,7 +1409,14 @@ HE_POST = [
     ('קאן\\s*11', "כאן 11"),
     ('פ[֑-ׇ]*נ[֑-ׇ]*י[֑-ׇ]*נ[֑-ׇ]*ה', "פנינה"),
     ('\\bדגשים\\b|\\bהבהרה\\b|\\bהבהרות\\b|הבולטים של|נקודות השיא', "תקציר"),
-    ('עיר האדם|עיר גבר', "מנצ'סטר סיטי"),
+    ('עיר האדם|עיר גבר|מאן\\s+סיטי', "מנצ'סטר סיטי"),
+    ('מאן\\s+יוטד', "מנצ'סטר יונייטד"),
+    ('התאמה מלאה', "משחק מלא"),
+    ('צוות ראשון', "הקבוצה הבוגרת"),
+    ('מיומנויות ויעדים', "מהלכים ושערים"),
+    ('חוות בארסה', "לה מאסיה"),
+    ('ליגת הנוער של אופ["״]א', "ליגת האלופות לנוער"),
+    ('ב-פליק', "בפליק"),
 ]
 KEEP_CAPS = {"FC", "CF", "SC", "AC", "BC", "UEFA", "UCL", "FIFA", "NBA", "NFL", "UFC", "NHL", "MLS", "ATP", "WTA", "MVP", "VAR", "ACL", "GOAT", "AI", "DNA", "API", "URL", "PDF", "US", "USA", "UK", "EU", "IL", "HD", "FHD", "UHD", "QHD", "4K", "8K", "FPS", "U21", "U20", "U19", "U18", "U17", "U16", "U15", "U14", "U12", "PSG", "TV", "VIP", "HQ", "POV", "OST", "DIY", "F1", "CR7", "ESPN", "DAZN", "CBS", "TNT", "BBC", "CNN", "ONE"}
 
