@@ -634,6 +634,9 @@ def find_tokens(sub_obj):
         if "continuationCommand" in sub_obj:
             t = (sub_obj["continuationCommand"] or {}).get("token")
             if t: toks.append(t)
+        if "nextContinuationData" in sub_obj:
+            t = (sub_obj["nextContinuationData"] or {}).get("continuation")
+            if t: toks.append(t)
         for v in sub_obj.values(): toks.extend(find_tokens(v))
     elif isinstance(sub_obj, list):
         for it in sub_obj: toks.extend(find_tokens(it))
@@ -1221,32 +1224,42 @@ selected_pool = [c for c in selected_pool if match_dur(c)]
 if high_quality_only: selected_pool = [c for c in selected_pool if c.get("max_height", 0) >= 1080 or c.get("max_height", 0) == 0]
 if min_views > 0: selected_pool = [c for c in selected_pool if int(c.get("views") or 0) >= min_views]
 
-ai_status, used_models, ai_sent_by_q = "", [], {}
+ai_status, used_models, ai_sent_by_q, ai_sent_total = "", [], {}, 0
 if filter_prompt:
     if not ai_router.has_any_provider():
         ai_status = "⚠️ סינון AI כבוי (חסר מפתח AI ב-Secrets)"
     elif selected_pool:
         ai_slice = selected_pool[:min(len(selected_pool), max(max_results * 2, 165))]
+        ai_sent_total = len(ai_slice)
         for it_s in ai_slice:
             sq_s = it_s.get("source_q") or ""
             if sq_s: ai_sent_by_q[sq_s] = ai_sent_by_q.get(sq_s, 0) + 1
         chunk_sz = 42
         chunks_ai = [(off, ai_slice[off:off + chunk_sz]) for off in range(0, len(ai_slice), chunk_sz)]
+        is_channel_browse = bool(channel_input and not clean_q)
 
         def _score_ai_chunk(pair, attempt_tag=""):
             offset, sub_items = pair
             compact = [[offset + i, str(it.get("title") or "")[:95], str(it.get("channel") or "")[:36], int(it.get("views") or 0)] for i, it in enumerate(sub_items)]
+            rubric = (
+                "CHANNEL BROWSE MODE: The user is browsing this specific channel directly without a topic keyword.\n"
+                "KEEP ALL legitimate videos/episodes from this channel (even 95%-100% of the batch!) — score them 7-10 by quality/interest.\n"
+                "ONLY drop gaming/FIFA (if requested), off-channel spam, or clear violations of the User Modesty/Focus Rule. NEVER artificially cap or prune valid channel episodes!\n"
+                "Write a crisp Hebrew reason (3-6 words) per kept video.\n"
+            ) if is_channel_browse else (
+                "IMPORTANT MULTI-CONCEPT SCORING RUBRIC (DO NOT require EVERY query word to appear in the same title!):\n"
+                "  * Score 9-10 (Top ~12%): Directly combines ALL core parts of the user's query.\n"
+                "  * Score 7-8 (Strong): Strongly covers most core concepts or the primary entity/angle of the query.\n"
+                "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this theme (specific key figure, interview, podcast, or deep breakdown).\n"
+                "  * DROP (<5): Confused/similar-named wrong entity, gaming/FIFA/EA FC (unless asked), unrelated topics/celebrities, clickbait spam, or filter-rule violations.\n"
+                "Note: 'ללא דמויות אחרות' means no unrelated people/topics — directly relevant figures within the requested subject are WELCOME!\n"
+                "CRITICAL RECALL TARGET: Aim to keep ~12 to 24 valid items from this batch! If fewer than 12 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related interviews, podcasts, breakdowns, or deep-dive videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
+            )
             ai_prompt = (
                 f"Query=\"{query or 'N/A'}\" | Channel=\"{resolved_ch or 'Any'}\" | Type={content_type}\n"
                 + (f"Strategy: {ai_strategy_he}\n" if ai_strategy_he else "")
                 + f"User Modesty/Focus Rule: {filter_prompt}\n"
-                + "IMPORTANT MULTI-CONCEPT SCORING RUBRIC (DO NOT require EVERY query word to appear in the same title!):\n"
-                + "  * Score 9-10 (Top ~12%): Directly combines ALL core parts of the user's query.\n"
-                + "  * Score 7-8 (Strong): Strongly covers most core concepts or the primary entity/angle of the query.\n"
-                + "  * Score 5-6 (Related Gems): Quality video tightly relevant to ONE core angle of this theme (specific key figure, interview, podcast, or deep breakdown).\n"
-                + "  * DROP (<5): Confused/similar-named wrong entity, gaming/FIFA/EA FC (unless asked), unrelated topics/celebrities, clickbait spam, or filter-rule violations.\n"
-                + "Note: 'ללא דמויות אחרות' means no unrelated people/topics — directly relevant figures within the requested subject are WELCOME!\n"
-                + "CRITICAL RECALL TARGET: Aim to keep ~12 to 24 valid items from this batch! If fewer than 12 items qualify for scores 7-10, actively include strong Tier 3 (score 5-6) related interviews, podcasts, breakdowns, or deep-dive videos so good videos are not over-pruned. Write a crisp Hebrew reason (3-6 words) per kept video.\n"
+                + rubric
                 + "Return ONLY compact JSON: {\"k\": [[id, score, \"סיבה קצרה בעברית\"]]}\n"
                 + f"Items: {json.dumps(compact, ensure_ascii=False)}"
             )
@@ -1553,7 +1566,7 @@ ai_trace = {
     "strategy_he": ai_strategy_he,
     "queries": query_stats,
     "refinement_tips_he": ai_refinement_tips,
-    "pipeline": {"raw_total": len(raw), "unique_cands": len(cands), "sent_to_ai": sum(ai_sent_by_q.values()), "ai_kept": len(selected_pool), "final_shown": len(pool), "elapsed_sec": round(time.time() - t_rec_start, 1)},
+    "pipeline": {"raw_total": len(raw), "unique_cands": len(cands), "sent_to_ai": ai_sent_total, "ai_kept": len(selected_pool), "final_shown": len(pool), "elapsed_sec": round(time.time() - t_rec_start, 1)},
     "prompts_summary": {"user_filter_rule": filter_prompt, "langs": search_langs, "content_type": content_type, "ranking_formula": "ai_score * 1.8 + log10(views + 1)" if sort_by == "relevance" else sort_by},
 }
 
