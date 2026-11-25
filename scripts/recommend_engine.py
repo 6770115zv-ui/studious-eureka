@@ -1215,9 +1215,11 @@ def match_dur(c):
     d, tl = int(c.get("duration") or 0), str(c.get("title") or "").lower()
     if high_quality_only and ("#shorts" in tl or 0 < d < 65): return False
     if dur_filter == "no_shorts": return d == 0 or d >= 61
+    if dur_filter == "short5": return 0 < d <= 300
+    if dur_filter == "medium": return d == 0 or 300 <= d <= 1200
     if dur_filter == "clips": return d == 0 or 60 <= d <= 1200
     if dur_filter == "long": return d >= 1200
-    if dur_filter == "short5": return 0 < d <= 300
+    if dur_filter == "podcast": return d >= 2400
     return True
 
 selected_pool = [c for c in selected_pool if match_dur(c)]
@@ -1539,9 +1541,38 @@ def fetch_sharp_webp_thumb(item):
         except Exception:
             pass
 
-if pool and not no_thumbs:
+def enrich_final_details(c):
+    if c.get("short_desc") is not None and c.get("sub_langs") is not None and c.get("max_height"):
+        return
+    try:
+        r = _yt_post("player", {"videoId": c["id"]}, sess=get_sess(), timeout=8)
+        if r.status_code != 200:
+            return
+        pd = r.json()
+        vd = pd.get("videoDetails") or {}
+        if vd.get("shortDescription") and not c.get("short_desc"):
+            c["short_desc"] = str(vd["shortDescription"]).strip()[:1200]
+        if vd.get("lengthSeconds") and not c.get("duration"):
+            c["duration"] = int(vd["lengthSeconds"])
+        tracks = (((pd.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}).get("captionTracks") or [])
+        langs = []
+        for tr in tracks:
+            lc = str(tr.get("languageCode") or "").strip().lower()
+            if lc and lc not in langs:
+                langs.append(lc)
+        langs.sort(key=lambda x: (0 if x.startswith(("he", "iw")) else (1 if x.startswith("en") else 2)))
+        c["sub_langs"] = langs[:5]
+        fmts = (pd.get("streamingData") or {}).get("adaptiveFormats") or []
+        if fmts and not c.get("max_height"):
+            c["max_height"] = max((int(f.get("height") or 0) for f in fmts), default=0)
+    except Exception:
+        pass
+
+if pool:
     with ThreadPoolExecutor(max_workers=24) as ex:
-        list(ex.map(fetch_sharp_webp_thumb, pool[:180]))
+        list(ex.map(enrich_final_details, pool[:120]))
+        if not no_thumbs:
+            list(ex.map(fetch_sharp_webp_thumb, pool[:180]))
 
 if not suggested_searches and (clean_q or resolved_ch):
     bt, yr = clean_q or resolved_ch, datetime.date.today().year
