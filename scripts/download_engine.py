@@ -1454,8 +1454,6 @@ else:
 
     shutil.rmtree(stage_dir, ignore_errors=True)
     shutil.rmtree(subs_dir, ignore_errors=True)
-    shutil.rmtree(stage_dir, ignore_errors=True)
-    shutil.rmtree(subs_dir, ignore_errors=True)
     files = [p for p in out_dir.rglob("*") if p.is_file() and not p.name.endswith((".part", ".ytdl")) and p.stat().st_size > 0]
     if not files:
         last_errs = " ; ".join(f"#{a.get('n')}:{a.get('err','')}" for a in telemetry.get("attempts", [])[-3:] if not a.get("ok"))
