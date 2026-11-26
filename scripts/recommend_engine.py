@@ -1,4 +1,4 @@
-import base64, datetime, io, json, math, os, re, subprocess, threading, time, urllib.parse, requests
+import base64, datetime, email.message, html as _html_mod, io, json, math, os, re, smtplib, subprocess, threading, time, urllib.parse, requests
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -40,8 +40,21 @@ m_ctype = re.search(r"\[ctype:([a-z0-9_]+)\]", fp_low)
 content_type = m_ctype.group(1) if m_ctype else "all"
 no_gaming = "[no_gaming]" in fp_low
 no_thumbs = "[no_thumbs]" in fp_low
+email_only_mode = "[email_only]" in fp_low
+m_em_enc = re.search(r"\[email_enc:([A-Za-z0-9+/=_-]+)\]", filter_prompt, flags=re.I)
+email_enc_raw = m_em_enc.group(1).strip() if m_em_enc else ""
 m_excl = re.search(r"\[excl:([^\]]+)\]", filter_prompt, flags=re.I)
 exclude_terms = [urllib.parse.unquote(x).strip().lower() for x in (m_excl.group(1).split(",") if m_excl else []) if x.strip()]
+
+def _decrypt_aes_secret(b64_txt: str) -> str:
+    if not b64_txt or len(secret_key_env) != 64:
+        return ""
+    try:
+        raw_b = base64.b64decode(b64_txt)
+        return AESGCM(bytes.fromhex(secret_key_env)).decrypt(raw_b[:12], raw_b[12:], None).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
 
 SEASON_RANGES = {
     "2026_2027": ("20260801", "20270731", "after:2026-07-31"),
@@ -56,7 +69,7 @@ SEASON_RANGES = {
 }
 season_info = SEASON_RANGES.get(season_filter)
 sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "relevance"
-filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|NO_THUMBS|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
+filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|NO_THUMBS|EMAIL_ONLY|EMAIL_ENC:[^\]]+|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
 
 try:
     from google import genai as _genai
@@ -1587,6 +1600,185 @@ for item in pool:
     item["quality_badge"] = qb
     item["channel"] = " • ".join(p for p in [item["channel"], f"🎬 {qb}" if qb else ""] if p)
     if item.get("title_he"): item["title"] = item["title_he"]
+
+if email_only_mode:
+    email_opt = ""
+    if email_enc_raw:
+        mask_secret(email_enc_raw)
+        _dec_em = _decrypt_aes_secret(email_enc_raw).strip()
+        if "@" in _dec_em:
+            email_opt = _dec_em
+            mask_secret(email_opt)
+    smtp_user = next((os.environ.get(k, "").strip() for k in ("SMTP_USER", "EMAIL_USER", "GMAIL_USER") if os.environ.get(k, "").strip()), "")
+    smtp_pass = next((os.environ.get(k, "").strip() for k in ("SMTP_PASS", "EMAIL_PASS", "GMAIL_APP_PASSWORD", "GMAIL_PASS") if os.environ.get(k, "").strip()), "")
+    secret_to = next((os.environ.get(k, "").strip() for k in ("EMAIL_TO", "SMTP_TO") if os.environ.get(k, "").strip()), smtp_user)
+    recipient = email_opt if (email_opt and "@" in email_opt) else secret_to
+    mask_secret(smtp_user, smtp_pass, secret_to, recipient)
+    if not (smtp_user and smtp_pass and recipient and "@" in recipient):
+        raise SystemExit("::error::Missing SMTP_USER / SMTP_PASS / EMAIL_TO secrets for Email-Only search bridge.")
+
+    def _fmt_dur_he(sec_val):
+        s = max(0, int(sec_val or 0))
+        if not s:
+            return "—"
+        h, rem = divmod(s, 3600)
+        m, sc = divmod(rem, 60)
+        return f"{h}:{m:02d}:{sc:02d}" if h else f"{m}:{sc:02d}"
+
+    def _est_mb_he(sec_val, mh_val):
+        s = max(0, int(sec_val or 0))
+        if not s:
+            return ""
+        h_eff = int(mh_val or 1080)
+        mb_1080 = max(1, round((s * ((2200 if h_eff >= 1080 else 1150) + 128)) / 8192))
+        mb_720 = max(1, round((s * (1150 + 128)) / 8192))
+        return f"~{mb_1080}MB (1080p) / ~{mb_720}MB (720p)"
+
+    target_title = " • ".join(p for p in [resolved_ch or channel_input, query] if p) or "חיפוש יוטיוב"
+    subj = f"YouTube Cloud Ultra | 🔎 {len(pool)} תוצאות חיפוש: {target_title[:68]}"
+
+    plain_lines = [
+        f"YouTube Cloud Ultra — תוצאות חיפוש למייל ({len(pool)} תוצאות)",
+        f"חיפוש: {target_title}",
+        "הוראה להורדה ל-Drive: העתק את המזהה בן 11 התווים של הסרטון הרצוי והדבק בלשונית 'הורדה ו-Google Drive' בתוסף.",
+        "=" * 65,
+    ]
+    html_cards = []
+    cid_images = []
+
+    for idx_i, it in enumerate(pool, 1):
+        vid = str(it.get("id") or "").strip()
+        url_v = str(it.get("url") or f"https://www.youtube.com/watch?v={vid}").strip()
+        t_he = str(it.get("title") or "").strip()
+        t_orig = str(it.get("title_orig") or "").strip()
+        ch_name = str(it.get("channel") or "").strip()
+        views_n = f"{int(it.get('views') or 0):,}"
+        dur_s = _fmt_dur_he(it.get("duration"))
+        dt_s = str(it.get("date_formatted") or it.get("published_rel") or "").strip()
+        sz_s = _est_mb_he(it.get("duration"), it.get("max_height"))
+        ai_sc = it.get("ai_score")
+        sub_langs = it.get("sub_langs") or []
+        sub_badge = ("📝 כתוביות: " + ", ".join(sub_langs[:4])) if sub_langs else ("📝 כתוביות זמינות" if it.get("has_subs") else "")
+        desc_s = str(it.get("description") or "").strip()[:220]
+
+        plain_lines.append(
+            f"#{idx_i}. {t_he}\n"
+            + (f"   כותרת מקורית: {t_orig}\n" if (t_orig and t_orig != t_he) else "")
+            + f"   ערוץ: {ch_name} | משך: {dur_s} | צפיות: {views_n} | תאריך: {dt_s}\n"
+            + (f"   נפח משוער: {sz_s}\n" if sz_s else "")
+            + f"   >>> מזהה להדבקה בתוסף (11 תווים): {vid} <<<\n"
+            + f"   קישור: {url_v}\n"
+        )
+
+        thumb_html = ""
+        tb64 = str(it.get("thumb_b64") or "")
+        if (not no_thumbs) and idx_i <= 25 and tb64.startswith("data:image/"):
+            try:
+                header_p, b64_p = tb64.split(",", 1)
+                sub_t = "webp" if "webp" in header_p else "jpeg"
+                cid_name = f"thumb_{idx_i}_{req_id[:6]}"
+                cid_images.append((cid_name, base64.b64decode(b64_p), sub_t))
+                thumb_html = (
+                    f'<td style="width:148px;vertical-align:top;padding-left:12px;">'
+                    f'<img src="cid:{cid_name}" width="144" height="81" alt="thumb" '
+                    f'style="display:block;width:144px;height:81px;object-fit:cover;border-radius:8px;border:1px solid #334155;"/>'
+                    f'</td>'
+                )
+            except Exception:
+                thumb_html = ""
+
+        meta_pills = [
+            f"📺 {_html_mod.escape(ch_name)}" if ch_name else "",
+            f"⏱️ {_html_mod.escape(dur_s)}" if dur_s else "",
+            f"👁️ {views_n} צפיות",
+            f"📅 {_html_mod.escape(dt_s)}" if dt_s else "",
+            f"💾 {_html_mod.escape(sz_s)}" if sz_s else "",
+            f"🤖 ציון AI: {ai_sc}/100" if ai_sc is not None else "",
+            _html_mod.escape(sub_badge) if sub_badge else "",
+        ]
+        meta_html = " &nbsp;•&nbsp; ".join(p for p in meta_pills if p)
+        orig_html = (
+            f'<div style="font-size:12px;color:#94a3b8;margin-top:2px;" dir="auto">{_html_mod.escape(t_orig)}</div>'
+            if (t_orig and t_orig != t_he) else ""
+        )
+        desc_html = (
+            f'<div style="font-size:12px;color:#cbd5e1;margin-top:5px;" dir="auto">{_html_mod.escape(desc_s)}</div>'
+            if desc_s else ""
+        )
+
+        html_cards.append(
+            f'<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:12px;margin-bottom:10px;">'
+            f'<table role="presentation" style="width:100%;border-collapse:collapse;" dir="rtl"><tr>'
+            f'{thumb_html}'
+            f'<td style="vertical-align:top;">'
+            f'<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;">'
+            f'<span style="color:#38bdf8;">#{idx_i}</span> {_html_mod.escape(t_he)}</div>'
+            f'{orig_html}'
+            f'<div style="font-size:12px;color:#93c5fd;margin-top:6px;line-height:1.5;">{meta_html}</div>'
+            f'{desc_html}'
+            f'<div style="margin-top:8px;padding:7px 10px;background:#0f172a;border:1px dashed #38bdf8;border-radius:7px;font-size:12.5px;color:#e2e8f0;">'
+            f'🔑 <b>מזהה להדבקה בתוסף (ל-Drive):</b> '
+            f'<code dir="ltr" style="font-family:Consolas,monospace;font-size:14px;font-weight:700;color:#4ade80;background:#1e293b;padding:2px 8px;border-radius:4px;user-select:all;">{_html_mod.escape(vid)}</code>'
+            f' &nbsp;|&nbsp; <span dir="ltr" style="font-family:Consolas,monospace;font-size:11.5px;color:#94a3b8;user-select:all;">{_html_mod.escape(url_v)}</span>'
+            f'</div>'
+            f'</td></tr></table></div>'
+        )
+
+    top5_ids = " ".join(str(x.get("id") or "") for x in pool[:5] if x.get("id"))
+    top10_ids = " ".join(str(x.get("id") or "") for x in pool[:10] if x.get("id"))
+    if top5_ids:
+        plain_lines.append(f"\nהעתקה מהירה — 5 מזהים ראשונים:\n{top5_ids}")
+    if top10_ids and len(pool) > 5:
+        plain_lines.append(f"\nהעתקה מהירה — 10 מזהים ראשונים:\n{top10_ids}")
+
+    strategy_box = (
+        f'<div style="background:#172554;border:1px solid #1d4ed8;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12.5px;color:#dbeafe;">'
+        f'🤖 <b>אסטרטגיית AI ({_html_mod.escape(ai_status or "פעיל")}):</b> {_html_mod.escape(ai_strategy_he)}'
+        f'</div>'
+    ) if ai_strategy_he else ""
+
+    batch_box = (
+        f'<div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px;margin-top:14px;font-size:12.5px;color:#e2e8f0;">'
+        f'<div style="font-weight:700;color:#38bdf8;margin-bottom:6px;">📦 העתקה קבוצתית מהירה (הדבק בשדה הקישור בתוסף להעלאת מספר סרטונים ל-Drive):</div>'
+        f'<div style="margin-bottom:6px;"><b>5 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;color:#4ade80;background:#1e293b;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top5_ids)}</code></div>'
+        + (f'<div><b>10 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;color:#4ade80;background:#1e293b;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top10_ids)}</code></div>' if len(pool) > 5 else "")
+        + '</div>'
+    ) if top5_ids else ""
+
+    html_body = (
+        '<!doctype html><html lang="he" dir="rtl"><head><meta charset="UTF-8"/></head>'
+        '<body style="margin:0;padding:16px;background:#0b1120;color:#f8fafc;font-family:Segoe UI,Arial,sans-serif;" dir="rtl">'
+        '<div style="max-width:780px;margin:0 auto;">'
+        '<div style="background:linear-gradient(135deg,#0284c7,#1e3a8a);border-radius:12px;padding:14px 18px;margin-bottom:12px;">'
+        f'<h2 style="margin:0;font-size:18px;color:#ffffff;">📧 YouTube Cloud Ultra — תוצאות חיפוש למייל ({len(pool)} תוצאות)</h2>'
+        f'<div style="font-size:13px;color:#e0f2fe;margin-top:4px;">חיפוש: <b>{_html_mod.escape(target_title)}</b>'
+        + (f' &nbsp;|&nbsp; תרגום שאילתה: <b>{_html_mod.escape(en_query)}</b>' if en_query else '')
+        + '</div></div>'
+        '<div style="background:#064e3b;border:1px solid #059669;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#d1fae5;">'
+        '☁️ <b>איך להעלות ל-Google Drive בשעות חסימה:</b> העתק את ה<b>מזהה בן 11 התווים</b> (בצבע ירוק) של הסרטון הרצוי, '
+        'פתח את התוסף בלשונית <b>"📥 הורדה ו-Google Drive"</b> (שכבר מוגדרת על Drive + ענן בלבד 0MB), הדבק ולחץ על הורדה!'
+        '</div>'
+        f'{strategy_box}'
+        + ("".join(html_cards) if html_cards else '<div style="padding:18px;background:#1e293b;border-radius:10px;text-align:center;">לא נמצאו תוצאות שעברו את תנאי הסינון.</div>')
+        + f'{batch_box}'
+        '</div></body></html>'
+    )
+
+    msg = email.message.EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subj, smtp_user, recipient
+    msg.set_content("\n".join(plain_lines))
+    msg.add_alternative(html_body, subtype="html")
+    if cid_images:
+        html_part = msg.get_payload()[-1]
+        for cid_name, img_bytes, sub_t in cid_images:
+            html_part.add_related(img_bytes, maintype="image", subtype=sub_t, cid=f"<{cid_name}>", filename=f"{cid_name}.{sub_t}")
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=90) as srv:
+        srv.login(smtp_user, smtp_pass)
+        srv.send_message(msg)
+
+    print(f">>> EMAIL-ONLY SEARCH DELIVERED ({len(pool)} results, {len(cid_images)} inline thumbs) — 0MB Release skipped <<<", flush=True)
+    raise SystemExit(0)
 
 ai_trace = {
     "planner_model": planner_model_used or "",
