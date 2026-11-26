@@ -41,6 +41,8 @@ content_type = m_ctype.group(1) if m_ctype else "all"
 no_gaming = "[no_gaming]" in fp_low
 no_thumbs = "[no_thumbs]" in fp_low
 email_only_mode = "[email_only]" in fp_low
+m_dd = re.search(r"\[digest_days:(\d+)\]", fp_low)
+digest_days = int(m_dd.group(1)) if m_dd else 0
 m_em_enc = re.search(r"\[email_enc:([A-Za-z0-9+/=_-]+)\]", filter_prompt, flags=re.I)
 email_enc_raw = m_em_enc.group(1).strip() if m_em_enc else ""
 m_excl = re.search(r"\[excl:([^\]]+)\]", filter_prompt, flags=re.I)
@@ -69,7 +71,7 @@ SEASON_RANGES = {
 }
 season_info = SEASON_RANGES.get(season_filter)
 sort_by = re.sub(r"\|(hq|tr|notr)", "", sort_raw.lower()).strip() or "relevance"
-filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|NO_THUMBS|EMAIL_ONLY|EMAIL_ENC:[^\]]+|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
+filter_prompt = re.sub(r"\[(HQ_ONLY|TR_HE|PL_UU|PL_STREAMS|PL_UULP|DUR:[A-Z0-9_]+|SEASON:[A-Z0-9_]+|IL_IDS:[A-Za-z0-9_,-]+|LANGS:[a-z,]+|EXPAND|CTYPE:[A-Z0-9_]+|NO_GAMING|NO_THUMBS|EMAIL_ONLY|EMAIL_ENC:[^\]]+|DIGEST_DAYS:\d+|EXCL:[^\]]+)\]", "", filter_prompt, flags=re.I).strip()
 
 try:
     from google import genai as _genai
@@ -1013,7 +1015,67 @@ def fetch_channel_playlists_videos(uc_id_str: str, ch_title_str: str):
                 out_pl.extend(b)
     return out_pl
 
-if channel_input:
+raw_ch_list = [x.strip() for x in re.split(r"[,;\s]+", channel_input) if x.strip()] if channel_input else []
+is_multi_channel = len(raw_ch_list) > 1
+
+def fetch_recent_digest_for_channel(ch_tuple):
+    c_base, c_uc, c_name, per_ch_cap = ch_tuple
+    out_v, seen_v = [], set()
+    def _add(arr):
+        for v in arr:
+            vid = v.get("id")
+            if vid and len(vid) == 11 and vid not in seen_v:
+                seen_v.add(vid)
+                v["channel"] = c_name
+                v["channel_id"] = c_uc
+                v["source_q"] = c_name
+                out_v.append(v)
+    if c_uc:
+        _add(fetch_playlist_browse("VLUU" + c_uc[2:], c_name, c_uc, max_pages=4, target_count=per_ch_cap))
+        _add(fetch_channel_tab_browse(c_uc, "EgdzdHJlYW1z8gYECgJ6AA==", c_name, max_pages=2, target_count=max(25, per_ch_cap // 2)))
+        if not out_v:
+            _add(fetch_channel_tab_browse(c_uc, "EgZ2aWRlb3PyBgQKAjoA", c_name, max_pages=3, target_count=per_ch_cap))
+    if not out_v and c_name:
+        _add(fetch_search(f'"{c_name}"', "CAI%3D", max(40, per_ch_cap), c_uc, "" if c_name.startswith("@") else c_name))
+    s_set = query_hits_map.setdefault(c_name, set())
+    for it_v in out_v:
+        if it_v.get("id"): s_set.add(it_v["id"])
+    return out_v
+
+if is_multi_channel or (channel_input and digest_days > 0 and not clean_q):
+    expanded_ch_handles = []
+    for h_in in (raw_ch_list or [channel_input]):
+        if h_in.lower() not in [x.lower() for x in expanded_ch_handles]:
+            expanded_ch_handles.append(h_in)
+        for net_k, net_list in NETWORK_CLUSTERS.items():
+            if net_k in h_in.lower():
+                for sib_h in net_list:
+                    if sib_h.lower() not in [x.lower() for x in expanded_ch_handles]:
+                        expanded_ch_handles.append(sib_h)
+    with ThreadPoolExecutor(max_workers=min(12, max(1, len(expanded_ch_handles)))) as ex:
+        resolved_tuples = list(ex.map(resolve_channel, expanded_ch_handles[:25]))
+    valid_ch_tuples = []
+    resolved_names_list = []
+    per_ch_target = max(35, min(120, (max_results * 3) // max(1, len(resolved_tuples)) + 25))
+    for orig_h, (c_base, c_uc, c_name) in zip(expanded_ch_handles[:25], resolved_tuples):
+        disp_name = c_name or orig_h
+        if c_uc: allowed_uc_ids.add(c_uc)
+        if disp_name:
+            allowed_ch_names.add(disp_name.strip().lower())
+            if disp_name not in resolved_names_list:
+                resolved_names_list.append(disp_name)
+            if disp_name.lower() not in [x.lower() for x in expanded_queries]:
+                expanded_queries.append(disp_name)
+                query_meta_map[disp_name.lower()] = {"angle": "direct", "note_he": f"פרקים ושידורים אחרונים בערוץ {disp_name}"}
+        valid_ch_tuples.append((c_base, c_uc, disp_name, per_ch_target))
+    resolved_ch = ", ".join(resolved_names_list[:8]) + (f" (+{len(resolved_names_list) - 8})" if len(resolved_names_list) > 8 else "")
+    with ThreadPoolExecutor(max_workers=min(12, max(1, len(valid_ch_tuples)))) as ex:
+        for ch_vids in ex.map(fetch_recent_digest_for_channel, valid_ch_tuples):
+            raw.extend(ch_vids)
+    q_words = [w.lower() for eq in expanded_queries for w in eq.split() if len(w) >= 3 and w.lower() not in STOP_W] if clean_q else []
+    if q_words:
+        raw = [v for v in raw if any(w in str(v.get("title") or "").lower() for w in q_words)]
+elif channel_input:
     ch_base, uc_id, resolved_ch = resolve_channel(channel_input)
     target_uc_id = uc_id
     if uc_id: allowed_uc_ids.add(uc_id)
@@ -1137,10 +1199,25 @@ def get_sess():
 MONTHS = {"jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06", "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12"}
 def parse_dt(d_str: str) -> str:
     s = str(d_str or "").strip()
+    if not s: return ""
     m1 = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
     if m1: return f"{m1.group(1)}{m1.group(2)}{m1.group(3)}"
     m2 = re.search(r"([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+(\d{4})", s)
-    return f"{m2.group(3)}{MONTHS.get(m2.group(1).lower(), '01')}{m2.group(2).zfill(2)}" if m2 else ""
+    if m2: return f"{m2.group(3)}{MONTHS.get(m2.group(1).lower(), '01')}{m2.group(2).zfill(2)}"
+    sl = s.lower()
+    today_d = datetime.date.today()
+    if any(k in sl for k in ("hour", "minute", "second", "just now", "שעה", "שעות", "דקה", "דקות")):
+        return today_d.strftime("%Y%m%d")
+    if "yesterday" in sl or "אתמול" in sl or "יום אחד" in sl:
+        return (today_d - datetime.timedelta(days=1)).strftime("%Y%m%d")
+    if "יומיים" in sl:
+        return (today_d - datetime.timedelta(days=2)).strftime("%Y%m%d")
+    m_rel = re.search(r"(\d+)\s*(day|week|month|year|ימים|שבוע|שבועות|חודש|חודשים)", sl)
+    if m_rel:
+        n_v, u_v = int(m_rel.group(1)), m_rel.group(2)
+        days_back = n_v if u_v.startswith(("day", "ימ")) else (n_v * 7 if u_v.startswith(("week", "שבוע")) else (n_v * 30 if u_v.startswith(("month", "חודש")) else n_v * 365))
+        return (today_d - datetime.timedelta(days=days_back)).strftime("%Y%m%d")
+    return ""
 
 def enrich(c):
     sess, vid = get_sess(), c["id"]
@@ -1223,6 +1300,21 @@ elif channel_input and resolved_ch and not resolved_ch.startswith("@"):
 if season_info:
     s_min, s_max, _ = season_info
     selected_pool = [c for c in selected_pool if (s_min <= str(c.get("upload_date") or "") <= s_max) or (not c.get("upload_date") and c.get("matched_date_op"))]
+if digest_days > 0:
+    cutoff_ymd = (datetime.date.today() - datetime.timedelta(days=digest_days)).strftime("%Y%m%d")
+    for c_it in selected_pool:
+        if not c_it.get("upload_date") and c_it.get("published_rel"):
+            p_rel = parse_dt(c_it.get("published_rel"))
+            if p_rel: c_it["upload_date"] = p_rel
+    recent_filtered = [c for c in selected_pool if str(c.get("upload_date") or "") >= cutoff_ymd]
+    if len(recent_filtered) >= 3 or not selected_pool:
+        selected_pool = recent_filtered
+    else:
+        selected_pool.sort(key=lambda x: str(x.get("upload_date") or "00000000"), reverse=True)
+        selected_pool = selected_pool[:max(15, max_results)]
+    if not ai_strategy_he:
+        ai_strategy_he = f"נסרקו הפרקים והשידורים החדשים ביותר מ-{digest_days} הימים האחרונים מתוך הערוצים שנבחרו ({resolved_ch or channel_input}), ממוינים מהחדש לישן."
+
 
 def match_dur(c):
     d, tl = int(c.get("duration") or 0), str(c.get("title") or "").lower()
@@ -1750,11 +1842,30 @@ if email_only_mode:
     if top10_ids and len(pool) > 5:
         plain_lines.append(f"\nהעתקה מהירה — 10 מזהים ראשונים:\n{top10_ids}")
 
+    ids_by_ch = {}
+    for x_it in pool:
+        raw_ch_n = str(x_it.get("channel") or "").split("•")[0].strip() or "ערוץ"
+        if x_it.get("id"):
+            ids_by_ch.setdefault(raw_ch_n, []).append(str(x_it["id"]))
+
+    ch_summary_box = (
+        f'<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:8px;padding:9px 12px;margin-bottom:12px;font-size:12.5px;color:#0f172a;">'
+        f'📺 <b>פירוט פרקים חדשים לפי ערוץ:</b> '
+        + "".join(
+            f'<span dir="rtl" style="display:inline-block;background:#e0f2fe;border:1px solid #7dd3fc;color:#0369a1;padding:2px 9px;border-radius:999px;margin:2px 0 2px 6px;font-weight:700;">'
+            f'<bdi>{_html_mod.escape(ch_k)}</bdi> ({len(ch_v)})</span>'
+            for ch_k, ch_v in ids_by_ch.items()
+        )
+        + '</div>'
+    ) if len(ids_by_ch) > 1 else ""
+
     strategy_box = (
-        f'<div style="background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#1e3a8a;">'
-        f'🤖 <b>אסטרטגיית AI ({_html_mod.escape(ai_status or "פעיל")}):</b> {_html_mod.escape(ai_strategy_he)}'
-        f'</div>'
-    ) if ai_strategy_he else ""
+        ch_summary_box + (
+            f'<div style="background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#1e3a8a;">'
+            f'🤖 <b>אסטרטגיית AI ({_html_mod.escape(ai_status or "פעיל")}):</b> {_html_mod.escape(ai_strategy_he)}'
+            f'</div>'
+         if ai_strategy_he else "")
+    )
 
     suggest_box = (
         f'<div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:11px 12px;margin-top:12px;font-size:12.5px;color:#78350f;">'
@@ -1785,11 +1896,19 @@ if email_only_mode:
         f'</tr></thead><tbody>{q_rows_html}</tbody></table></div>'
     ) if query_stats else ""
 
+    per_ch_copy_rows = "".join(
+        f'<div style="margin-top:6px;"><b>📺 {_html_mod.escape(ch_k)} ({len(ch_v[:10])}):</b> '
+        f'<code dir="ltr" style="font-family:Consolas,monospace;font-weight:700;color:#047857;background:#d1fae5;padding:3px 7px;border-radius:4px;user-select:all;">'
+        f'{_html_mod.escape(" ".join(ch_v[:10]))}</code></div>'
+        for ch_k, ch_v in ids_by_ch.items()
+    ) if len(ids_by_ch) > 1 else ""
+
     batch_box = (
         f'<div style="background:#f8fafc;border:1px solid #94a3b8;border-radius:10px;padding:12px;margin-top:14px;font-size:12.5px;color:#0f172a;">'
         f'<div style="font-weight:700;color:#0284c7;margin-bottom:6px;">📦 העתקה קבוצתית מהירה (הדבק בשדה הקישור בתוסף להעלאת מספר סרטונים ל-Drive):</div>'
         f'<div style="margin-bottom:6px;"><b>5 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;font-weight:700;color:#047857;background:#d1fae5;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top5_ids)}</code></div>'
-        + (f'<div><b>10 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;font-weight:700;color:#047857;background:#d1fae5;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top10_ids)}</code></div>' if len(pool) > 5 else "")
+        + (f'<div style="margin-bottom:6px;"><b>10 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;font-weight:700;color:#047857;background:#d1fae5;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top10_ids)}</code></div>' if len(pool) > 5 else "")
+        + per_ch_copy_rows
         + '</div>'
     ) if top5_ids else ""
 
