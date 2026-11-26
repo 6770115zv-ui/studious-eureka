@@ -1599,7 +1599,10 @@ for item in pool:
     qb = "4K" if mh >= 2160 else ("1440p" if mh >= 1440 else ("1080p HD" if mh >= 1080 else ("720p" if mh >= 720 else (f"{mh}p" if mh > 0 else ""))))
     item["quality_badge"] = qb
     item["channel"] = " • ".join(p for p in [item["channel"], f"🎬 {qb}" if qb else ""] if p)
-    if item.get("title_he"): item["title"] = item["title_he"]
+    if item.get("title_he"):
+        if item.get("title") and item["title"] != item["title_he"]:
+            item["title_orig"] = item["title"]
+        item["title"] = item["title_he"]
 
 if email_only_mode:
     email_opt = ""
@@ -1632,7 +1635,7 @@ if email_only_mode:
         h_eff = int(mh_val or 1080)
         mb_1080 = max(1, round((s * ((2200 if h_eff >= 1080 else 1150) + 128)) / 8192))
         mb_720 = max(1, round((s * (1150 + 128)) / 8192))
-        return f"~{mb_1080}MB (1080p) / ~{mb_720}MB (720p)"
+        return f"1080p: ~{mb_1080}MB | 720p: ~{mb_720}MB"
 
     target_title = " • ".join(p for p in [resolved_ch or channel_input, query] if p) or "חיפוש יוטיוב"
     subj = f"YouTube Cloud Ultra | 🔎 {len(pool)} תוצאות חיפוש: {target_title[:68]}"
@@ -1646,6 +1649,8 @@ if email_only_mode:
     html_cards = []
     cid_images = []
 
+    pill_base = "display:inline-block;white-space:nowrap;background:#e2e8f0;color:#0f172a;padding:2px 8px;border-radius:6px;margin:2px 0 2px 6px;font-size:12px;font-weight:600;"
+
     for idx_i, it in enumerate(pool, 1):
         vid = str(it.get("id") or "").strip()
         url_v = str(it.get("url") or f"https://www.youtube.com/watch?v={vid}").strip()
@@ -1657,69 +1662,83 @@ if email_only_mode:
         dt_s = str(it.get("date_formatted") or it.get("published_rel") or "").strip()
         sz_s = _est_mb_he(it.get("duration"), it.get("max_height"))
         ai_sc = it.get("ai_score")
+        ai_rs = str(it.get("ai_reason") or "").strip()
         sub_langs = it.get("sub_langs") or []
         sub_badge = ("📝 כתוביות: " + ", ".join(sub_langs[:4])) if sub_langs else ("📝 כתוביות זמינות" if it.get("has_subs") else "")
-        desc_s = str(it.get("description") or "").strip()[:220]
+        desc_s = re.sub(r"\s+", " ", str(it.get("short_desc") or it.get("description") or "")).strip()[:190]
 
         plain_lines.append(
             f"#{idx_i}. {t_he}\n"
             + (f"   כותרת מקורית: {t_orig}\n" if (t_orig and t_orig != t_he) else "")
             + f"   ערוץ: {ch_name} | משך: {dur_s} | צפיות: {views_n} | תאריך: {dt_s}\n"
             + (f"   נפח משוער: {sz_s}\n" if sz_s else "")
+            + (f"   ציון AI: {ai_sc}/10" + (f" ({ai_rs})" if ai_rs else "") + "\n" if ai_sc is not None else "")
             + f"   >>> מזהה להדבקה בתוסף (11 תווים): {vid} <<<\n"
             + f"   קישור: {url_v}\n"
         )
 
         thumb_html = ""
-        tb64 = str(it.get("thumb_b64") or "")
-        if (not no_thumbs) and idx_i <= 25 and tb64.startswith("data:image/"):
+        tb64 = str(it.get("thumbnail") or it.get("thumb_b64") or "")
+        if (not no_thumbs) and idx_i <= 35 and tb64.startswith("data:image/"):
             try:
-                header_p, b64_p = tb64.split(",", 1)
-                sub_t = "webp" if "webp" in header_p else "jpeg"
+                _, b64_p = tb64.split(",", 1)
+                raw_img = base64.b64decode(b64_p)
+                im_obj = Image.open(io.BytesIO(raw_img)).convert("RGB")
+                j_buf = io.BytesIO()
+                im_obj.save(j_buf, format="JPEG", quality=78, optimize=True)
                 cid_name = f"thumb_{idx_i}_{req_id[:6]}"
-                cid_images.append((cid_name, base64.b64decode(b64_p), sub_t))
+                cid_images.append((cid_name, j_buf.getvalue(), "jpeg"))
                 thumb_html = (
-                    f'<td style="width:148px;vertical-align:top;padding-left:12px;">'
+                    f'<td style="width:152px;vertical-align:top;padding-left:12px;">'
                     f'<img src="cid:{cid_name}" width="144" height="81" alt="thumb" '
-                    f'style="display:block;width:144px;height:81px;object-fit:cover;border-radius:8px;border:1px solid #334155;"/>'
+                    f'style="display:block;width:144px;height:81px;object-fit:cover;border-radius:8px;border:1px solid #94a3b8;"/>'
                     f'</td>'
                 )
             except Exception:
                 thumb_html = ""
 
-        meta_pills = [
-            f"📺 {_html_mod.escape(ch_name)}" if ch_name else "",
-            f"⏱️ {_html_mod.escape(dur_s)}" if dur_s else "",
-            f"👁️ {views_n} צפיות",
-            f"📅 {_html_mod.escape(dt_s)}" if dt_s else "",
-            f"💾 {_html_mod.escape(sz_s)}" if sz_s else "",
-            f"🤖 ציון AI: {ai_sc}/100" if ai_sc is not None else "",
-            _html_mod.escape(sub_badge) if sub_badge else "",
-        ]
-        meta_html = " &nbsp;•&nbsp; ".join(p for p in meta_pills if p)
+        pills_html = []
+        if ch_name:
+            pills_html.append(f'<span dir="rtl" style="{pill_base}">📺 <bdi>{_html_mod.escape(ch_name)}</bdi></span>')
+        if dur_s:
+            pills_html.append(f'<span dir="rtl" style="{pill_base}">⏱️ <span dir="ltr">{_html_mod.escape(dur_s)}</span></span>')
+        pills_html.append(f'<span dir="rtl" style="{pill_base}">👁️ <span dir="ltr">{views_n}</span> צפיות</span>')
+        if dt_s:
+            pills_html.append(f'<span dir="rtl" style="{pill_base}">📅 <span dir="ltr">{_html_mod.escape(dt_s)}</span></span>')
+        if sz_s:
+            pills_html.append(f'<span dir="rtl" style="{pill_base}">💾 <span dir="ltr">{_html_mod.escape(sz_s)}</span></span>')
+        if sub_badge:
+            pills_html.append(f'<span dir="rtl" style="{pill_base}background:#dcfce7;color:#166534;">{_html_mod.escape(sub_badge)}</span>')
+        if ai_sc is not None:
+            rs_txt = f" — {_html_mod.escape(ai_rs)}" if ai_rs else ""
+            pills_html.append(
+                f'<span dir="rtl" style="{pill_base}background:#dbeafe;color:#1e40af;">'
+                f'🤖 ציון AI: <span dir="ltr">{ai_sc}/10</span>{rs_txt}</span>'
+            )
+
         orig_html = (
-            f'<div style="font-size:12px;color:#94a3b8;margin-top:2px;" dir="auto">{_html_mod.escape(t_orig)}</div>'
+            f'<div style="font-size:12.5px;color:#475569;margin-top:3px;font-weight:500;" dir="auto">🔤 מקור: {_html_mod.escape(t_orig)}</div>'
             if (t_orig and t_orig != t_he) else ""
         )
         desc_html = (
-            f'<div style="font-size:12px;color:#cbd5e1;margin-top:5px;" dir="auto">{_html_mod.escape(desc_s)}</div>'
+            f'<div style="font-size:12px;color:#334155;margin-top:5px;line-height:1.4;" dir="auto">{_html_mod.escape(desc_s)}</div>'
             if desc_s else ""
         )
 
         html_cards.append(
-            f'<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:12px;margin-bottom:10px;">'
+            f'<div style="background:#ffffff;border:1px solid #cbd5e1;border-radius:10px;padding:12px;margin-bottom:10px;">'
             f'<table role="presentation" style="width:100%;border-collapse:collapse;" dir="rtl"><tr>'
             f'{thumb_html}'
             f'<td style="vertical-align:top;">'
-            f'<div style="font-size:15px;font-weight:700;color:#f8fafc;line-height:1.35;">'
-            f'<span style="color:#38bdf8;">#{idx_i}</span> {_html_mod.escape(t_he)}</div>'
+            f'<div style="font-size:15.5px;font-weight:700;color:#0f172a;line-height:1.35;">'
+            f'<span style="color:#0284c7;">#{idx_i}</span> {_html_mod.escape(t_he)}</div>'
             f'{orig_html}'
-            f'<div style="font-size:12px;color:#93c5fd;margin-top:6px;line-height:1.5;">{meta_html}</div>'
+            f'<div style="margin-top:6px;line-height:1.8;">{"".join(pills_html)}</div>'
             f'{desc_html}'
-            f'<div style="margin-top:8px;padding:7px 10px;background:#0f172a;border:1px dashed #38bdf8;border-radius:7px;font-size:12.5px;color:#e2e8f0;">'
+            f'<div style="margin-top:8px;padding:7px 10px;background:#ecfdf5;border:1px dashed #10b981;border-radius:7px;font-size:12.5px;color:#065f46;">'
             f'🔑 <b>מזהה להדבקה בתוסף (ל-Drive):</b> '
-            f'<code dir="ltr" style="font-family:Consolas,monospace;font-size:14px;font-weight:700;color:#4ade80;background:#1e293b;padding:2px 8px;border-radius:4px;user-select:all;">{_html_mod.escape(vid)}</code>'
-            f' &nbsp;|&nbsp; <span dir="ltr" style="font-family:Consolas,monospace;font-size:11.5px;color:#94a3b8;user-select:all;">{_html_mod.escape(url_v)}</span>'
+            f'<code dir="ltr" style="font-family:Consolas,monospace;font-size:14.5px;font-weight:800;color:#047857;background:#d1fae5;padding:2px 9px;border-radius:4px;user-select:all;">{_html_mod.escape(vid)}</code>'
+            f' &nbsp;|&nbsp; <span dir="ltr" style="font-family:Consolas,monospace;font-size:11.5px;color:#475569;user-select:all;">{_html_mod.escape(url_v)}</span>'
             f'</div>'
             f'</td></tr></table></div>'
         )
@@ -1732,35 +1751,64 @@ if email_only_mode:
         plain_lines.append(f"\nהעתקה מהירה — 10 מזהים ראשונים:\n{top10_ids}")
 
     strategy_box = (
-        f'<div style="background:#172554;border:1px solid #1d4ed8;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12.5px;color:#dbeafe;">'
+        f'<div style="background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#1e3a8a;">'
         f'🤖 <b>אסטרטגיית AI ({_html_mod.escape(ai_status or "פעיל")}):</b> {_html_mod.escape(ai_strategy_he)}'
         f'</div>'
     ) if ai_strategy_he else ""
 
+    suggest_box = (
+        f'<div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:11px 12px;margin-top:12px;font-size:12.5px;color:#78350f;">'
+        f'<div style="font-weight:700;margin-bottom:6px;">💡 חיפושים מומלצים להמשך (העתק לחיפוש הבא בתוסף):</div>'
+        + "".join(
+            f'<span dir="rtl" style="display:inline-block;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;padding:2px 9px;border-radius:999px;margin:2px 0 2px 6px;font-weight:600;">{_html_mod.escape(sg)}</span>'
+            for sg in suggested_searches[:12]
+        )
+        + '</div>'
+    ) if suggested_searches else ""
+
+    q_rows_html = "".join(
+        f'<tr>'
+        f'<td style="padding:4px 8px;border-bottom:1px solid #e2e8f0;font-weight:600;color:#0f172a;" dir="auto">{_html_mod.escape(str(qs_it.get("q") or ""))}</td>'
+        f'<td style="padding:4px 8px;border-bottom:1px solid #e2e8f0;color:#475569;">{_html_mod.escape(str(qs_it.get("note_he") or ""))}</td>'
+        f'<td style="padding:4px 8px;border-bottom:1px solid #e2e8f0;text-align:center;color:#0369a1;font-weight:700;" dir="ltr">{qs_it.get("passed_ai", 0)}/{qs_it.get("sent_to_ai", 0)} (מתוך {qs_it.get("hits", 0)})</td>'
+        f'</tr>'
+        for qs_it in query_stats
+    )
+    trace_box = (
+        f'<div style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;padding:12px;margin-top:12px;font-size:12px;color:#1e293b;">'
+        f'<div style="font-weight:700;color:#0f172a;margin-bottom:6px;">📊 דוח שאילתות רב-לשוני וסינון AI (סה"כ נסרקו {len(raw)} -> {len(cands)} ייחודיים -> {len(pool)} נבחרו):</div>'
+        f'<table style="width:100%;border-collapse:collapse;font-size:12px;" dir="rtl">'
+        f'<thead><tr style="background:#e2e8f0;color:#0f172a;">'
+        f'<th style="padding:5px 8px;text-align:right;">שאילתה שנשלחה</th>'
+        f'<th style="padding:5px 8px;text-align:right;">מטרה</th>'
+        f'<th style="padding:5px 8px;text-align:center;">עברו AI</th>'
+        f'</tr></thead><tbody>{q_rows_html}</tbody></table></div>'
+    ) if query_stats else ""
+
     batch_box = (
-        f'<div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px;margin-top:14px;font-size:12.5px;color:#e2e8f0;">'
-        f'<div style="font-weight:700;color:#38bdf8;margin-bottom:6px;">📦 העתקה קבוצתית מהירה (הדבק בשדה הקישור בתוסף להעלאת מספר סרטונים ל-Drive):</div>'
-        f'<div style="margin-bottom:6px;"><b>5 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;color:#4ade80;background:#1e293b;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top5_ids)}</code></div>'
-        + (f'<div><b>10 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;color:#4ade80;background:#1e293b;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top10_ids)}</code></div>' if len(pool) > 5 else "")
+        f'<div style="background:#f8fafc;border:1px solid #94a3b8;border-radius:10px;padding:12px;margin-top:14px;font-size:12.5px;color:#0f172a;">'
+        f'<div style="font-weight:700;color:#0284c7;margin-bottom:6px;">📦 העתקה קבוצתית מהירה (הדבק בשדה הקישור בתוסף להעלאת מספר סרטונים ל-Drive):</div>'
+        f'<div style="margin-bottom:6px;"><b>5 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;font-weight:700;color:#047857;background:#d1fae5;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top5_ids)}</code></div>'
+        + (f'<div><b>10 ראשונים:</b> <code dir="ltr" style="font-family:Consolas,monospace;font-weight:700;color:#047857;background:#d1fae5;padding:3px 7px;border-radius:4px;user-select:all;">{_html_mod.escape(top10_ids)}</code></div>' if len(pool) > 5 else "")
         + '</div>'
     ) if top5_ids else ""
 
     html_body = (
         '<!doctype html><html lang="he" dir="rtl"><head><meta charset="UTF-8"/></head>'
-        '<body style="margin:0;padding:16px;background:#0b1120;color:#f8fafc;font-family:Segoe UI,Arial,sans-serif;" dir="rtl">'
+        '<body style="margin:0;padding:14px;background:#f1f5f9;color:#0f172a;font-family:Segoe UI,Arial,sans-serif;" dir="rtl">'
         '<div style="max-width:780px;margin:0 auto;">'
-        '<div style="background:linear-gradient(135deg,#0284c7,#1e3a8a);border-radius:12px;padding:14px 18px;margin-bottom:12px;">'
-        f'<h2 style="margin:0;font-size:18px;color:#ffffff;">📧 YouTube Cloud Ultra — תוצאות חיפוש למייל ({len(pool)} תוצאות)</h2>'
-        f'<div style="font-size:13px;color:#e0f2fe;margin-top:4px;">חיפוש: <b>{_html_mod.escape(target_title)}</b>'
-        + (f' &nbsp;|&nbsp; תרגום שאילתה: <b>{_html_mod.escape(en_query)}</b>' if en_query else '')
+        '<div style="background:#e0f2fe;border:2px solid #0284c7;border-radius:12px;padding:14px 18px;margin-bottom:12px;">'
+        f'<h2 style="margin:0;font-size:18px;color:#0c4a6e;">📧 YouTube Cloud Ultra — תוצאות חיפוש למייל ({len(pool)} תוצאות)</h2>'
+        f'<div style="font-size:13.5px;color:#075985;margin-top:4px;">חיפוש: <b>{_html_mod.escape(target_title)}</b>'
+        + (f' &nbsp;|&nbsp; תרגום שאילתה: <b dir="ltr">{_html_mod.escape(en_query)}</b>' if en_query else '')
         + '</div></div>'
-        '<div style="background:#064e3b;border:1px solid #059669;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#d1fae5;">'
-        '☁️ <b>איך להעלות ל-Google Drive בשעות חסימה:</b> העתק את ה<b>מזהה בן 11 התווים</b> (בצבע ירוק) של הסרטון הרצוי, '
+        '<div style="background:#ecfdf5;border:1px solid #059669;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#065f46;">'
+        '☁️ <b>איך להעלות ל-Google Drive בשעות חסימה:</b> העתק את ה<b>מזהה בן 11 התווים</b> (בתיבה הירוקה) של הסרטון הרצוי, '
         'פתח את התוסף בלשונית <b>"📥 הורדה ו-Google Drive"</b> (שכבר מוגדרת על Drive + ענן בלבד 0MB), הדבק ולחץ על הורדה!'
         '</div>'
         f'{strategy_box}'
-        + ("".join(html_cards) if html_cards else '<div style="padding:18px;background:#1e293b;border-radius:10px;text-align:center;">לא נמצאו תוצאות שעברו את תנאי הסינון.</div>')
-        + f'{batch_box}'
+        + ("".join(html_cards) if html_cards else '<div style="padding:18px;background:#ffffff;border:1px solid #cbd5e1;border-radius:10px;text-align:center;">לא נמצאו תוצאות שעברו את תנאי הסינון.</div>')
+        + f'{batch_box}{suggest_box}{trace_box}'
         '</div></body></html>'
     )
 
@@ -1771,7 +1819,7 @@ if email_only_mode:
     if cid_images:
         html_part = msg.get_payload()[-1]
         for cid_name, img_bytes, sub_t in cid_images:
-            html_part.add_related(img_bytes, maintype="image", subtype=sub_t, cid=f"<{cid_name}>", filename=f"{cid_name}.{sub_t}")
+            html_part.add_related(img_bytes, maintype="image", subtype=sub_t, cid=f"<{cid_name}>", filename=f"{cid_name}.jpg")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=90) as srv:
         srv.login(smtp_user, smtp_pass)
